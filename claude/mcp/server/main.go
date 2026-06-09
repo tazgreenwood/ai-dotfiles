@@ -130,6 +130,8 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryWritePlan(args)
 	case "registry_write_audit":
 		return registryWriteAudit(args)
+	case "registry_get_audit":
+		return registryGetAudit(args)
 	// Bitbucket
 	case "bitbucket_list_prs":
 		return bbListPRs(args)
