@@ -6,13 +6,20 @@ Check ECS service health and CloudWatch logs after a deploy. Works for any app i
 
 ## APP REGISTRY
 
-Known apps — skip discovery steps entirely for these:
+Before resolving config, call the registry MCP to look up the app:
 
-| App | Profile | Cluster | Log Group |
-|-----|---------|---------|-----------|
-| `emily` | `martech` | `general-production` | `emily-production` |
+```
+registry_get_project(app)
+```
 
-If app is in registry: skip Step 2a (list-services grep) and Step 3a (describe-log-groups). Use registry values directly.
+If the project is found, use the returned fields directly:
+- `deploy.profile` → AWS profile
+- `deploy.cluster` → ECS cluster name
+- `deploy.logGroup` → CloudWatch log group name
+
+If the project is not found (404 or error), fall back to the defaults in STEP 1.
+
+If app config is found in registry: skip Step 2a (list-services grep) and Step 3a (describe-log-groups). Use registry values directly.
 
 ---
 
@@ -40,8 +47,13 @@ If no app name provided and none can be inferred from the current working direct
 
 ## STEP 1: RESOLVE CONFIG
 
-Set variables from registry (if known app) or defaults:
-- `APP`, `PROFILE`, `ENV`, `CLUSTER`, `LOG_GROUP`, `MINUTES`
+Call `registry_get_project(APP)` to look up deploy config. Set variables:
+- `APP` — from args
+- `PROFILE` — `deploy.profile` from registry, or `martech`
+- `ENV` — from args, or `production`
+- `CLUSTER` — `deploy.cluster` from registry, or `general-{env}`
+- `LOG_GROUP` — `deploy.logGroup` from registry, or `{app}-{env}`
+- `MINUTES` — from args, or `15`
 
 Compute timestamps:
 ```bash

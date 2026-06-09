@@ -157,7 +157,11 @@ Ask the user to approve or request changes. Iterate until they explicitly approv
 
 ## STEP 8: WRITE MISSION STATE
 
-When the user approves, write the mission state file to `~/.claude/dps-[TICKET].json` (use `NO-TICKET` if no ticket):
+When the user approves, persist the plan via registry MCP:
+
+1. Detect project name: parse from `git remote get-url origin` (e.g. `tazgreenwood/private-dotfiles` → `private-dotfiles`), or read the `## Project` field from `CLAUDE.md` if present.
+2. Call `registry_write_plan(project_name, ticket, plan_data)` where `plan_data` is the full mission state object below.
+3. Also write a local copy to `~/.claude/dps-[TICKET].json` as a fallback cache (use `NO-TICKET` if no ticket).
 
 ```json
 {
@@ -221,7 +225,7 @@ When the user approves, write the mission state file to `~/.claude/dps-[TICKET].
 Tell the user:
 
 ```
-Plan written. Mission state saved to ~/.claude/dps-[TICKET].json
+Plan written. Mission state saved to registry ([project]/[TICKET]) and ~/.claude/dps-[TICKET].json
 
 Next: open a new chat and run /dps-build to execute the plan.
 The build will run automatically and Slack you when done.

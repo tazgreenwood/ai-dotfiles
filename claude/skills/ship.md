@@ -80,7 +80,26 @@ After @handover completes, update mission state with `pr_id` and `pr_url`.
 
 ---
 
-## STEP 6: TRANSITION JIRA
+## STEP 6: WRITE AUDIT TRAIL
+
+After @handover completes, call:
+```
+registry_write_audit(project_name, {
+  action: "pr_created",
+  ticket: ticket_key,
+  actor: git_user,
+  pr_url: pr_url,
+  timestamp: ISO8601_timestamp,
+  details: "PR created from branch [branch] → [base_branch]"
+})
+```
+
+Detect `project_name` the same way as `/dps-plan`: parse from `git remote get-url origin`.
+If registry MCP unavailable, skip silently — do not block the ship.
+
+---
+
+## STEP 7: TRANSITION JIRA
 
 After @handover completes, transition the JIRA ticket from In Progress to Review.
 
@@ -94,7 +113,7 @@ If Atlassian MCP is unavailable, print: "JIRA transition skipped — MCP not con
 
 ---
 
-## STEP 7: CONFIRM
+## STEP 8: CONFIRM
 
 Output:
 ```
