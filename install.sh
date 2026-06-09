@@ -26,19 +26,32 @@ for agent_file in "$DOTFILES/claude/agents"/*.md; do
 done
 
 # ── Registry MCP Server ────────────────────────────────────────────────────────
-if [ -f "$DOTFILES/claude/mcp/server/index.js" ]; then
-  echo "Configuring registry MCP server..."
-  # Patch settings.json mcpServers block (requires jq)
-  SETTINGS="$CLAUDE_DIR/settings.json"
-  if [ -f "$SETTINGS" ] && command -v jq &>/dev/null; then
-    tmp=$(mktemp)
-    jq --arg path "$DOTFILES/claude/mcp/server/index.js" \
-      '.mcpServers.registry = {"command": "node", "args": [$path]}' \
-      "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
-    echo "  ✓ registry MCP wired to settings.json"
+SERVER_DIR="$DOTFILES/claude/mcp/server"
+BINARY="$SERVER_DIR/clearlink-registry"
+
+if [ -f "$SERVER_DIR/main.go" ]; then
+  echo "Building registry MCP server..."
+  if command -v go &>/dev/null; then
+    (cd "$SERVER_DIR" && go build -o clearlink-registry .) && echo "  ✓ built $BINARY"
   else
-    echo "  ⚠ Add manually to ~/.claude/settings.json:"
-    echo '    "mcpServers": { "registry": { "command": "node", "args": ["'"$DOTFILES/claude/mcp/server/index.js"'"] } }'
+    echo "  ⚠ Go not found — install Go then re-run install.sh"
+  fi
+fi
+
+if [ -f "$BINARY" ]; then
+  if claude mcp list 2>/dev/null | grep -q "clearlink-registry"; then
+    echo "  ✓ clearlink-registry already registered"
+  else
+    echo "  Registering clearlink-registry MCP server (user scope)..."
+    echo "  Enter BITBUCKET_USERNAME (e.g. taz.greenwood@clearlink.com):"
+    read -r BB_USER
+    echo "  Enter BITBUCKET_APP_PASSWORD:"
+    read -rs BB_PASS
+    claude mcp add --scope user clearlink-registry "$BINARY" \
+      -e BITBUCKET_USERNAME="$BB_USER" \
+      -e BITBUCKET_APP_PASSWORD="$BB_PASS" \
+      -e BITBUCKET_WORKSPACE="clearlinkit"
+    echo "  ✓ clearlink-registry registered"
   fi
 fi
 

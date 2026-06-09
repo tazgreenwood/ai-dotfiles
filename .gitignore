@@ -1,3 +1,4 @@
 claude/mcp/data/
+claude/mcp/server/clearlink-registry
 .DS_Store
 *.local
