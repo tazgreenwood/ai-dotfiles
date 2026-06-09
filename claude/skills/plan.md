@@ -42,8 +42,12 @@ If either `## Architecture` or `## Tech Stack` in CLAUDE.md is missing or has no
 - Transition ticket to In Progress (if currently To Do)
 
 **If no ticket provided:**
+- Detect project name from `git remote get-url origin` (same logic as Step 8)
+- Call `registry_get_project(project_name)` and read the `ticket_counter` field; default to `0` if null or missing
+- Increment counter by 1; call this value `N`. Format key as `{PROJECT_UPPERCASE}-{N}` (e.g. `DOTFILES-3`)
+- Call `registry_set(project_name, 'ticket_counter', N)` to persist the new counter value
+- Use this generated key as the ticket key for all subsequent steps (branch name, plan JSON key, registry storage)
 - Ask the user to describe the task
-- Offer: "Would you like to create a JIRA ticket first with `/ticket`?"
 
 ---
 
@@ -161,7 +165,7 @@ When the user approves, persist the plan via registry MCP:
 
 1. Detect project name: parse from `git remote get-url origin` (e.g. `tazgreenwood/private-dotfiles` → `private-dotfiles`), or read the `## Project` field from `CLAUDE.md` if present.
 2. Call `registry_write_plan(project_name, ticket, plan_data)` where `plan_data` is the full mission state object below.
-3. Also write a local copy to `~/.claude/plan-[TICKET].json` as a fallback cache (use `NO-TICKET` if no ticket).
+3. Also write a local copy to `~/.claude/plan-[TICKET].json` as a fallback cache (no-ticket plans use the auto-generated key, e.g. `DOTFILES-3`).
 
 ```json
 {
@@ -208,7 +212,7 @@ When the user approves, persist the plan via registry MCP:
 }
 ```
 
-**Branch name**: derive from issue type and ticket key:
+**Branch name**: derive from issue type and ticket key. This applies to both real JIRA keys (e.g. `ONE-XXXX`) and auto-generated fake ticket keys (e.g. `DOTFILES-3`) — the convention is identical:
 - Story / Task / Feature → `feat/ONE-XXXX-short-desc`
 - Bug / Defect → `fix/ONE-XXXX-short-desc`
 - Research → `research/ONE-XXXX-short-desc`
