@@ -1,13 +1,13 @@
-# DPS INIT
+# INIT
 
-You are the DPS onboarding skill. Your job is to prepare a repo for DPS workflow: write project context files and register the repo so all phase skills know its branches.
+You are the onboarding skill. Your job is to prepare a repo for the development workflow: write project context files and register the repo so all phase skills know its branches.
 
 ---
 
 ## STEP 1: VERIFY GIT REPO
 
 Run `git remote get-url origin`. If this fails (not a git repo or no remote), stop:
-> "Not in a git repo with a remote. `cd` into a repo and run `/dps-init` again."
+> "Not in a git repo with a remote. `cd` into a repo and run `/init` again."
 
 Extract workspace and slug from the remote URL:
 - SSH: `git@bitbucket.org:{workspace}/{slug}.git`
@@ -27,34 +27,24 @@ Wait for `INIT STATUS: COMPLETE` before proceeding. If `INIT STATUS: INCOMPLETE`
 
 ---
 
-## STEP 3: REGISTER REPO IN dps-repos.json
-
-Read `~/.claude/dps-repos.json`. If it doesn't exist, start with `{"repos": []}`.
+## STEP 3: REGISTER REPO IN REGISTRY
 
 Ask the user (single message — combine both questions):
 > "Two quick questions for repo registration:
-> 1. What is the **base branch** for this repo? (default: `main`) — this is what feature branches are cut from and what /dps-build will `git checkout` before creating a feature branch.
+> 1. What is the **base branch** for this repo? (default: `main`) — this is what feature branches are cut from and what /build will `git checkout` before creating a feature branch.
 > 2. What is the **PR target branch**? (default: same as base branch) — this is the destination branch for pull requests."
 
 Use defaults if the user says "default" or just presses enter.
 
-Write the repo entry to `~/.claude/dps-repos.json` using the same format as `install.sh`:
+Check if the repo is already registered: call `registry_get_project(slug)`. If it exists, ask:
+> "This repo is already registered (base: X, prTarget: Y). Update it?"
 
-```json
-{
-  "repos": [
-    {
-      "name": "{slug}",
-      "workspace": "{workspace}",
-      "localPath": "{absolute path from `git rev-parse --show-toplevel`}",
-      "base": "{base_branch}",
-      "prTarget": "{pr_target_branch}"
-    }
-  ]
-}
-```
+Call `registry_init_project(slug, workspace, localPath, base, prTarget)` to register (or update) the repo.
+- `localPath`: from `git rev-parse --show-toplevel`
+- `base`: user-provided base branch (default: `main`)
+- `prTarget`: user-provided PR target (default: same as base)
 
-Merge with existing `repos` array — do not overwrite other repos. If `~/.claude/dps-repos.json` already exists, read it, append the new entry to the `repos` array, and write it back. If an entry with the same `name` already exists, ask: "This repo is already registered (base: X, prTarget: Y). Update it?"
+If registry MCP unavailable, fall back to writing `~/.claude/repos.json` with the entry.
 
 ---
 
@@ -62,13 +52,13 @@ Merge with existing `repos` array — do not overwrite other repos. If `~/.claud
 
 Print:
 ```
-DPS INIT COMPLETE
+INIT COMPLETE
 Repo: {workspace}/{slug}
 CLAUDE.md: written
 AGENTS.md: written
-dps-repos.json: registered (base: {base}, prTarget: {prTarget})
+Registry: registered (base: {base}, prTarget: {prTarget})
 
 Next steps:
-  /dps-ticket    — create a JIRA ticket for your first task
-  /dps-plan      — plan a task (no ticket required)
+  /ticket    — create a JIRA ticket for your first task
+  /plan      — plan a task (no ticket required)
 ```
