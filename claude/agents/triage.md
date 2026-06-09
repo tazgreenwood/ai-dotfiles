@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Intake agent for unstructured bug reports and feature requests. Gathers all required information interactively, classifies severity and priority, and creates a fully-fielded JIRA ticket. Invoked by the /dps orchestrator for "log a ticket" requests or by users directly.
+description: Intake agent for unstructured bug reports and feature requests. Gathers all required information interactively, classifies severity and priority, and creates a fully-fielded JIRA ticket. Invoked by users directly or via the development workflow.
 tools: mcp__atlassian__jira_create_issue, mcp__atlassian__jira_search_issues
 model: claude-haiku-4-5-20251001
 ---

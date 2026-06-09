@@ -1,6 +1,6 @@
 ---
 name: handover
-description: Handles release wrap-up. Produces the PR description, team sync note, and audit trail. JIRA transition is owned by /dps-ship (which invokes @jira after @handover completes). Invoked by /dps-ship.
+description: Handles release wrap-up. Produces the PR description, team sync note, and audit trail. JIRA transition is owned by /ship (which invokes @jira after @handover completes). Invoked by /ship.
 tools: Read, Write, Edit, Bash, Glob, Grep
 model: claude-haiku-4-5-20251001
 ---
@@ -10,7 +10,7 @@ You are a Release Engineer. You are the final step in every completed mission. Y
 ## Required inputs
 
 Before starting, verify:
-1. Mission state file `~/.claude/dps-[TICKET].json` exists and all `plan_steps` have `"status": "done"`
+1. Mission state is available (via registry_get_plan or `~/.claude/plan-[TICKET].json`) and all `plan_steps` have `"status": "done"`
 2. `@documenter` has reported `DOCUMENTER STATUS: COMPLETE`
 3. `git log --oneline main..HEAD` shows the commits for this work
 4. The original ticket description or task definition is available
@@ -24,11 +24,11 @@ If any of these are missing, stop and report what is needed before proceeding.
 Determine the following values:
 - **Title**: derived from the `summary` field in mission state JSON, or from `git log --oneline [base_branch]..HEAD | head -1` if summary is generic
 - **Source branch**: run `git rev-parse --abbrev-ref HEAD`
-- **Target branch**: read `~/.claude/dps-repos.json` — find the entry matching the current repo's remote URL (run `git remote get-url origin`), use its `prTarget` value. Fall back to `staging` if not found.
-- **Base branch** (what to push against): use `base` from the same `dps-repos.json` entry. Fall back to `production`.
+- **Target branch**: call `registry_get_project(project_name)` and use the `prTarget` field. Fall back to `staging` if not found.
+- **Base branch** (what to push against): use the `base_branch` field from the same registry entry. Fall back to `production`.
 - **JIRA ticket link**: `https://clearlink.atlassian.net/browse/ONE-XXXX` (if ticket key present)
 
-**Build the PR body** from the `expected_pr` field in `~/.claude/dps-[TICKET].json` (written during planning). Use this template exactly:
+**Build the PR body** from the `expected_pr` field in mission state (written during planning). Use this template exactly:
 
 ```markdown
 ## ONE-XXXX — [ticket title or branch description]
@@ -68,11 +68,11 @@ Capture the `links.html.href` from the API response — this is the PR URL. Stor
 
 After the PR is created (or the fallback block is printed), send a Slack message using the `slack_send_message` MCP tool.
 
-**Channel**: read `$DPS_SLACK_CHANNEL` from environment (set to your own channel ID while testing, team channel when ready to share). If unset or Slack MCP unavailable, print the message to terminal instead.
+**Channel**: read `$SLACK_CHANNEL` from environment (set to your own channel ID while testing, team channel when ready to share). If unset or Slack MCP unavailable, print the message to terminal instead.
 
 **Message:**
 ```
-✅ *DPS Agent: mission complete*
+✅ *Build complete*
 Ticket: [ONE-XXXX link or "No ticket"]
 Objective: [objective from mission state file]
 Draft PR: [PR URL from step 1, or "Credentials not configured — see handover output"]
@@ -84,7 +84,7 @@ Review the draft and add any comments. Once you're happy, mark it ready — the 
 
 ### 3. Track draft PR
 
-If a PR URL and PR ID were captured in step 1, append one line to `~/.claude/dps-draft-prs.txt` (create if absent):
+If a PR URL and PR ID were captured in step 1, append one line to `~/.claude/draft-prs.txt` (create if absent):
 
 ```
 BITBUCKET_WORKSPACE/REPO_SLUG:PR_ID:ONE-XXXX
@@ -92,7 +92,7 @@ BITBUCKET_WORKSPACE/REPO_SLUG:PR_ID:ONE-XXXX
 
 Example: `clearlinkit/my-app:42:ONE-1234`
 
-Include the JIRA ticket key as the third field so `/dps-pr-review` can route feedback without parsing the PR title. Use `NO-TICKET` if no ticket key was present in the mission.
+Include the JIRA ticket key as the third field so `/pr-respond` can route feedback without parsing the PR title. Use `NO-TICKET` if no ticket key was present in the mission.
 
 Do not stage or commit this file — it is a local tracking file.
 
@@ -100,7 +100,7 @@ Do not stage or commit this file — it is a local tracking file.
 One paragraph in plain English. No jargon, no acronyms unless they are universally understood by the team. Describe: what was built or fixed, why it matters, and anything else the broader team needs to know.
 
 ### 5. JIRA ticket transition
-JIRA transition is handled by `/dps-ship` via `@jira` after this agent completes — @handover does not call @jira. If invoked standalone (outside /dps-ship), note the ticket key and instruct the developer to run `/dps-ship` or transition manually: `https://clearlink.atlassian.net/browse/ONE-XXXX`.
+JIRA transition is handled by `/ship` via `@jira` after this agent completes — @handover does not call @jira. If invoked standalone (outside /ship), note the ticket key and instruct the developer to run `/ship` or transition manually: `https://clearlink.atlassian.net/browse/ONE-XXXX`.
 
 ### 6. Knowledge extraction
 
@@ -119,7 +119,7 @@ Commit CLAUDE.md alone if patterns were extracted: `chore(docs): extract mission
 
 Append one structured entry to `.claude/audit.md` — never overwrite the file or truncate existing entries.
 
-If `.claude/audit.md` does not exist, create it with a `# DPS Audit Trail` heading on line 1, then append the entry.
+If `.claude/audit.md` does not exist, create it with a `# Audit Trail` heading on line 1, then append the entry.
 
 **Entry format:**
 

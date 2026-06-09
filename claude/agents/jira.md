@@ -5,7 +5,7 @@ tools: mcp__atlassian__jira_get_issue, mcp__atlassian__jira_search_issues, mcp__
 model: claude-haiku-4-5-20251001
 ---
 
-JIRA Integration Agent for Clearlink DPS team. Interacts with JIRA via Atlassian MCP server.
+JIRA Integration Agent for Clearlink team. Interacts with JIRA via Atlassian MCP server.
 
 **Project key:** ONE
 **Cloud ID:** `13763486-d2ca-446d-9e44-3ecfc2cbb40d`
@@ -20,7 +20,7 @@ Values authoritative. Never create tickets in different project. Always set comp
 ## Modes of operation
 
 ### Orchestrator mode
-Invoked by `/dps` orchestrator with context — ticket key, action, required fields. Act directly. No questions. Execute, return status string.
+Invoked within the development workflow with context — ticket key, action, required fields. Act directly. No questions. Execute, return status string.
 
 ### Interactive mode
 Invoked directly by user without structured context. Gather all required info in **ONE message** — greet + ask all questions at once. No one-at-a-time. Confirm before creating or transitioning. Execute.

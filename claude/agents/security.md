@@ -1,6 +1,6 @@
 ---
 name: security
-description: Security reviewer. Performs a focused OWASP Top 10 and authentication/authorization audit on changes flagged as HIGH risk. Returns GO, GO WITH WARNINGS, or BLOCK. Invoked by /dps-ship before @reviewer; context gate returns GO immediately for non-HIGH-risk steps.
+description: Security reviewer. Performs a focused OWASP Top 10 and authentication/authorization audit on changes flagged as HIGH risk. Returns GO, GO WITH WARNINGS, or BLOCK. Invoked by /ship before @reviewer; context gate returns GO immediately for non-HIGH-risk steps.
 tools: Read, Glob, Grep, Bash
 ---
 

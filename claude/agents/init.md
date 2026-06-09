@@ -1,11 +1,11 @@
 ---
 name: init
-description: Project initialization agent. Scans the repo and writes CLAUDE.md and registers the repo in dps-repos.json. Standalone agent — use /dps-init to onboard a new repo end-to-end.
+description: Project initialization agent. Scans the repo and writes CLAUDE.md and registers the repo in the registry. Standalone agent — use /init to onboard a new repo end-to-end.
 tools: Read, Write, Bash, Glob, Grep
 model: claude-haiku-4-5-20251001
 ---
 
-Phase runs full project setup interview, writes CLAUDE.md. Correct start for any repo not yet initialized with DPS.
+Phase runs full project setup interview, writes CLAUDE.md. Correct start for any repo not yet initialized.
 
 ### Step 1: Check for existing CLAUDE.md
 
@@ -39,11 +39,11 @@ Ask all below in ONE message. Pre-fill discovered answers, let user confirm or c
 
 ### Step 4: Write CLAUDE.md
 
-Using Step 3 answers, write CLAUDE.md to current directory using standard format defined under `## CLAUDE.md Standard Format` in the dps-ai-agents CLAUDE.md (read now if not already). Do not include an `## Active Plan` section — mission state is managed in `~/.claude/dps-[TICKET].json`, not CLAUDE.md.
+Using Step 3 answers, write CLAUDE.md to current directory using standard format. Do not include an `## Active Plan` section — mission state is managed in the registry, not CLAUDE.md.
 
 ### Step 4.5: Write AGENTS.md
 
-After CLAUDE.md is written, generate `AGENTS.md` in the same directory. This file is the cross-tool standard (supported by Jules, Cursor, Devin, Copilot, Aider, and 20+ others) that lets any coding agent understand project conventions without reading a DPS-specific file.
+After CLAUDE.md is written, generate `AGENTS.md` in the same directory. This file is the cross-tool standard (supported by Jules, Cursor, Devin, Copilot, Aider, and 20+ others) that lets any coding agent understand project conventions without reading a workflow-specific file.
 
 Write `AGENTS.md` with this structure, populated from the same answers used to write CLAUDE.md:
 
@@ -76,12 +76,12 @@ Omit any section where the answer is unknown rather than leaving it blank. Keep 
 
 Check if `~/.claude/preferences.md` exists.
 - Exists: note it, no action needed.
-- Missing: inform user — "No preferences file found at ~/.claude/preferences.md. Run `./install.sh` from the dps-ai-agents repo to create one, or create it manually."
+- Missing: inform user — "No preferences file found at ~/.claude/preferences.md. Run `./install.sh` from the private-dotfiles repo to create one, or create it manually."
 
 ### Step 6: Check MCP availability
 
 If `mcp__atlassian__*` tools unavailable, remind user:
-> JIRA and Confluence agents require the Atlassian MCP server. Run `./install.sh` from the dps-ai-agents repo for setup instructions.
+> JIRA and Confluence agents require the Atlassian MCP server. Run `./install.sh` from the private-dotfiles repo for setup instructions.
 
 ### Step 7: Confirm and offer next step
 

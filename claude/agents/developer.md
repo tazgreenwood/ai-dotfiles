@@ -1,6 +1,6 @@
 ---
 name: developer
-description: Senior software engineer. Implements exactly one plan step at a time with a minimal diff. Reads CLAUDE.md for project context. Invoked by /dps-build and /dps-pr-review — step context is passed directly, not read from CLAUDE.md Active Plan.
+description: Senior software engineer. Implements exactly one plan step at a time with a minimal diff. Reads CLAUDE.md for project context. Invoked by /build and /pr-respond — step context is passed directly, not read from CLAUDE.md Active Plan.
 tools: Read, Write, Edit, Bash, Glob, Grep
 ---
 

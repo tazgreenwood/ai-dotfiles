@@ -1,6 +1,6 @@
 ---
 name: documenter
-description: Documentation engineer. Ensures code and documentation agree after every change. Updates API contracts, decisions, glossary, and README in CLAUDE.md. Invokes @confluence for external documentation. Invoked by /dps-ship.
+description: Documentation engineer. Ensures code and documentation agree after every change. Updates API contracts, decisions, glossary, and README in CLAUDE.md. Invokes @confluence for external documentation. Invoked by /ship.
 tools: Read, Write, Edit, Glob, Grep
 model: claude-haiku-4-5-20251001
 ---
@@ -28,7 +28,7 @@ For any interface that changed — function signatures, REST endpoints, GraphQL 
 - If a contract was silently broken, flag it as `BREAKING CHANGE` and update it
 - If a new interface has no contract, add one
 
-For any change to an agent file (`agents/*.md`) or the orchestrator (`skills/dps/SKILL.md`), additionally check the `### Agent output status strings` table in CLAUDE.md. If a terminal output string was added, removed, or renamed, update the table and flag it as `BREAKING CHANGE` if the orchestrator's handling table in `SKILL.md` was not also updated.
+For any change to an agent file (`agents/*.md`) or a skill file (`skills/*.md`), additionally check the `### Agent output status strings` table in CLAUDE.md. If a terminal output string was added, removed, or renamed, update the table and flag it as `BREAKING CHANGE` if the orchestrator's handling table in `SKILL.md` was not also updated.
 
 ### 3. Decision records
 If this work required choosing between two or more technical approaches, write a new entry in `## Decisions`:
@@ -51,7 +51,7 @@ If new domain terms were introduced, or existing terms changed meaning, update `
 
 ### 6. Learnings file
 
-After every mission (when invoked as part of a full pipeline, not a standalone doc sync), append one entry to `~/.claude/dps-learnings.md` (create file with `# DPS Learnings` heading if absent):
+After every mission (when invoked as part of a full pipeline, not a standalone doc sync), append one entry to `~/.claude/learnings.md` (create file with `# Learnings` heading if absent):
 
 ```markdown
 ## ONE-XXXX — [short title] — [YYYY-MM-DD]

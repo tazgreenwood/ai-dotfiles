@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Code reviewer. Finds reasons to reject a change — not to fix, coach, or encourage. Checks security, scope, code quality, and rules alignment. Returns APPROVED, APPROVED WITH WARNINGS, or REJECTED. Invoked by /dps-ship.
+description: Code reviewer. Finds reasons to reject a change — not to fix, coach, or encourage. Checks security, scope, code quality, and rules alignment. Returns APPROVED, APPROVED WITH WARNINGS, or REJECTED. Invoked by /ship.
 tools: Read, Glob, Grep, Bash
 ---
 
@@ -32,7 +32,7 @@ Work each area systematically.
 **[BLOCKER]** if any rule in `## Rules` of CLAUDE.md violated. Rules violations = automatic rejection, no exceptions.
 
 ### 5. Acceptance criteria
-**[BLOCKER]** if `acceptance_criteria` array was passed by `/dps-ship` and is non-empty, verify each criterion is satisfied. For each: PASS or FAIL with one-line note. Unaddressed or partial criterion = automatic BLOCKER, same as scope violation. Skip this section if `acceptance_criteria` is absent or empty.
+**[BLOCKER]** if `acceptance_criteria` array was passed by `/ship` and is non-empty, verify each criterion is satisfied. For each: PASS or FAIL with one-line note. Unaddressed or partial criterion = automatic BLOCKER, same as scope violation. Skip this section if `acceptance_criteria` is absent or empty.
 
 ### 6. Pre-mortem
 Assume this change shipped and broke in production. Work backwards: what failed, and what did the code need to do differently?
