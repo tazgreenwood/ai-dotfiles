@@ -129,7 +129,7 @@ STANDUP STATUS: CHANNEL NOT CONFIGURED
 
 To enable automatic posting, set the Slack channel in the registry:
 
-  registry_set_project('private-dotfiles', 'standup.slack_channel', '#your-channel')
+  registry_set('private-dotfiles', 'standup.slack_channel', '#your-channel')
 
 Run /standup again once the channel is configured.
 ```

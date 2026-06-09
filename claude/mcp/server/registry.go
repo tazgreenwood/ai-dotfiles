@@ -282,7 +282,7 @@ func registryGetAudit(args map[string]any) ToolResult {
 	if since == "" && until == "" {
 		return toolOK(map[string]any{"entries": log, "total": len(log)})
 	}
-	var filtered []any
+	filtered := make([]any, 0)
 	for _, raw := range log {
 		entry, ok := raw.(map[string]any)
 		if !ok {
