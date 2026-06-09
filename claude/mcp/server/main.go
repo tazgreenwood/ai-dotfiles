@@ -155,7 +155,7 @@ func dispatch(name string, args map[string]any) ToolResult {
 
 func main() {
 	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large diffs
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -41,7 +42,10 @@ func bbGet(endpoint string) (map[string]any, error) {
 	if !strings.HasPrefix(endpoint, "http") {
 		url = bbBase + endpoint
 	}
-	req, _ := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Accept", "application/json")
 
@@ -50,7 +54,10 @@ func bbGet(endpoint string) (map[string]any, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("bitbucket %d: %s", resp.StatusCode, string(body))
 	}
@@ -63,8 +70,14 @@ func bbPost(endpoint string, payload any) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", bbBase+endpoint, strings.NewReader(string(b)))
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", bbBase+endpoint, strings.NewReader(string(b)))
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -73,7 +86,10 @@ func bbPost(endpoint string, payload any) (map[string]any, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("bitbucket %d: %s", resp.StatusCode, string(body))
 	}
@@ -86,7 +102,10 @@ func bbGetText(endpoint string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req, _ := http.NewRequest("GET", bbBase+endpoint, nil)
+	req, err := http.NewRequest("GET", bbBase+endpoint, nil)
+	if err != nil {
+		return "", err
+	}
 	req.Header.Set("Authorization", auth)
 
 	resp, err := http.DefaultClient.Do(req)
@@ -94,7 +113,10 @@ func bbGetText(endpoint string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("bitbucket %d: %s", resp.StatusCode, string(body))
 	}
@@ -183,7 +205,7 @@ func bbCreatePR(args map[string]any) ToolResult {
 	if rv, ok := args["reviewers"].([]any); ok {
 		for _, r := range rv {
 			if s, ok := r.(string); ok {
-				if strings.HasPrefix(s, "{") {
+				if len(s) == 38 && strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
 					reviewers = append(reviewers, map[string]any{"uuid": s})
 				} else {
 					reviewers = append(reviewers, map[string]any{"username": s})
@@ -214,7 +236,7 @@ func bbGetCommits(args map[string]any) ToolResult {
 	branch := str(args, "branch")
 	endpoint := repoPath(repo) + "/commits"
 	if branch != "" {
-		endpoint += "?include=" + branch
+		endpoint += "?include=" + url.QueryEscape(branch)
 	}
 	commits, err := bbPaginate(endpoint, limit)
 	if err != nil {
