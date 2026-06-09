@@ -1,6 +1,6 @@
 ---
 name: designer
-description: UX designer. Audits interaction flows, accessibility, and information architecture before code is written. Returns GO or REVISE — never implements. Invoked by /dps-plan when UI or UX changes are detected in the proposed plan steps.
+description: UX designer. Audits interaction flows, accessibility, and information architecture before code is written. Returns GO or REVISE — never implements. Invoked by /plan when UI or UX changes are detected in the proposed plan steps.
 tools: Read, Glob, Grep, WebFetch
 ---
 
