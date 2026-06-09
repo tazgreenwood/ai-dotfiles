@@ -1,6 +1,6 @@
-# DPS BUILD
+# BUILD
 
-You are the build phase of the DPS development workflow. Execute the approved plan autonomously. Do not stop to ask questions mid-build. Slack the user when done or when genuinely blocked.
+You are the build phase of the development workflow. Execute the approved plan autonomously. Do not stop to ask questions mid-build. Slack the user when done or when genuinely blocked.
 
 **Key rule: the plan was already approved. Your job is to implement it exactly as written.**
 
@@ -9,9 +9,10 @@ You are the build phase of the DPS development workflow. Execute the approved pl
 ## STEP 1: LOAD MISSION STATE
 
 Find the active mission:
-1. If a ticket key was provided (ONE-XXXX), read `~/.claude/dps-[TICKET].json`
-2. If no ticket provided, look for any `~/.claude/dps-*.json` file (excluding `dps-repos.json`) with at least one step not `"done"` — use that as the active mission
-3. If no mission state file found, report: "No approved plan found. Run /dps-plan first."
+1. If a ticket key was provided (ONE-XXXX), call `registry_get_plan(project_name, ticket)` via the clearlink-registry MCP. Detect project name from git remote or CLAUDE.md.
+2. If registry returns no plan (or MCP unavailable), fall back to `~/.claude/plan-[TICKET].json` (or legacy `~/.claude/[TICKET].json`)
+3. If no ticket provided, call `registry_list_plans(project_name)` and pick the plan with at least one step not `"done"`. Fall back to any `~/.claude/plan-*.json` or `~/.claude/[ticket-key].json` if registry unavailable.
+4. If no mission state found, report: "No approved plan found. Run /plan first."
 
 Read `CLAUDE.md` — note Rules and Commands (test/lint/format).
 
@@ -25,7 +26,7 @@ git pull
 git checkout -b [branch]
 ```
 
-- `base_branch` and `branch` come from the mission state file
+- `base_branch` and `branch` come from the mission state
 - If the branch already exists (resuming a paused build): `git checkout [branch]` — do not recreate it
 - If `base_branch` doesn't exist locally: `git fetch origin [base_branch]` first
 
@@ -36,7 +37,8 @@ git checkout -b [branch]
 Loop through all steps in mission state where `status = "pending"`. For each step:
 
 ### 3a. Mark step in progress
-Update the step's status to `"in_progress"` in the mission state JSON file only. Do not write to CLAUDE.md.
+Call `registry_set(project_name, "plans.[ticket].plan_steps.[i].status", "in_progress")`.
+If registry unavailable, update the local JSON file.
 
 ### 3b. Invoke @developer
 Pass the following context:
@@ -74,7 +76,8 @@ No body unless the why is genuinely non-obvious from the subject line.
 No Co-Authored-By or attribution lines.
 
 ### 3e. Mark step done
-Update step status to `"done"` in the mission state JSON file only. Do not write to CLAUDE.md.
+Call `registry_set(project_name, "plans.[ticket].plan_steps.[i].status", "done")`.
+If registry unavailable, update the local JSON file.
 
 Proceed to the next pending step.
 
@@ -84,13 +87,13 @@ Proceed to the next pending step.
 
 When all steps are `"done"`:
 
-1. Send Slack message to `$DPS_SLACK_CHANNEL`:
+1. Send Slack message to `$SLACK_CHANNEL`:
    ```
    ✅ Build complete — ONE-XXXX
-   All [N] steps done. Run /dps-ship to create the PR.
+   All [N] steps done. Run /ship to create the PR.
    Branch: [branch name]
    ```
-   Use `slack_send_message` MCP tool. If Slack MCP unavailable or `$DPS_SLACK_CHANNEL` unset, print the message to the terminal instead.
+   Use `slack_send_message` MCP tool. If Slack MCP unavailable or `$SLACK_CHANNEL` unset, print the message to the terminal instead.
 
 2. Output summary to terminal:
    ```
@@ -98,7 +101,7 @@ When all steps are `"done"`:
    Ticket: ONE-XXXX
    Steps: [N] completed
    Branch: [branch]
-   Next: open a new chat and run /dps-ship
+   Next: open a new chat and run /ship
    ```
 
 ---
@@ -107,22 +110,22 @@ When all steps are `"done"`:
 
 If a step hits 3 consecutive failures (developer or qa):
 
-1. Send Slack message to `$DPS_SLACK_CHANNEL`:
+1. Send Slack message to `$SLACK_CHANNEL`:
    ```
    🚧 Build blocked — ONE-XXXX
    Stuck on step [N]: [step title]
    Reason: [last failure message]
-   Run /dps-build ONE-XXXX to retry after resolving.
+   Run /build ONE-XXXX to retry after resolving.
    ```
 
 2. Output to terminal:
    ```
    BUILD BLOCKED at step [N]: [step title]
    Reason: [last failure message]
-   Fix the issue, then run /dps-build ONE-XXXX to resume.
+   Fix the issue, then run /build ONE-XXXX to resume.
    ```
 
-3. Leave mission state with the failed step as `"in_progress"` so the next `/dps-build` invocation resumes at the right step.
+3. Leave mission state with the failed step as `"in_progress"` so the next `/build` invocation resumes at the right step.
 
 ---
 
@@ -130,5 +133,5 @@ If a step hits 3 consecutive failures (developer or qa):
 
 - Never stop mid-build to ask clarifying questions. Make reasonable assumptions and proceed.
 - Never commit `CLAUDE.md` during the build — only step files.
-- Never push to remote — that happens in `/dps-ship`.
+- Never push to remote — that happens in `/ship`.
 - If a step discovers out-of-scope improvements: note them in the commit message, do not implement them.
