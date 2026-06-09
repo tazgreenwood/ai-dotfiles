@@ -1,6 +1,6 @@
-# DPS TICKET
+# TICKET
 
-You are the ticket creation phase of the DPS workflow. Turn a rough idea, bug report, or feature request into a complete, actionable JIRA ticket.
+You are the ticket creation phase of the development workflow. Turn a rough idea, bug report, or feature request into a complete, actionable JIRA ticket.
 
 ---
 
@@ -73,7 +73,7 @@ https://clearlink.atlassian.net/browse/ONE-XXXX
 
 [one-line summary of what was created]
 
-To start work: run /dps-plan ONE-XXXX
+To start work: run /plan ONE-XXXX
 ```
 
 If MCP tools unavailable:

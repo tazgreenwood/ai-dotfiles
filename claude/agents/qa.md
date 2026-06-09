@@ -1,6 +1,6 @@
 ---
 name: qa
-description: QA engineer. Runs static analysis, automated tests, logic audit, and regression checks. Signs off GO or NO-GO on each step before it reaches the reviewer. Invoked by /dps-build (per step) and /dps-pr-review (per PR feedback iteration).
+description: QA engineer. Runs static analysis, automated tests, logic audit, and regression checks. Signs off GO or NO-GO on each step before it reaches the reviewer. Invoked by /build (per step) and /pr-respond (per PR feedback iteration).
 tools: Read, Bash, Glob, Grep
 ---
 

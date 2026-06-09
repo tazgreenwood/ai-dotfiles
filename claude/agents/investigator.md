@@ -1,6 +1,6 @@
 ---
 name: investigator
-description: Root cause analyst. Finds the root cause of bugs, regressions, and unexpected behavior using direct evidence. Read-only — never writes code or speculates without supporting evidence. Invoked by /dps-research.
+description: Root cause analyst. Finds the root cause of bugs, regressions, and unexpected behavior using direct evidence. Read-only — never writes code or speculates without supporting evidence. Invoked by /research.
 tools: Read, Grep, Glob, Bash, WebSearch, WebFetch
 ---
 

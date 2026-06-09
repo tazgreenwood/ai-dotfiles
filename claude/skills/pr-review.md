@@ -1,77 +1,77 @@
-# DPS PR REVIEW
+# PR REVIEW
 
-You are the PR feedback phase of the DPS development workflow. A reviewer left comments on the draft PR. Address them, verify the fix, and notify.
+You are the PR reviewer skill. Review a teammate's pull request: fetch the diff, analyze it, and post inline findings via Bitbucket MCP.
 
 ---
 
 ## STEP 1: GATHER INPUTS
 
-You need:
-1. **Ticket key** (ONE-XXXX) — to find the mission state and current branch
-2. **PR comment text** — the reviewer's feedback to address
+Accept either:
+- A PR ID (integer): `pr-review 42`
+- A Bitbucket PR URL: `pr-review https://bitbucket.org/clearlinkit/repo/pull-requests/42`
 
-If either is missing, ask the user to provide it before continuing.
+If no PR ID or URL provided, ask the user.
 
----
-
-## STEP 2: LOAD CONTEXT
-
-1. Read `~/.claude/dps-[TICKET].json` mission state — get branch name and `pr_id`
-2. Check out the feature branch: `git checkout [branch]`
-3. Read `CLAUDE.md` — note Rules, Commands (lint/format/tests)
-4. Read the `expected_pr` field from `~/.claude/dps-[TICKET].json` — this is the acceptance spec
+Detect the repo slug from the PR URL, or from `git remote get-url origin` if only an ID was given.
 
 ---
 
-## STEP 3: INVOKE @developer
+## STEP 2: FETCH PR METADATA
+
+Call `bitbucket_get_pr(workspace, repo_slug, pr_id)`.
+
+Extract:
+- Title, description, author
+- Source branch → destination branch
+- List of reviewers already assigned
+
+---
+
+## STEP 3: FETCH DIFF
+
+Call `bitbucket_get_diff(workspace, repo_slug, pr_id)`.
+
+Read the full diff. Note files changed, additions, deletions.
+
+---
+
+## STEP 4: LOAD LOCAL CONTEXT (optional)
+
+If the repo is checked out locally, read `CLAUDE.md` for:
+- Architecture constraints and rules
+- API contracts (do any changed interfaces break them?)
+- Domain glossary
+
+If not available locally, proceed without it.
+
+---
+
+## STEP 5: INVOKE @reviewer
 
 Pass:
-- The PR comment text as the task
-- The `expected_pr` field from the mission state JSON as the acceptance spec
-- CLAUDE.md contents
-- Context: "This is a targeted fix for PR review comments, not a new plan step. Only address the feedback — do not add scope."
+- Full diff output
+- PR title and description (as the acceptance spec)
+- CLAUDE.md contents (if available)
+- Instruction: "Review for correctness bugs, security issues, and scope. Do not praise. Return findings only."
 
-@developer addresses the feedback with a minimal diff.
-
-**Retry**: if @developer returns BLOCKED, retry up to 2 times. On 3rd failure, surface to user.
+@reviewer returns APPROVED, APPROVED WITH WARNINGS, or REJECTED with a list of findings.
 
 ---
 
-## STEP 4: INVOKE @qa
+## STEP 6: POST INLINE COMMENTS
 
-@qa runs in order:
-1. Linter (from `## Commands → Lint` in CLAUDE.md)
-2. Formatter check (from `## Commands → Format`)
-3. Test suite (from `## Commands → Tests`)
-4. Logic audit on changed files
-5. Verify the PR comment is addressed (check that the specific issue is resolved)
+For each finding from @reviewer:
 
-**If NO-GO**: pass failure back to @developer (retry up to 2 times). On 3rd failure, surface to user.
+Call `bitbucket_add_pr_comment(workspace, repo_slug, pr_id, comment_text, file_path, line_number)`.
 
----
-
-## STEP 5: COMMIT
-
-Stage only changed files:
-```bash
-git add [changed files]
-git commit -m "fix(ONE-XXXX): address PR review comments"
+Format each comment as:
+```
+[severity]: [problem]. [fix].
 ```
 
-No body unless specific comments require explanation.
+Where severity is one of: `bug`, `security`, `style`, `question`.
 
----
-
-## STEP 6: NOTIFY
-
-Send Slack message to `$DPS_SLACK_CHANNEL`:
-```
-💬 PR comments addressed — ONE-XXXX
-[1-2 sentence summary of what was fixed]
-Review again when ready: [pr_url from mission state]
-```
-
-Use `slack_send_message` MCP. If unavailable or `$DPS_SLACK_CHANNEL` unset, print to terminal.
+If a finding is general (not tied to a specific line), post it as a top-level PR comment without file/line.
 
 ---
 
@@ -80,9 +80,8 @@ Use `slack_send_message` MCP. If unavailable or `$DPS_SLACK_CHANNEL` unset, prin
 Output:
 ```
 PR REVIEW COMPLETE
-Ticket: ONE-XXXX
-Changes committed: [summary]
-Slack: notified
+PR: [pr_url]
+Author: [author]
+Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
+Comments posted: [N]
 ```
-
-Note: do not push to remote. Pushing happens as part of PR management — not this skill.

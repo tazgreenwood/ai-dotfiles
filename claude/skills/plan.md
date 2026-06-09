@@ -1,6 +1,6 @@
-# DPS PLAN
+# PLAN
 
-You are the planning phase of the DPS development workflow. Your job is to deeply understand the task, ask the right questions, and produce a plan precise enough that the build phase can run without human intervention.
+You are the planning phase of the development workflow. Your job is to deeply understand the task, ask the right questions, and produce a plan precise enough that the build phase can run without human intervention.
 
 **Key rule: do not write code. Write the plan only.**
 
@@ -21,7 +21,7 @@ Continue regardless.
 Read `CLAUDE.md` in the current working directory. Note:
 - Tech stack and test commands (under `## Commands`)
 - Rules and hard constraints
-- Any active plan (check `~/.claude/dps-*.json` for files with pending steps; if found, ask the user if they want to resume or start fresh)
+- Any active plan: call `registry_list_plans(project_name)` first; fall back to `~/.claude/plan-*.json` for files with pending steps. If found, ask the user if they want to resume or start fresh.
 - Domain glossary and API contracts
 
 ### Brownfield gate
@@ -43,7 +43,7 @@ If either `## Architecture` or `## Tech Stack` in CLAUDE.md is missing or has no
 
 **If no ticket provided:**
 - Ask the user to describe the task
-- Offer: "Would you like to create a JIRA ticket first with `/dps-ticket`?"
+- Offer: "Would you like to create a JIRA ticket first with `/ticket`?"
 
 ---
 
@@ -94,7 +94,7 @@ Flag any violations inline in the plan. Don't block — note it and adjust the d
   - **Verification**: how developer confirms step is done
   - **Risk**: HIGH if step touches auth, payments, data migrations, security config, or external API contracts; LOW otherwise
 
-Flag any HIGH-risk steps with `⚠️ HIGH RISK` in the step title. These steps will receive a dedicated security audit in `/dps-ship`.
+Flag any HIGH-risk steps with `⚠️ HIGH RISK` in the step title. These steps will receive a dedicated security audit in `/ship`.
 
 ---
 
@@ -161,7 +161,7 @@ When the user approves, persist the plan via registry MCP:
 
 1. Detect project name: parse from `git remote get-url origin` (e.g. `tazgreenwood/private-dotfiles` → `private-dotfiles`), or read the `## Project` field from `CLAUDE.md` if present.
 2. Call `registry_write_plan(project_name, ticket, plan_data)` where `plan_data` is the full mission state object below.
-3. Also write a local copy to `~/.claude/dps-[TICKET].json` as a fallback cache (use `NO-TICKET` if no ticket).
+3. Also write a local copy to `~/.claude/plan-[TICKET].json` as a fallback cache (use `NO-TICKET` if no ticket).
 
 ```json
 {
@@ -214,7 +214,7 @@ When the user approves, persist the plan via registry MCP:
 - Research → `research/ONE-XXXX-short-desc`
 - Refactor / Maintenance → `chore/ONE-XXXX-short-desc`
 
-**base_branch**: read `~/.claude/dps-repos.json` — find entry matching current repo's remote URL (`git remote get-url origin`), use `base` field. Fall back to `staging`.
+**base_branch**: call `registry_get_project(project_name)` and read the `base_branch` field. Fall back to `staging` if not set or registry unavailable.
 
 **repo**: `workspace/repo-slug` parsed from `git remote get-url origin`.
 
@@ -225,8 +225,8 @@ When the user approves, persist the plan via registry MCP:
 Tell the user:
 
 ```
-Plan written. Mission state saved to registry ([project]/[TICKET]) and ~/.claude/dps-[TICKET].json
+Plan written. Mission state saved to registry ([project]/[TICKET]) and ~/.claude/plan-[TICKET].json
 
-Next: open a new chat and run /dps-build to execute the plan.
+Next: open a new chat and run /build to execute the plan.
 The build will run automatically and Slack you when done.
 ```
