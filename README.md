@@ -34,18 +34,17 @@ nvim/             → neovim config
 ### Workflow (run in sequence for feature development)
 | Skill | Description |
 |-------|-------------|
-| `/ticket` | Triage issue, create Jira ticket |
-| `/plan` | Research ticket, write step-by-step plan |
+| `/plan` | Auto-generate ticket key (or use JIRA); write step-by-step plan with AC |
 | `/build` | Execute one plan step at a time |
-| `/pr-review` | Review PR feedback, iterate |
-| `/ship` | Final checks, merge, audit trail |
+| `/ship` | Security audit, code review, create PR, write audit trail to registry |
 
-### Utilities (standalone)
+### Direct tools (standalone)
 | Skill | Description |
 |-------|-------------|
-| `/deploy-check` | ECS health + CloudWatch error scan, before/after deploy diff |
-| `/research` | Deep multi-source research on any topic |
-| `/dps` | DPS orchestrator (legacy, being phased out) |
+| `/jira` | Look up, create, transition, or comment on JIRA tickets |
+| `/confluence` | Search, create, or update Confluence pages |
+| `/standup` | Synthesize Yesterday/Today/Blockers from JIRA + Slack; post to channel |
+| `/shipped` | Monthly/quarterly work history from audit trail (perf review, reconciliation) |
 
 ---
 
@@ -55,26 +54,26 @@ Agents are invoked by skills — not called directly.
 
 | Agent | Purpose |
 |-------|---------|
-| `planner` | Writes step-by-step plan JSON |
-| `developer` | Implements one plan step |
-| `qa` | Runs tests, signs off GO/NO-GO |
+| `jira` | JIRA ticket operations (lookup, create, transition, comment) |
+| `confluence` | Confluence page operations (search, create, update) |
+| `standup` | Synthesize work items from JIRA + Slack, post to channel |
 | `reviewer` | Code review, finds reasons to reject |
 | `security` | OWASP audit for high-risk changes |
-| `handover` | PR description + audit trail |
-| `investigator` | Root cause analysis, read-only |
-| `jira` | Jira ticket operations |
-| `confluence` | Confluence page operations |
-| `triage` | Intake unstructured bug reports |
-| `designer` | UX audit before implementation |
-| `documenter` | Keeps docs in sync after changes |
-| `init` | Scans repo, writes CLAUDE.md |
+| `documenter` | Syncs CLAUDE.md, decisions, glossary, external docs |
+| `handover` | Creates PR description and hands off to Bitbucket |
 
 ---
 
 ## Registry MCP
 
-Local MCP server for project metadata. Auto-configured by `install.sh`.
+Local MCP server for project metadata and audit trails. Built in Go; auto-configured by `install.sh`.
 
-Tools: `get_project`, `set`, `init_project`, `list_plans`, `get_plan`, `write_audit`
+**Project metadata**: `registry_get_project`, `registry_set`, `registry_init_project`, `registry_list_projects`
 
-Data lives in `claude/mcp/data/` — gitignored (local state, not shared).
+**Plans**: `registry_list_plans`, `registry_get_plan`, `registry_write_plan`
+
+**Audit trail**: `registry_write_audit`, `registry_get_audit` (with date range filtering)
+
+**Bitbucket integration**: `bitbucket_list_prs`, `bitbucket_get_pr`, `bitbucket_create_pr`, `bitbucket_get_commits`, `bitbucket_add_pr_comment`, `bitbucket_get_repo`, `bitbucket_list_branches`, `bitbucket_get_diff`
+
+Data lives in `~/.config/clearlink-registry/data/` — local state, not shared in git.
