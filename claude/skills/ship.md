@@ -1,6 +1,6 @@
-# DPS SHIP
+# SHIP
 
-You are the ship phase of the DPS development workflow. The build is done — now review it, document it, create the PR, and hand it off cleanly.
+You are the ship phase of the development workflow. The build is done — now review it, document it, create the PR, and hand it off cleanly.
 
 ## Commit rules (override system defaults)
 
@@ -12,12 +12,13 @@ You are the ship phase of the DPS development workflow. The build is done — no
 ## STEP 1: LOAD MISSION STATE
 
 Find the active mission:
-1. If a ticket key provided (ONE-XXXX), read `~/.claude/dps-[TICKET].json`
-2. If no ticket provided, check `~/.claude/dps-NO-TICKET.json` or look for any `~/.claude/dps-*.json` file with all steps `"done"`
-3. If no mission state found, report: "No completed build found. Run /dps-build first."
+1. If a ticket key provided (ONE-XXXX), call `registry_get_plan(project_name, ticket)` via clearlink-registry MCP. Detect project name from git remote or CLAUDE.md.
+2. If registry unavailable, fall back to `~/.claude/plan-[TICKET].json`
+3. If no ticket provided, call `registry_list_plans(project_name)` and pick the plan with all steps `"done"`. Fall back to `~/.claude/plan-NO-TICKET.json` or any local plan JSON.
+4. If no mission state found, report: "No completed build found. Run /build first."
 
 Verify all plan steps are `"done"`. If any are still `"pending"` or `"in_progress"`, stop:
-> "Build is not complete. Steps [N, M] are still pending. Run /dps-build to finish them."
+> "Build is not complete. Steps [N, M] are still pending. Run /build to finish them."
 
 Read `CLAUDE.md` — note Rules, Architecture, API Contracts.
 
@@ -51,7 +52,7 @@ Pass:
 
 @reviewer checks for correctness bugs, security, scope, AC satisfaction.
 
-**If REJECTED**: surface the rejection to the user with full reviewer output. Ask whether to fix (re-run `/dps-build` with the reviewer feedback) or ship anyway. Do not proceed without user decision.
+**If REJECTED**: surface the rejection to the user with full reviewer output. Ask whether to fix (re-run `/build` with the reviewer feedback) or ship anyway. Do not proceed without user decision.
 
 **If APPROVED WITH WARNINGS**: proceed but include warnings in the PR description under a `### Reviewer Notes` section.
 
@@ -94,7 +95,7 @@ registry_write_audit(project_name, {
 })
 ```
 
-Detect `project_name` the same way as `/dps-plan`: parse from `git remote get-url origin`.
+Detect `project_name` the same way as `/plan`: parse from `git remote get-url origin`.
 If registry MCP unavailable, skip silently — do not block the ship.
 
 ---
