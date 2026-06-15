@@ -9,22 +9,9 @@ import (
 func newRouter() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("<html><body><h1>Registry</h1></body></html>"))
-	})
+	mux.HandleFunc("GET /", handleIndex)
 
-	mux.HandleFunc("GET /projects/{name}", func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
-		proj, err := ReadProject(name)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(proj)
-	})
+	mux.HandleFunc("GET /projects/{name}", handleProject)
 
 	mux.HandleFunc("GET /projects/{name}/plans/{ticket}", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")

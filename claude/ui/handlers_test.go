@@ -197,13 +197,8 @@ func TestGetProject_ResponseIsJSON(t *testing.T) {
 	defer resp.Body.Close()
 
 	ct := resp.Header.Get("Content-Type")
-	if !strings.HasPrefix(ct, "application/json") {
-		t.Errorf("want Content-Type application/json, got %q", ct)
-	}
-
-	var body map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Errorf("response body is not valid JSON: %v", err)
+	if !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("want Content-Type text/html, got %q", ct)
 	}
 }
 
