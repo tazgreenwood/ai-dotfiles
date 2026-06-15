@@ -27,33 +27,66 @@ done
 
 # ── Registry MCP Server ────────────────────────────────────────────────────────
 SERVER_DIR="$DOTFILES/claude/mcp/server"
-BINARY="$SERVER_DIR/clearlink-registry"
+BINARY="$SERVER_DIR/registry"
 
 if [ -f "$SERVER_DIR/main.go" ]; then
   echo "Building registry MCP server..."
   if command -v go &>/dev/null; then
-    (cd "$SERVER_DIR" && go build -o clearlink-registry .) && echo "  ✓ built $BINARY"
+    (cd "$SERVER_DIR" && go build -o registry .) && echo "  ✓ built $BINARY"
   else
     echo "  ⚠ Go not found — install Go then re-run install.sh"
   fi
 fi
 
 if [ -f "$BINARY" ]; then
-  if claude mcp list 2>/dev/null | grep -q "clearlink-registry"; then
-    echo "  ✓ clearlink-registry already registered"
+  if claude mcp list 2>/dev/null | grep -q "^registry"; then
+    echo "  ✓ registry already registered"
   else
-    echo "  Registering clearlink-registry MCP server (user scope)..."
+    echo "  Registering registry MCP server (user scope)..."
     echo "  Enter BITBUCKET_USERNAME (e.g. taz.greenwood@clearlink.com):"
     read -r BB_USER
     echo "  Enter BITBUCKET_APP_PASSWORD:"
     read -rs BB_PASS
-    claude mcp add --scope user clearlink-registry "$BINARY" \
+    claude mcp add --scope user registry "$BINARY" \
       -e BITBUCKET_USERNAME="$BB_USER" \
       -e BITBUCKET_APP_PASSWORD="$BB_PASS" \
       -e BITBUCKET_WORKSPACE="clearlinkit"
-    echo "  ✓ clearlink-registry registered"
+    echo "  ✓ registry registered"
   fi
 fi
+
+# ── Registry UI ────────────────────────────────────────────────────────────────
+UI_DIR="$DOTFILES/claude/ui"
+UI_BINARY="/usr/local/bin/registry-ui"
+UI_PLIST="$UI_DIR/com.tazgreenwood.registry-ui.plist"
+UI_LAUNCHAGENTS="$HOME/Library/LaunchAgents/com.tazgreenwood.registry-ui.plist"
+
+if [ -f "$UI_DIR/main.go" ]; then
+  echo "Building registry UI..."
+  if command -v go &>/dev/null; then
+    (cd "$UI_DIR" && go build -o registry-ui .) && echo "  ✓ built $UI_DIR/registry-ui"
+    if sudo cp "$UI_DIR/registry-ui" "$UI_BINARY" 2>/dev/null; then
+      echo "  ✓ installed to $UI_BINARY"
+    else
+      echo "  ⚠ Could not copy to /usr/local/bin — run: sudo cp $UI_DIR/registry-ui $UI_BINARY"
+    fi
+  else
+    echo "  ⚠ Go not found — install Go then re-run install.sh"
+  fi
+fi
+
+mkdir -p "$HOME/.config/registry/logs"
+
+if [ -f "$UI_BINARY" ] && [ -f "$UI_PLIST" ]; then
+  cp "$UI_PLIST" "$UI_LAUNCHAGENTS"
+  launchctl unload "$UI_LAUNCHAGENTS" 2>/dev/null || true
+  launchctl load "$UI_LAUNCHAGENTS"
+  echo "  ✓ registry-ui daemon loaded (auto-starts on login)"
+fi
+
+echo ""
+echo "Add to /etc/hosts for clean URL:"
+echo "  sudo sh -c 'echo \"127.0.0.1 registry.local\" >> /etc/hosts'"
 
 echo ""
 echo "Done. Run 'git pull && ./install.sh' to update."
