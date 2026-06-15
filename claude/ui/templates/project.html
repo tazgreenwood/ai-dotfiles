@@ -1,0 +1,59 @@
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-8">{{.Project.Name}}</h1>
+
+<section class="mb-10">
+  <h2 class="text-xl font-semibold mb-4">Plans</h2>
+  {{if .Plans}}
+  <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+    <thead class="bg-gray-50 text-gray-600 uppercase text-xs">
+      <tr>
+        <th class="text-left px-4 py-3">Ticket</th>
+        <th class="text-left px-4 py-3">Summary</th>
+        <th class="text-left px-4 py-3">Progress</th>
+        <th class="text-left px-4 py-3">Status</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {{range .Plans}}
+      <tr class="hover:bg-gray-50">
+        <td class="px-4 py-3">
+          <a href="/projects/{{$.Project.Name}}/plans/{{.Ticket}}" class="text-blue-600 hover:underline font-mono">{{.Ticket}}</a>
+        </td>
+        <td class="px-4 py-3 text-gray-700">{{.Summary}}</td>
+        <td class="px-4 py-3 text-gray-500">{{.DoneSteps}}/{{.TotalSteps}} done</td>
+        <td class="px-4 py-3">
+          {{if eq .Status "shipped"}}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">shipped</span>
+          {{else}}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">active</span>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="text-gray-500">No plans yet</p>
+  {{end}}
+</section>
+
+<section>
+  <div class="flex items-center justify-between mb-4">
+    <h2 class="text-xl font-semibold">Recent Audit</h2>
+    <a href="/projects/{{.Project.Name}}/audit" class="text-sm text-blue-600 hover:underline">View all &rarr;</a>
+  </div>
+  {{if .RecentAudit}}
+  <ul class="space-y-2">
+    {{range .RecentAudit}}
+    <li class="flex items-baseline gap-3 text-sm">
+      <span class="text-gray-400 font-mono w-24 shrink-0">{{.Date}}</span>
+      <span class="text-blue-600 font-mono shrink-0">{{.Ticket}}</span>
+      <span class="text-gray-700">{{.Summary}}</span>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="text-gray-500">No audit entries yet</p>
+  {{end}}
+</section>
+{{end}}

@@ -1,0 +1,19 @@
+{{define "content"}}
+<h1 class="text-3xl font-bold mb-8">Registry</h1>
+{{if .Projects}}
+<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+  {{range .Projects}}
+  <a href="/projects/{{.Name}}" class="block border border-gray-200 rounded-lg p-5 hover:shadow-md transition-shadow">
+    <div class="font-bold text-lg text-gray-900 mb-2">{{.Name}}</div>
+    <div class="text-sm text-gray-500">
+      <span>{{.PlanCount}} plan{{if ne .PlanCount 1}}s{{end}}</span>
+      <span class="mx-2">&middot;</span>
+      <span>{{.AuditCount}} audit entr{{if eq .AuditCount 1}}y{{else}}ies{{end}}</span>
+    </div>
+  </a>
+  {{end}}
+</div>
+{{else}}
+<p class="text-gray-500">No projects found</p>
+{{end}}
+{{end}}

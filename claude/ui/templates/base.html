@@ -1,0 +1,23 @@
+{{define "base"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Registry</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-white">
+  <div class="max-w-4xl mx-auto p-8">
+    {{if .Breadcrumbs}}
+    <nav class="mb-6 text-sm text-gray-500">
+      {{range $i, $b := .Breadcrumbs}}
+        {{if $i}}<span class="mx-1">/</span>{{end}}
+        {{if $b.URL}}<a href="{{$b.URL}}" class="hover:underline text-blue-600">{{$b.Label}}</a>{{else}}<span>{{$b.Label}}</span>{{end}}
+      {{end}}
+    </nav>
+    {{end}}
+    {{template "content" .}}
+  </div>
+</body>
+</html>
+{{end}}
