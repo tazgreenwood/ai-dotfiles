@@ -47,7 +47,7 @@
     {{range .Plan.PlanSteps}}
     <details class="border border-gray-200 rounded-lg overflow-hidden"{{if ne .Status "done"}} open{{end}}>
       <summary class="flex items-center justify-between px-4 py-3 bg-gray-50 cursor-pointer select-none">
-        <span class="font-medium text-sm">Step {{.Step}}{{if .Title}} &mdash; {{.Title}}{{end}}</span>
+        <span class="font-medium text-sm">Step {{.ID}}{{if .Title}} &mdash; {{.Title}}{{end}}</span>
         {{if eq .Status "done"}}
         <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">done</span>
         {{else if eq .Status "in_progress"}}
