@@ -10,7 +10,18 @@ import (
 //go:embed templates
 var templateFS embed.FS
 
-var tmpl = template.Must(template.ParseFS(templateFS, "templates/*.html"))
+func render(w http.ResponseWriter, page string, data any) {
+	t, err := template.ParseFS(templateFS, "templates/base.html", "templates/"+page)
+	if err != nil {
+		http.Error(w, "template parse error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := t.ExecuteTemplate(w, "base", data); err != nil {
+		// Headers already sent — log only
+		_ = err
+	}
+}
 
 type breadcrumb struct {
 	Label string
@@ -77,10 +88,7 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 		Projects:    summaries,
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-	}
+	render(w, "index.html", data)
 }
 
 func handlePlan(w http.ResponseWriter, r *http.Request) {
@@ -99,10 +107,7 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 		},
 		Plan: plan,
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+	render(w, "plan.html", data)
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {
@@ -132,10 +137,7 @@ func handleAudit(w http.ResponseWriter, r *http.Request) {
 		Since:       since,
 		Until:       until,
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-	}
+	render(w, "audit.html", data)
 }
 
 func handleProject(w http.ResponseWriter, r *http.Request) {
@@ -183,8 +185,5 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 		RecentAudit: recent,
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-	}
+	render(w, "project.html", data)
 }
