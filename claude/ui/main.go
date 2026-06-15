@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 )
@@ -15,22 +14,7 @@ func newRouter() http.Handler {
 
 	mux.HandleFunc("GET /projects/{name}/plans/{ticket}", handlePlan)
 
-	mux.HandleFunc("GET /projects/{name}/audit", func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
-		if _, err := ReadProject(name); err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		since := r.URL.Query().Get("since")
-		until := r.URL.Query().Get("until")
-		entries, err := ReadAudit(name, since, until)
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"entries": entries})
-	})
+	mux.HandleFunc("GET /projects/{name}/audit", handleAudit)
 
 	return mux
 }

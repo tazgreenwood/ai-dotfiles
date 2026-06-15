@@ -4,6 +4,7 @@ import (
 	"embed"
 	"html/template"
 	"net/http"
+	"sort"
 )
 
 //go:embed templates
@@ -43,6 +44,14 @@ type planSummary struct {
 type planData struct {
 	Breadcrumbs []breadcrumb
 	Plan        Plan
+}
+
+type auditData struct {
+	Breadcrumbs []breadcrumb
+	ProjectName string
+	Entries     []AuditEntry
+	Since       string
+	Until       string
 }
 
 func handleIndex(w http.ResponseWriter, _ *http.Request) {
@@ -93,6 +102,39 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func handleAudit(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if _, err := ReadProject(name); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	since := r.URL.Query().Get("since")
+	until := r.URL.Query().Get("until")
+	entries, err := ReadAudit(name, since, until)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Date > entries[j].Date
+	})
+	data := auditData{
+		Breadcrumbs: []breadcrumb{
+			{Label: "Registry", URL: "/"},
+			{Label: name, URL: "/projects/" + name},
+			{Label: "Audit"},
+		},
+		ProjectName: name,
+		Entries:     entries,
+		Since:       since,
+		Until:       until,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
 
