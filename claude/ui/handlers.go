@@ -40,6 +40,11 @@ type planSummary struct {
 	TotalSteps int
 }
 
+type planData struct {
+	Breadcrumbs []breadcrumb
+	Plan        Plan
+}
+
 func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	projects, err := ReadProjects()
 	if err != nil {
@@ -66,6 +71,28 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
+	}
+}
+
+func handlePlan(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	ticket := r.PathValue("ticket")
+	plan, err := ReadPlan(name, ticket)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	data := planData{
+		Breadcrumbs: []breadcrumb{
+			{Label: "Registry", URL: "/"},
+			{Label: name, URL: "/projects/" + name},
+			{Label: ticket},
+		},
+		Plan: plan,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 

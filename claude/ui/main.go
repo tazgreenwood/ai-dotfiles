@@ -13,17 +13,7 @@ func newRouter() http.Handler {
 
 	mux.HandleFunc("GET /projects/{name}", handleProject)
 
-	mux.HandleFunc("GET /projects/{name}/plans/{ticket}", func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
-		ticket := r.PathValue("ticket")
-		plan, err := ReadPlan(name, ticket)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(plan)
-	})
+	mux.HandleFunc("GET /projects/{name}/plans/{ticket}", handlePlan)
 
 	mux.HandleFunc("GET /projects/{name}/audit", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
