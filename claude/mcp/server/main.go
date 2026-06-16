@@ -86,7 +86,7 @@ func handle(req Request) {
 		reply(req.ID, map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "clearlink-registry", "version": "1.0.0"},
+			"serverInfo":      map[string]any{"name": "registry", "version": "1.0.0"},
 		})
 
 	case "notifications/initialized", "ping":
@@ -132,6 +132,8 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryWriteAudit(args)
 	case "registry_get_audit":
 		return registryGetAudit(args)
+	case "registry_report_issue":
+		return registryReportIssue(args)
 	// Bitbucket
 	case "bitbucket_list_prs":
 		return bbListPRs(args)
