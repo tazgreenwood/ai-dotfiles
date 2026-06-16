@@ -164,6 +164,45 @@ func ReadPlan(name, ticket string) (Plan, error) {
 	return plan, nil
 }
 
+type IssueEntry struct {
+	Tool       string `json:"tool"`
+	Error      string `json:"error"`
+	Context    string `json:"context,omitempty"`
+	Severity   string `json:"severity"`
+	RecordedAt string `json:"_recorded_at,omitempty"`
+}
+
+func ReadIssues(name, severity string) ([]IssueEntry, error) {
+	f := filepath.Join(dataDir(), name, "issues.json")
+	b, err := os.ReadFile(f)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []IssueEntry{}, nil
+		}
+		return nil, err
+	}
+	var entries []IssueEntry
+	if err := json.Unmarshal(b, &entries); err != nil {
+		return nil, err
+	}
+	if severity == "" {
+		if entries == nil {
+			entries = []IssueEntry{}
+		}
+		return entries, nil
+	}
+	var filtered []IssueEntry
+	for _, e := range entries {
+		if e.Severity == severity {
+			filtered = append(filtered, e)
+		}
+	}
+	if filtered == nil {
+		filtered = []IssueEntry{}
+	}
+	return filtered, nil
+}
+
 func ReadAudit(name, since, until string) ([]AuditEntry, error) {
 	af := filepath.Join(dataDir(), name, "audit.json")
 	b, err := os.ReadFile(af)

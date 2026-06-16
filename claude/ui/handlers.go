@@ -34,9 +34,17 @@ type indexData struct {
 }
 
 type projectSummary struct {
-	Name       string
-	PlanCount  int
-	AuditCount int
+	Name        string
+	PlanCount   int
+	AuditCount  int
+	IssueCount  int
+}
+
+type issueData struct {
+	Breadcrumbs []breadcrumb
+	ProjectName string
+	Entries     []IssueEntry
+	Severity    string
 }
 
 type projectData struct {
@@ -44,6 +52,7 @@ type projectData struct {
 	Project     Project
 	Plans       []planSummary
 	RecentAudit []AuditEntry
+	IssueCount  int
 }
 
 type planSummary struct {
@@ -76,10 +85,12 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	for _, p := range projects {
 		plans, _ := ReadPlans(p.Name)
 		audit, _ := ReadAudit(p.Name, "", "")
+		issues, _ := ReadIssues(p.Name, "")
 		summaries = append(summaries, projectSummary{
 			Name:       p.Name,
 			PlanCount:  len(plans),
 			AuditCount: len(audit),
+			IssueCount: len(issues),
 		})
 	}
 
@@ -175,6 +186,8 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 		recent = recent[len(recent)-5:]
 	}
 
+	issues, _ := ReadIssues(name, "")
+
 	data := projectData{
 		Breadcrumbs: []breadcrumb{
 			{Label: "Registry", URL: "/"},
@@ -183,7 +196,33 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 		Project:     proj,
 		Plans:       plans,
 		RecentAudit: recent,
+		IssueCount:  len(issues),
 	}
 
 	render(w, "project.html", data)
+}
+
+func handleIssues(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if _, err := ReadProject(name); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	severity := r.URL.Query().Get("severity")
+	entries, err := ReadIssues(name, severity)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	data := issueData{
+		Breadcrumbs: []breadcrumb{
+			{Label: "Registry", URL: "/"},
+			{Label: name, URL: "/projects/" + name},
+			{Label: "Issues"},
+		},
+		ProjectName: name,
+		Entries:     entries,
+		Severity:    severity,
+	}
+	render(w, "issues.html", data)
 }
