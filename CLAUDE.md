@@ -26,10 +26,13 @@ The codebase provides a suite of user-facing skills and supporting MCP tools:
 - `standup.md` — synthesize Yesterday/Today/Blockers from JIRA + Slack
 - `shipped.md` — work history report by month/quarter/year with optional narrative mode
 
-**MCP Server** (`claude/mcp/server/`):
-- `registry.go` — project metadata, plan storage, audit trail (uses `~/.config/clearlink-registry/data/`)
-- `bitbucket.go` — PR, branch, and commit operations
-- `main.go` — JSON-RPC dispatcher and MCP setup
+**MCP Servers**:
+- **Registry Server** (`claude/mcp/server/`):
+  - `registry.go` — project metadata, plan storage, audit trail, issue reporting (uses `~/.config/clearlink-registry/data/`)
+  - `main.go` — JSON-RPC dispatcher and MCP setup
+- **Bitbucket Server** (`claude/mcp/bitbucket/`):
+  - `bitbucket.go` — PR, branch, and commit operations
+  - `main.go` — JSON-RPC dispatcher and MCP setup
 
 **Key flows**:
 1. **Plan**: Auto-increment fake ticket counter in registry; store plan JSON in `registry_write_plan`
@@ -46,14 +49,15 @@ The codebase provides a suite of user-facing skills and supporting MCP tools:
   - Slack — via `mcp__slack__*` tools
   - Bitbucket — via custom `bitbucket_*` tools
 - **Data storage**: JSON files in `~/.config/clearlink-registry/data/`
-- **Test command**: None (skills are prompt-based, no executable tests)
+- **Test command**: `cd claude/ui && go test ./...`
 
 ---
 
 ## Commands
 
-- Build MCP server: `cd claude/mcp/server && go build -o clearlink-registry`
-- Run server: `./clearlink-registry` (listens on stdin/stdout for JSON-RPC)
+- Build registry MCP server: `cd claude/mcp/server && go build -o registry`
+- Build bitbucket MCP server: `cd claude/mcp/bitbucket && go build -o bitbucket`
+- Run server: `./registry` or `./bitbucket` (listens on stdin/stdout for JSON-RPC)
 
 ---
 
@@ -110,6 +114,23 @@ Appends an entry to `data/{project}/audit.json`. Caller provides all fields; `_r
 Queries audit entries by date range. Dates are ISO 8601 (YYYY-MM-DD) and inclusive.
 
 **Date comparison logic**: Extracts first 10 chars of `date` field (or `_recorded_at` if missing) and does lexicographic string comparison. Works correctly for ISO dates because they sort chronologically.
+
+#### `registry_report_issue(name: string, issue: map[string]any) -> {ok: bool, total_entries: int} | error`
+Appends an issue report entry to `data/{project}/issues.json`. Used to log failures, blockers, or incidents during skill execution.
+
+**Issue schema**:
+```json
+{
+  "ticket": "string",
+  "severity": "critical|high|medium|low",
+  "category": "string",
+  "title": "string",
+  "description": "string",
+  "context": "string (optional)"
+}
+```
+
+Caller provides all fields; `_reported_at` (RFC3339) is added automatically.
 
 ---
 
