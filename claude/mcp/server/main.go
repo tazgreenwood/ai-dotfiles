@@ -134,23 +134,6 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryGetAudit(args)
 	case "registry_report_issue":
 		return registryReportIssue(args)
-	// Bitbucket
-	case "bitbucket_list_prs":
-		return bbListPRs(args)
-	case "bitbucket_get_pr":
-		return bbGetPR(args)
-	case "bitbucket_create_pr":
-		return bbCreatePR(args)
-	case "bitbucket_get_commits":
-		return bbGetCommits(args)
-	case "bitbucket_add_pr_comment":
-		return bbAddPRComment(args)
-	case "bitbucket_get_repo":
-		return bbGetRepo(args)
-	case "bitbucket_list_branches":
-		return bbListBranches(args)
-	case "bitbucket_get_diff":
-		return bbGetDiff(args)
 	}
 	return toolErr("unknown tool: " + name)
 }

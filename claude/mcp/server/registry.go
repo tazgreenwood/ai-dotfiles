@@ -347,6 +347,10 @@ func registryGetAudit(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"entries": filtered, "total": len(filtered)})
 }
 
+func allTools() []Tool {
+	return registryTools()
+}
+
 // ── Tool schemas ───────────────────────────────────────────────────────────────
 
 func registryTools() []Tool {
