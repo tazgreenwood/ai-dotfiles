@@ -313,3 +313,62 @@ func TestReadAudit_MissingFileReturnsEmpty(t *testing.T) {
 		t.Fatalf("want 0 entries for missing project, got %d", len(got))
 	}
 }
+
+// ── ReadIssues ─────────────────────────────────────────────────────────────────
+
+func TestReadIssues_ReturnsEntries(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	issues := []map[string]any{
+		{"tool": "registry_get_project", "error": "not found", "severity": "error", "_recorded_at": "2026-06-16T10:00:00Z"},
+		{"tool": "registry_set", "error": "write failed", "severity": "warning", "_recorded_at": "2026-06-16T11:00:00Z"},
+	}
+	writeFixture(t, filepath.Join(dir, "myproject", "issues.json"), issues)
+
+	got, err := ReadIssues("myproject", "")
+	if err != nil {
+		t.Fatalf("ReadIssues() error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 issues, got %d", len(got))
+	}
+}
+
+func TestReadIssues_MissingFileReturnsEmpty(t *testing.T) {
+	_, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	got, err := ReadIssues("nonexistent", "")
+	if err != nil {
+		t.Fatalf("ReadIssues() for missing project should not error, got: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want 0 issues, got %d", len(got))
+	}
+}
+
+func TestReadIssues_FiltersBySeverity(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	issues := []map[string]any{
+		{"tool": "registry_get_project", "error": "not found", "severity": "error"},
+		{"tool": "registry_set", "error": "write failed", "severity": "warning"},
+		{"tool": "registry_get_plan", "error": "missing plan", "severity": "error"},
+	}
+	writeFixture(t, filepath.Join(dir, "myproject", "issues.json"), issues)
+
+	got, err := ReadIssues("myproject", "error")
+	if err != nil {
+		t.Fatalf("ReadIssues() error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 error-severity issues, got %d", len(got))
+	}
+	for _, e := range got {
+		if e.Severity != "error" {
+			t.Errorf("want severity=error, got %q", e.Severity)
+		}
+	}
+}
