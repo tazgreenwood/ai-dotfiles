@@ -16,7 +16,7 @@ func dataDir() string {
 		return d
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "clearlink-registry", "data")
+	return filepath.Join(home, ".config", "registry", "data")
 }
 
 func projectDir(name string) string { return filepath.Join(dataDir(), name) }
@@ -267,6 +267,41 @@ func registryWriteAudit(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"ok": true, "total_entries": len(log)})
 }
 
+func registryReportIssue(args map[string]any) ToolResult {
+	project := str(args, "project")
+	if project == "" {
+		project = "registry"
+	}
+	tool := str(args, "tool")
+	errMsg := str(args, "error")
+	if tool == "" || errMsg == "" {
+		return toolErr("tool and error required")
+	}
+	severity := str(args, "severity")
+	if severity == "" {
+		severity = "error"
+	}
+	file := filepath.Join(projectDir(project), "issues.json")
+	var issues []any
+	if data, err := os.ReadFile(file); err == nil {
+		_ = json.Unmarshal(data, &issues)
+	}
+	entry := map[string]any{
+		"tool":         tool,
+		"error":        errMsg,
+		"severity":     severity,
+		"_recorded_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	if ctx := str(args, "context"); ctx != "" {
+		entry["context"] = ctx
+	}
+	issues = append(issues, entry)
+	if err := writeJSON(file, issues); err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "total_issues": len(issues)})
+}
+
 func registryGetAudit(args map[string]any) ToolResult {
 	name := str(args, "name")
 	if name == "" {
@@ -310,6 +345,10 @@ func registryGetAudit(args map[string]any) ToolResult {
 		filtered = append(filtered, raw)
 	}
 	return toolOK(map[string]any{"entries": filtered, "total": len(filtered)})
+}
+
+func allTools() []Tool {
+	return registryTools()
 }
 
 // ── Tool schemas ───────────────────────────────────────────────────────────────
@@ -409,6 +448,21 @@ func registryTools() []Tool {
 					"entry": map[string]any{"type": "object", "description": "Include: action, ticket, actor, details"},
 				},
 				"required": []string{"name", "entry"},
+			},
+		},
+		{
+			Name:        "registry_report_issue",
+			Description: "ALWAYS CALL THIS TOOL when any registry MCP tool call fails, returns an error, or produces an unexpected result. Do not skip — call it immediately on failure. Provide: project name, tool that failed, error message, and optionally what you were trying to do.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"project":  map[string]any{"type": "string", "description": "Project name (default: 'registry')"},
+					"tool":     map[string]any{"type": "string", "description": "Name of the tool that failed"},
+					"error":    map[string]any{"type": "string", "description": "Error message"},
+					"context":  map[string]any{"type": "string", "description": "What you were trying to do (optional)"},
+					"severity": map[string]any{"type": "string", "enum": []string{"error", "warning"}, "description": "Default: error"},
+				},
+				"required": []string{"tool", "error"},
 			},
 		},
 		{

@@ -21,16 +21,12 @@ func bbWorkspace() string {
 }
 
 func bbAuth() (string, error) {
-	user := os.Getenv("BITBUCKET_USERNAME")
-	pass := os.Getenv("BITBUCKET_APP_PASSWORD")
-	if user == "" || pass == "" {
-		return "", fmt.Errorf("BITBUCKET_USERNAME and BITBUCKET_APP_PASSWORD env vars required")
+	email := os.Getenv("BITBUCKET_EMAIL")
+	token := os.Getenv("BITBUCKET_TOKEN")
+	if email == "" || token == "" {
+		return "", fmt.Errorf("BITBUCKET_EMAIL and BITBUCKET_TOKEN env vars required")
 	}
-	return "Basic " + basicAuth(user, pass), nil
-}
-
-func basicAuth(user, pass string) string {
-	return base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(email+":"+token)), nil
 }
 
 func bbGet(endpoint string) (map[string]any, error) {
@@ -38,17 +34,16 @@ func bbGet(endpoint string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	url := endpoint
+	u := endpoint
 	if !strings.HasPrefix(endpoint, "http") {
-		url = bbBase + endpoint
+		u = bbBase + endpoint
 	}
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Accept", "application/json")
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -80,7 +75,6 @@ func bbPost(endpoint string, payload any) (map[string]any, error) {
 	}
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -107,7 +101,6 @@ func bbGetText(endpoint string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Authorization", auth)
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
@@ -125,9 +118,9 @@ func bbGetText(endpoint string) (string, error) {
 
 func bbPaginate(endpoint string, max int) ([]any, error) {
 	var results []any
-	url := bbBase + endpoint
-	for url != "" && len(results) < max {
-		data, err := bbGet(url)
+	u := bbBase + endpoint
+	for u != "" && len(results) < max {
+		data, err := bbGet(u)
 		if err != nil {
 			return results, err
 		}
@@ -135,9 +128,9 @@ func bbPaginate(endpoint string, max int) ([]any, error) {
 			results = append(results, values...)
 		}
 		if next, ok := data["next"].(string); ok {
-			url = next
+			u = next
 		} else {
-			url = ""
+			u = ""
 		}
 	}
 	if len(results) > max {
@@ -148,6 +141,35 @@ func bbPaginate(endpoint string, max int) ([]any, error) {
 
 func repoPath(repo string) string {
 	return fmt.Sprintf("/repositories/%s/%s", bbWorkspace(), repo)
+}
+
+func str(args map[string]any, key string) string {
+	v, _ := args[key].(string)
+	return v
+}
+
+func strOr(args map[string]any, key, def string) string {
+	if v := str(args, key); v != "" {
+		return v
+	}
+	return def
+}
+
+func intArg(args map[string]any, key string) int {
+	switch v := args[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	}
+	return 0
+}
+
+func intArgOr(args map[string]any, key string, def int) int {
+	if v := intArg(args, key); v > 0 {
+		return v
+	}
+	return def
 }
 
 // ── Tool handlers ──────────────────────────────────────────────────────────────
@@ -387,23 +409,6 @@ func commitAuthor(m map[string]any) string {
 	return nestedStr(m, "author", "raw")
 }
 
-func intArg(args map[string]any, key string) int {
-	switch v := args[key].(type) {
-	case float64:
-		return int(v)
-	case int:
-		return v
-	}
-	return 0
-}
-
-func intArgOr(args map[string]any, key string, def int) int {
-	if v := intArg(args, key); v > 0 {
-		return v
-	}
-	return def
-}
-
 // ── Tool schemas ───────────────────────────────────────────────────────────────
 
 func bitbucketTools() []Tool {
@@ -508,12 +513,4 @@ func bitbucketTools() []Tool {
 			},
 		},
 	}
-}
-
-// ── allTools (used by main) ────────────────────────────────────────────────────
-
-func allTools() []Tool {
-	tools := registryTools()
-	tools = append(tools, bitbucketTools()...)
-	return tools
 }

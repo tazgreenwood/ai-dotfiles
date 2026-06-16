@@ -7,8 +7,6 @@ import (
 	"os"
 )
 
-// ── JSON-RPC types ─────────────────────────────────────────────────────────────
-
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      any             `json:"id,omitempty"`
@@ -27,8 +25,6 @@ type RPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
-
-// ── Tool schema types ──────────────────────────────────────────────────────────
 
 type Tool struct {
 	Name        string         `json:"name"`
@@ -50,8 +46,6 @@ type ToolResult struct {
 	Content []ContentItem `json:"content"`
 	IsError bool          `json:"isError,omitempty"`
 }
-
-// ── Wire ───────────────────────────────────────────────────────────────────────
 
 func reply(id any, result any) {
 	r := Response{JSONRPC: "2.0", ID: id, Result: result}
@@ -77,26 +71,46 @@ func toolErr(msg string) ToolResult {
 	}
 }
 
-// ── Dispatch ───────────────────────────────────────────────────────────────────
+func allTools() []Tool {
+	return bitbucketTools()
+}
+
+func dispatch(name string, args map[string]any) ToolResult {
+	switch name {
+	case "bitbucket_list_prs":
+		return bbListPRs(args)
+	case "bitbucket_get_pr":
+		return bbGetPR(args)
+	case "bitbucket_create_pr":
+		return bbCreatePR(args)
+	case "bitbucket_get_commits":
+		return bbGetCommits(args)
+	case "bitbucket_add_pr_comment":
+		return bbAddPRComment(args)
+	case "bitbucket_get_repo":
+		return bbGetRepo(args)
+	case "bitbucket_list_branches":
+		return bbListBranches(args)
+	case "bitbucket_get_diff":
+		return bbGetDiff(args)
+	}
+	return toolErr("unknown tool: " + name)
+}
 
 func handle(req Request) {
 	switch req.Method {
-
 	case "initialize":
 		reply(req.ID, map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "registry", "version": "1.0.0"},
+			"serverInfo":      map[string]any{"name": "bitbucket", "version": "1.0.0"},
 		})
-
 	case "notifications/initialized", "ping":
 		if req.ID != nil {
 			reply(req.ID, map[string]any{})
 		}
-
 	case "tools/list":
 		reply(req.ID, map[string]any{"tools": allTools()})
-
 	case "tools/call":
 		var p ToolCallParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {
@@ -105,45 +119,14 @@ func handle(req Request) {
 		}
 		result := dispatch(p.Name, p.Arguments)
 		reply(req.ID, result)
-
 	default:
 		replyErr(req.ID, -32601, "method not found: "+req.Method)
 	}
 }
 
-func dispatch(name string, args map[string]any) ToolResult {
-	// Registry
-	switch name {
-	case "registry_get_project":
-		return registryGetProject(args)
-	case "registry_set":
-		return registrySet(args)
-	case "registry_init_project":
-		return registryInitProject(args)
-	case "registry_list_projects":
-		return registryListProjects(args)
-	case "registry_list_plans":
-		return registryListPlans(args)
-	case "registry_get_plan":
-		return registryGetPlan(args)
-	case "registry_write_plan":
-		return registryWritePlan(args)
-	case "registry_write_audit":
-		return registryWriteAudit(args)
-	case "registry_get_audit":
-		return registryGetAudit(args)
-	case "registry_report_issue":
-		return registryReportIssue(args)
-	}
-	return toolErr("unknown tool: " + name)
-}
-
-// ── Main ───────────────────────────────────────────────────────────────────────
-
 func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
-
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

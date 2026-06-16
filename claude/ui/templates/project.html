@@ -37,6 +37,20 @@
   {{end}}
 </section>
 
+<section class="mb-10">
+  <div class="flex items-center justify-between mb-4">
+    <h2 class="text-xl font-semibold">
+      Issues
+      {{if gt .IssueCount 0}}
+      <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">{{.IssueCount}}</span>
+      {{else}}
+      <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">0</span>
+      {{end}}
+    </h2>
+    <a href="/projects/{{.Project.Name}}/issues" class="text-sm text-blue-600 hover:underline">View all &rarr;</a>
+  </div>
+</section>
+
 <section>
   <div class="flex items-center justify-between mb-4">
     <h2 class="text-xl font-semibold">Recent Audit</h2>

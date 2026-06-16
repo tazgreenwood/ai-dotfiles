@@ -201,6 +201,45 @@ func TestGetProject_ResponseIsJSON(t *testing.T) {
 	}
 }
 
+// ── GET /projects/{name}/issues ────────────────────────────────────────────────
+
+func TestGetIssues_ExistingProjectReturns200(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+	setupProjectFixture(t, dir, "existing")
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing/issues")
+	if err != nil {
+		t.Fatalf("GET /projects/existing/issues: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("want 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetIssues_UnknownProjectReturns404(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/unknown/issues")
+	if err != nil {
+		t.Fatalf("GET /projects/unknown/issues: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("want 404, got %d", resp.StatusCode)
+	}
+}
+
 func TestGetAudit_WithQueryParams_FiltersResults(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
