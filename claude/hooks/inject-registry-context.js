@@ -53,7 +53,7 @@ if (!projectName) {
 // ── Read project.json ──────────────────────────────────────────────────────────
 
 const registryDir = process.env.REGISTRY_DATA_DIR ||
-  path.join(os.homedir(), '.config', 'clearlink-registry', 'data');
+  path.join(os.homedir(), '.config', 'registry', 'data');
 const projectFile = path.join(registryDir, projectName, 'project.json');
 
 let project;
