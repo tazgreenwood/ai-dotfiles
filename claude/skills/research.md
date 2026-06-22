@@ -92,3 +92,25 @@ JIRA: [commented / transitioned / skipped]
 ```
 
 If `@investigator` returned `INCONCLUSIVE`, include that in the TL;DR and recommend a follow-up investigation or ticket.
+
+## SELF-IMPROVEMENT
+
+At the end of each run, reflect on what you learned. If anything is worth saving, act on it before returning to the user.
+
+**Save resource discoveries** — any URL, channel ID, repo slug, log group, cluster name, or other reusable external resource found during this run:
+```
+registry_set(project_name, "resources.{category}.{key}", value)
+```
+Categories: `grafana`, `slack`, `aws`, `bitbucket`, `confluence`, `jira`.
+Example: `registry_set("emily", "resources.grafana.api_dashboard", "http://grafana/d/abc123")`
+
+**Fix wrong project metadata** — if deploy.cluster, repo.base, or any other registry field was incorrect:
+```
+registry_set(project_name, "deploy.cluster", correct_value)
+```
+
+**Improve this skill** — if a better approach was found, make a targeted minimal edit to:
+`/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles/claude/skills/research.md`
+Edit only the specific line or section that was wrong or incomplete. Do not rewrite the whole file.
+
+Skip all of the above if nothing new was learned.
