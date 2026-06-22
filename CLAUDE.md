@@ -34,10 +34,14 @@ The codebase provides a suite of user-facing skills and supporting MCP tools:
   - `bitbucket.go` — PR, branch, and commit operations
   - `main.go` — JSON-RPC dispatcher and MCP setup
 
+**Hooks** (in `claude/hooks/`):
+- `inject-registry-context.js` — UserPromptSubmit hook; reads project metadata and resources from registry; emits as system-reminder; dedupes per session
+
 **Key flows**:
 1. **Plan**: Auto-increment fake ticket counter in registry; store plan JSON in `registry_write_plan`
 2. **Ship**: Write rich audit entry via `registry_write_audit`; skip JIRA transition if ticket key is auto-generated
 3. **Shipped**: Query audit entries via `registry_get_audit` with date range filtering
+4. **Resource discovery**: Skills discover external resources (dashboards, channels, repos, log groups) at runtime; save via `registry_set()` to resources subtree; hook injects these on next session
 
 ---
 
@@ -192,6 +196,15 @@ Caller provides all fields; `_reported_at` (RFC3339) is added automatically.
   - Single monolithic skill: poor UX, hard to find subcommands.
 - **Consequences**: Each skill is ~30–50 lines of MD. Agents (@jira, @confluence, @standup, etc.) contain actual business logic and can be updated independently.
 
+### [2026-06-22] — Hook-based resource injection, not per-skill queries
+- **Context**: Skills need access to discovered external resources (Slack channels, Grafana dashboards, Bitbucket repos, log groups). Resources can be discovered at runtime and saved to registry, but need to be available without extra API calls on next run.
+- **Decision**: Implement `inject-registry-context.js` as a UserPromptSubmit hook that emits project metadata and all resources as a system-reminder on each session start. Skills check this injected context first (zero cost), then fall back to environment variables, then interactive prompts. Skills that discover new resources save them via `registry_set()`.
+- **Rejected alternatives**:
+  - Each skill calls `registry_get_resources()` on startup: adds API latency and coupling to registry availability; breaks offline workflows.
+  - Pre-compute and cache resources in env vars: doesn't evolve with discoveries; requires manual sync.
+  - Store in gitignored config files: fragile, per-machine, hard to reconcile.
+- **Consequences**: Skills are stateless discovery engines. Registry is the source of truth for external integrations. Hook dedupes per session (flag file) to avoid re-parsing on each prompt. New resources discovered by one skill are immediately available to others without restart.
+
 ---
 
 ## Domain Glossary
@@ -200,9 +213,12 @@ Caller provides all fields; `_reported_at` (RFC3339) is added automatically.
 - **Fake ticket**: Auto-generated key for projects without JIRA integration. Uses registry counter.
 - **Plan**: Mission state object with acceptance criteria, step breakdown, and status. Stored as JSON in registry.
 - **Audit entry**: Metadata about shipped work (ticket, type, impact, PR URL, files changed, story points, labels, date).
-- **Registry**: Persistent key-value store in `~/.config/clearlink-registry/data/` with project metadata, plans, and audit trails.
-- **Skill**: User-invocable markdown prompt file that routes commands to agents.
+- **Registry**: Persistent key-value store in `~/.config/registry/data/` with project metadata, plans, and audit trails.
+- **Resource cache**: External integrations (Slack channels, Grafana dashboards, Bitbucket repos, AWS log groups, etc.) stored under `project.resources` in registry. Organized by category (grafana, slack, aws, bitbucket, confluence, jira).
+- **Registry context**: System-reminder block emitted by `inject-registry-context` hook on session start; contains project metadata and all cached resources; used by skills to avoid redundant API calls.
+- **Skill**: User-invocable markdown prompt file that routes commands to agents. All skills include a SELF-IMPROVEMENT section for discovering and caching resources.
 - **Agent**: Background orchestration logic (e.g. `@jira`, `@confluence`, `@standup`) invoked by skills.
+- **Hook**: Node.js script (in `claude/hooks/`) registered in settings.json that runs at a defined event (e.g. UserPromptSubmit) to inject context or perform setup.
 
 ---
 
