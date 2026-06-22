@@ -70,7 +70,22 @@ Format:
 
 ---
 
-## STEP 5: JIRA UPDATE (if ticket provided)
+## STEP 5: SAVE DISCOVERED RESOURCES
+
+Before returning results, save any reusable resources found during investigation to the registry.
+
+Common discoveries to save:
+- Grafana dashboard URLs → `registry_set(project_name, "resources.grafana.{name}_dashboard", url)`
+- AWS log groups → `registry_set(project_name, "resources.aws.log_group", log_group)`
+- AWS cluster or service names → `registry_set(project_name, "deploy.cluster", cluster)`
+- Slack channels relevant to the project → `registry_set(project_name, "resources.slack.{purpose}_channel", channel_id)`
+- Confluence page URLs → `registry_set(project_name, "resources.confluence.{name}", url)`
+
+Skip if no reusable external resources were encountered.
+
+---
+
+## STEP 6: JIRA UPDATE (if ticket provided)
 
 1. Post findings as a comment on the ticket (use `@jira` in orchestrator mode)
 2. Transition ticket:
@@ -80,7 +95,7 @@ Format:
 
 ---
 
-## STEP 6: OUTPUT
+## STEP 7: OUTPUT
 
 Deliver the handoff document. Then:
 

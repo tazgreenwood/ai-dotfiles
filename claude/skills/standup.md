@@ -58,8 +58,9 @@ What did you work on yesterday? (press Enter to infer from JIRA + Slack + Bitbuc
   - Extract: what was discussed, who was involved, what was decided or shipped.
 
 - **Bitbucket** (if available):
-  - Read `$BITBUCKET_REPOS` env var via Bash: `echo $BITBUCKET_REPOS`
-  - If not set: use default repos `mapi-js,mapi-server,emily`.
+  - Check injected REGISTRY CONTEXT for `resources.bitbucket.repos` (comma-separated list). If present, use it.
+  - Else: read `$BITBUCKET_REPOS` env var via Bash: `echo $BITBUCKET_REPOS`.
+  - If neither set: use default repos `mapi-js,mapi-server,emily`.
   - For each repo, call `bitbucket_list_prs` with `state: MERGED`. Filter for PRs authored by the current user merged in the last 24 hours. Collect repo, PR title, PR link.
 
 **Format Yesterday as a narrative paragraph** (2–3 sentences). Write it like a human would say it in a standup — what you worked on, who you worked with, what shipped or was decided. Do not use bullets. Do not list ticket keys unless they add meaningful context. Examples of good tone:
@@ -85,7 +86,7 @@ Pull from three sources in parallel:
   - Surface any Slack-sourced work items not already covered by JIRA tickets.
 
 - **Bitbucket** (if available):
-  - For each repo in `$BITBUCKET_REPOS` (or defaults), call `bitbucket_list_prs` with `state: OPEN`. Look for PRs authored by the user that need a push (no recent activity, changes requested) or PRs from others that the user has been tagged to review.
+  - For each repo in `resources.bitbucket.repos` (registry context) or `$BITBUCKET_REPOS` or defaults, call `bitbucket_list_prs` with `state: OPEN`. Look for PRs authored by the user that need a push (no recent activity, changes requested) or PRs from others that the user has been tagged to review.
 
 **Format Today as context-rich bullets.** Prioritise: In Progress JIRA tickets first, then Slack commitments, then To Do JIRA tickets, then Bitbucket follow-ups. Append a short context tag where it adds signal:
 
@@ -138,24 +139,26 @@ Print the formatted report to the user before attempting to post.
 
 ## STEP 5: POST TO SLACK
 
-Read the `$SLACK_CHANNEL` environment variable via Bash: `echo $SLACK_CHANNEL`
+Resolve the Slack channel in priority order:
 
-**If a value is returned:** post the formatted report using `slack_send_message`. Confirm:
+1. Check injected REGISTRY CONTEXT for `resources.slack.standup_channel` — use it if present.
+2. Else read `$SLACK_CHANNEL` env var via Bash: `echo $SLACK_CHANNEL` — use it if set.
+3. Else ask the user: "What Slack channel should I post to? (paste channel ID, e.g. C0XXXXXXXXX)" — then save it: `registry_set(project_name, "resources.slack.standup_channel", channel_id)`.
+
+**Once channel is resolved:** post the formatted report using `slack_send_message`. Confirm:
 
 ```
 STANDUP STATUS: POSTED — [channel]
 ```
 
-**If not set:**
+**If channel still not resolved after asking:**
 
 ```
 STANDUP STATUS: CHANNEL NOT CONFIGURED
 
-To enable automatic posting, set the SLACK_CHANNEL environment variable:
+Provide a Slack channel ID when prompted, or set the SLACK_CHANNEL environment variable:
 
   export SLACK_CHANNEL=C0XXXXXXXXX
-
-Add it to your shell profile to persist across sessions. Run /standup again once set.
 ```
 
 ## SELF-IMPROVEMENT

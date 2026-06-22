@@ -81,6 +81,15 @@ Pass:
 
 After @handover completes, update mission state with `pr_id` and `pr_url`.
 
+Write the PR URL to registry so future sessions can reference it without querying Bitbucket:
+```
+registry_set(project_name, "resources.recent_prs." + ticket_key, pr_url)
+```
+If deploy.cluster was discovered or confirmed during the build, write it:
+```
+registry_set(project_name, "deploy.cluster", cluster_name)
+```
+
 ---
 
 ## STEP 6: WRITE AUDIT TRAIL
