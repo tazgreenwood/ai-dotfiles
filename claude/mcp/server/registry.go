@@ -344,6 +344,29 @@ func registryUpdateStep(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"ok": true, "step_index": idx, "status": status})
 }
 
+func registryGetResources(args map[string]any) ToolResult {
+	name := str(args, "name")
+	if name == "" {
+		return toolErr("name required")
+	}
+	data, err := readJSON(filepath.Join(projectDir(name), "project.json"))
+	if err != nil {
+		return toolErr(fmt.Sprintf("project '%s' not found in registry", name))
+	}
+	resources, _ := data["resources"].(map[string]any)
+	if resources == nil {
+		resources = map[string]any{}
+	}
+	if category := str(args, "category"); category != "" {
+		if v, ok := resources[category]; ok {
+			resources = map[string]any{category: v}
+		} else {
+			resources = map[string]any{}
+		}
+	}
+	return toolOK(map[string]any{"resources": resources})
+}
+
 func registryGetAudit(args map[string]any) ToolResult {
 	name := str(args, "name")
 	if name == "" {
@@ -519,6 +542,18 @@ func registryTools() []Tool {
 					"severity": map[string]any{"type": "string", "enum": []string{"error", "warning"}, "description": "Default: error"},
 				},
 				"required": []string{"tool", "error"},
+			},
+		},
+		{
+			Name:        "registry_get_resources",
+			Description: "Get cached project resources (Grafana dashboards, Slack channels, Bitbucket repos, etc), optionally filtered by category",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":     map[string]any{"type": "string", "description": "Project name"},
+					"category": map[string]any{"type": "string", "description": "Optional: filter to one category e.g. grafana, slack, aws, bitbucket"},
+				},
+				"required": []string{"name"},
 			},
 		},
 		{
