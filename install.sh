@@ -25,6 +25,37 @@ for agent_file in "$DOTFILES/claude/agents"/*.md; do
   echo "  ✓ $(basename "$agent_file" .md)"
 done
 
+# ── Claude Hooks ──────────────────────────────────────────────────────────────
+echo "Linking Claude hooks..."
+mkdir -p "$CLAUDE_DIR/hooks"
+for hook_file in "$DOTFILES/claude/hooks"/*.js; do
+  [ -f "$hook_file" ] || continue
+  ln -sf "$hook_file" "$CLAUDE_DIR/hooks/$(basename "$hook_file")"
+  echo "  ✓ $(basename "$hook_file")"
+done
+
+# Register inject-registry-context in UserPromptSubmit hooks if not already present
+SETTINGS="$CLAUDE_DIR/settings.json"
+HOOK_CMD="node \"$CLAUDE_DIR/hooks/inject-registry-context.js\""
+if [ -f "$SETTINGS" ] && command -v node &>/dev/null; then
+  if ! grep -q "inject-registry-context" "$SETTINGS"; then
+    node - "$SETTINGS" "$HOOK_CMD" <<'EOF'
+const fs = require('fs');
+const [,, settingsPath, hookCmd] = process.argv;
+const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+if (!s.hooks) s.hooks = {};
+if (!s.hooks.UserPromptSubmit) s.hooks.UserPromptSubmit = [];
+s.hooks.UserPromptSubmit.push({
+  hooks: [{ command: hookCmd, timeout: 5, type: 'command' }]
+});
+fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2) + '\n');
+EOF
+    echo "  ✓ inject-registry-context registered in UserPromptSubmit hooks"
+  else
+    echo "  ✓ inject-registry-context already registered"
+  fi
+fi
+
 # ── Registry MCP Server ────────────────────────────────────────────────────────
 SERVER_DIR="$DOTFILES/claude/mcp/server"
 BINARY="$SERVER_DIR/registry"
