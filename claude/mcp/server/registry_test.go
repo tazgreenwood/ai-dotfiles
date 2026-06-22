@@ -232,3 +232,101 @@ func TestRegistryReportIssue_AcceptsWarning(t *testing.T) {
 		t.Errorf("want severity=warning, got %v", issues[0]["severity"])
 	}
 }
+
+func writeProjectJSON(t *testing.T, dir, name string, data map[string]any) {
+	t.Helper()
+	projectPath := filepath.Join(dir, name)
+	if err := os.MkdirAll(projectPath, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	b, _ := json.Marshal(data)
+	if err := os.WriteFile(filepath.Join(projectPath, "project.json"), b, 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
+func TestGetResources_ReturnsAll(t *testing.T) {
+	dir, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	writeProjectJSON(t, dir, "myproject", map[string]any{
+		"name": "myproject",
+		"resources": map[string]any{
+			"grafana": map[string]any{"dashboard": "http://grafana/d/abc"},
+			"aws":     map[string]any{"log_group": "/app/logs"},
+		},
+	})
+
+	result := registryGetResources(map[string]any{"name": "myproject"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	resources, ok := resp["resources"].(map[string]any)
+	if !ok {
+		t.Fatalf("want resources map, got %T", resp["resources"])
+	}
+	if _, ok := resources["grafana"]; !ok {
+		t.Error("want grafana key in resources")
+	}
+	if _, ok := resources["aws"]; !ok {
+		t.Error("want aws key in resources")
+	}
+}
+
+func TestGetResources_FiltersByCategory(t *testing.T) {
+	dir, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	writeProjectJSON(t, dir, "myproject", map[string]any{
+		"name": "myproject",
+		"resources": map[string]any{
+			"grafana": map[string]any{"dashboard": "http://grafana/d/abc"},
+			"aws":     map[string]any{"log_group": "/app/logs"},
+		},
+	})
+
+	result := registryGetResources(map[string]any{"name": "myproject", "category": "grafana"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	resources, ok := resp["resources"].(map[string]any)
+	if !ok {
+		t.Fatalf("want resources map, got %T", resp["resources"])
+	}
+	if _, ok := resources["grafana"]; !ok {
+		t.Error("want grafana key in resources")
+	}
+	if _, ok := resources["aws"]; ok {
+		t.Error("want aws excluded when category=grafana")
+	}
+}
+
+func TestGetResources_EmptyWhenNone(t *testing.T) {
+	dir, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	writeProjectJSON(t, dir, "myproject", map[string]any{
+		"name": "myproject",
+	})
+
+	result := registryGetResources(map[string]any{"name": "myproject"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	resources, ok := resp["resources"].(map[string]any)
+	if !ok {
+		t.Fatalf("want resources map, got %T", resp["resources"])
+	}
+	if len(resources) != 0 {
+		t.Errorf("want empty resources, got %v", resources)
+	}
+}
