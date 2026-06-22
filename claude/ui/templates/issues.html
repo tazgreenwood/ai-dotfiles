@@ -8,7 +8,7 @@
       <div>
         <label for="severity" class="block text-sm text-gray-600 mb-1">Severity</label>
         <select id="severity" name="severity" class="border border-gray-300 rounded px-2 py-1 text-sm">
-          <option value="" {{if eq .Severity ""}}>selected{{end}}>All</option>
+          <option value="" {{if eq .Severity ""}}selected{{end}}>All</option>
           <option value="error" {{if eq .Severity "error"}}selected{{end}}>Error</option>
           <option value="warning" {{if eq .Severity "warning"}}selected{{end}}>Warning</option>
         </select>

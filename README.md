@@ -76,4 +76,4 @@ Local MCP server for project metadata and audit trails. Built in Go; auto-config
 
 **Bitbucket integration**: `bitbucket_list_prs`, `bitbucket_get_pr`, `bitbucket_create_pr`, `bitbucket_get_commits`, `bitbucket_add_pr_comment`, `bitbucket_get_repo`, `bitbucket_list_branches`, `bitbucket_get_diff`
 
-Data lives in `~/.config/clearlink-registry/data/` — local state, not shared in git.
+Data lives in `~/.config/registry/data/` — local state, not shared in git.

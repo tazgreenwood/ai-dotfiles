@@ -72,7 +72,7 @@ func TestRegistryReportIssue_AddsRecordedAt(t *testing.T) {
 	}
 }
 
-func TestRegistryReportIssue_DefaultsProjectToRegistry(t *testing.T) {
+func TestRegistryReportIssue_DefaultsProjectToPrivateDotfiles(t *testing.T) {
 	dir, cleanup := setupTestDataDir(t)
 	defer cleanup()
 
@@ -85,9 +85,9 @@ func TestRegistryReportIssue_DefaultsProjectToRegistry(t *testing.T) {
 		t.Fatalf("unexpected error: %s", result.Content[0].Text)
 	}
 
-	issuesFile := filepath.Join(dir, "registry", "issues.json")
+	issuesFile := filepath.Join(dir, "private-dotfiles", "issues.json")
 	if _, err := os.Stat(issuesFile); err != nil {
-		t.Fatalf("want issues.json at registry/issues.json, not found: %v", err)
+		t.Fatalf("want issues.json at private-dotfiles/issues.json, not found: %v", err)
 	}
 }
 
@@ -134,6 +134,80 @@ func TestRegistryReportIssue_ReturnsTotalIssues(t *testing.T) {
 	total, _ := resp["total_issues"].(float64)
 	if total != 2 {
 		t.Errorf("want total_issues=2, got %v", resp["total_issues"])
+	}
+}
+
+func TestRegistryUpdateStep_UpdatesStatus(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	plan := map[string]any{
+		"ticket":  "TEST-1",
+		"summary": "test plan",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "pending"},
+			map[string]any{"title": "step two", "status": "pending"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-1", "data": plan})
+
+	result := registryUpdateStep(map[string]any{
+		"name":       "myproject",
+		"ticket":     "TEST-1",
+		"step_index": float64(0),
+		"status":     "in_progress",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	got := registryGetPlan(map[string]any{"name": "myproject", "ticket": "TEST-1"})
+	var data map[string]any
+	json.Unmarshal([]byte(got.Content[0].Text), &data)
+	steps := data["plan_steps"].([]any)
+	s0 := steps[0].(map[string]any)
+	s1 := steps[1].(map[string]any)
+	if s0["status"] != "in_progress" {
+		t.Errorf("want step 0 status=in_progress, got %v", s0["status"])
+	}
+	if s1["status"] != "pending" {
+		t.Errorf("want step 1 status=pending, got %v", s1["status"])
+	}
+}
+
+func TestRegistryUpdateStep_OutOfRange(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	plan := map[string]any{
+		"ticket":     "TEST-2",
+		"plan_steps": []any{map[string]any{"title": "only step", "status": "pending"}},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-2", "data": plan})
+
+	result := registryUpdateStep(map[string]any{
+		"name":       "myproject",
+		"ticket":     "TEST-2",
+		"step_index": float64(5),
+		"status":     "done",
+	})
+	if !result.IsError {
+		t.Fatal("want error for out-of-range index")
+	}
+}
+
+func TestRegistryUpdateStep_MissingPlan(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	result := registryUpdateStep(map[string]any{
+		"name":       "myproject",
+		"ticket":     "NOPE-1",
+		"step_index": float64(0),
+		"status":     "done",
+	})
+	if !result.IsError {
+		t.Fatal("want error for missing plan")
 	}
 }
 

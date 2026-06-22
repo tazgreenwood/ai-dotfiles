@@ -8,7 +8,7 @@ Work history report for perf reviews, monthly reconciliation, and quarterly repo
 
 Check availability before proceeding:
 
-- `mcp__clearlink-registry__*` — needed for audit trail queries
+- `mcp__registry__*` — needed for audit trail queries
 - `mcp__atlassian__*` — needed for JIRA supplement
 
 If registry MCP is unavailable: warn `SHIPPED WARNING: Registry MCP not configured — audit trail will be skipped.` Continue with JIRA only.

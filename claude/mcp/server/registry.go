@@ -270,7 +270,7 @@ func registryWriteAudit(args map[string]any) ToolResult {
 func registryReportIssue(args map[string]any) ToolResult {
 	project := str(args, "project")
 	if project == "" {
-		project = "registry"
+		project = "private-dotfiles"
 	}
 	tool := str(args, "tool")
 	errMsg := str(args, "error")
@@ -300,6 +300,48 @@ func registryReportIssue(args map[string]any) ToolResult {
 		return toolErr(err.Error())
 	}
 	return toolOK(map[string]any{"ok": true, "total_issues": len(issues)})
+}
+
+func registryUpdateStep(args map[string]any) ToolResult {
+	name := str(args, "name")
+	ticket := str(args, "ticket")
+	status := str(args, "status")
+	idxRaw, ok := args["step_index"]
+	if name == "" || ticket == "" || status == "" || !ok {
+		return toolErr("name, ticket, step_index, and status required")
+	}
+	var idx int
+	switch v := idxRaw.(type) {
+	case float64:
+		idx = int(v)
+	case int:
+		idx = v
+	default:
+		return toolErr("step_index must be a number")
+	}
+	file := filepath.Join(plansDir(name), ticket+".json")
+	data, err := readJSON(file)
+	if err != nil {
+		return toolErr(fmt.Sprintf("plan '%s' not found for project '%s'", ticket, name))
+	}
+	steps, ok := data["plan_steps"].([]any)
+	if !ok {
+		return toolErr("plan has no plan_steps array")
+	}
+	if idx < 0 || idx >= len(steps) {
+		return toolErr(fmt.Sprintf("step_index %d out of range (plan has %d steps)", idx, len(steps)))
+	}
+	step, ok := steps[idx].(map[string]any)
+	if !ok {
+		return toolErr(fmt.Sprintf("step %d is not an object", idx))
+	}
+	step["status"] = status
+	steps[idx] = step
+	data["plan_steps"] = steps
+	if err := writeJSON(file, data); err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "step_index": idx, "status": status})
 }
 
 func registryGetAudit(args map[string]any) ToolResult {
@@ -423,6 +465,20 @@ func registryTools() []Tool {
 					"ticket": map[string]any{"type": "string", "description": "e.g. ONE-24416"},
 				},
 				"required": []string{"name", "ticket"},
+			},
+		},
+		{
+			Name:        "registry_update_step",
+			Description: "Update the status of a single plan step by index. Preferred over registry_write_plan for status-only changes.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":       map[string]any{"type": "string"},
+					"ticket":     map[string]any{"type": "string", "description": "e.g. ONE-24416"},
+					"step_index": map[string]any{"type": "integer", "description": "Zero-based index into plan_steps"},
+					"status":     map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "done", "blocked"}},
+				},
+				"required": []string{"name", "ticket", "step_index", "status"},
 			},
 		},
 		{

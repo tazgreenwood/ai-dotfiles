@@ -12,7 +12,7 @@ You are the ship phase of the development workflow. The build is done — now re
 ## STEP 1: LOAD MISSION STATE
 
 Find the active mission:
-1. If a ticket key provided (ONE-XXXX), call `registry_get_plan(project_name, ticket)` via clearlink-registry MCP. Detect project name from git remote or CLAUDE.md.
+1. If a ticket key provided (ONE-XXXX), call `registry_get_plan(project_name, ticket)` via registry MCP. Detect project name from git remote or CLAUDE.md.
 2. If registry unavailable, fall back to `~/.claude/plan-[TICKET].json`
 3. If no ticket provided, call `registry_list_plans(project_name)` and pick the plan with all steps `"done"`. Fall back to `~/.claude/plan-NO-TICKET.json` or any local plan JSON.
 4. If no mission state found, report: "No completed build found. Run /build first."
@@ -42,6 +42,8 @@ If `@security` returns `SECURITY STATUS: GO WITH WARNINGS`: proceed, include war
 ---
 
 ## STEP 3: INVOKE @reviewer
+
+Use the full `reviewer` agent (subagent_type: reviewer) — not cavecrew-reviewer. PR reviews span many files and require prose rationale, not compressed findings.
 
 Pass:
 - All files changed (from mission state `plan_steps[].files` union)

@@ -9,7 +9,7 @@ You are the build phase of the development workflow. Execute the approved plan a
 ## STEP 1: LOAD MISSION STATE
 
 Find the active mission:
-1. If a ticket key was provided (ONE-XXXX), call `registry_get_plan(project_name, ticket)` via the clearlink-registry MCP. Detect project name from git remote or CLAUDE.md.
+1. If a ticket key was provided (ONE-XXXX), call `registry_get_plan(project_name, ticket)` via the registry MCP. Detect project name from git remote or CLAUDE.md.
 2. If registry returns no plan (or MCP unavailable), fall back to `~/.claude/plan-[TICKET].json` (or legacy `~/.claude/[TICKET].json`)
 3. If no ticket provided, call `registry_list_plans(project_name)` and pick the plan with at least one step not `"done"`. Fall back to any `~/.claude/plan-*.json` or `~/.claude/[ticket-key].json` if registry unavailable.
 4. If no mission state found, report: "No approved plan found. Run /plan first."
@@ -34,37 +34,103 @@ git checkout -b [branch]
 
 ## STEP 3: EXECUTE PLAN STEPS
 
-Loop through all steps in mission state where `status = "pending"`. For each step:
+Loop through all steps in mission state where `status = "pending"`. For each step at index `i`:
 
 ### 3a. Mark step in progress
-Call `registry_set(project_name, "plans.[ticket].plan_steps.[i].status", "in_progress")`.
-If registry unavailable, update the local JSON file.
 
-### 3b. Invoke @developer
-Pass the following context:
-- Current step (Why, How, Tests, Files, Verification)
-- The `## Expected PR` section from the mission state (this is the acceptance spec)
-- CLAUDE.md contents (Rules, Commands, API Contracts, Glossary)
-- Ticket key and summary
+```
+registry_update_step(project_name, ticket, i, "in_progress")
+```
 
-@developer writes failing tests first (if Tests field present), then implements.
+If registry unavailable, update the local JSON file directly.
 
-**Retry logic**: if @developer returns `DEVELOPER STATUS: BLOCKED`, retry up to 3 times passing the failure reason. On the 3rd consecutive failure, stop and Slack (see STEP 5: BLOCKED).
+### 3b. Spawn developer subagent
 
-### 3c. Invoke @qa
-Pass: changed files, current step details (why, how, tests, verification), `expected_pr` from mission state, and `acceptance_criteria` array from mission state.
+**Do not implement the step inline.** Spawn a fresh `developer` subagent via the Agent tool. Pass a self-contained prompt — the subagent has no access to this conversation.
 
-@qa runs in order:
-1. Linter — command from `## Commands → Lint` in CLAUDE.md
-2. Formatter check — command from `## Commands → Format` in CLAUDE.md
-3. Test suite — command from `## Commands → Tests` in CLAUDE.md
-4. TDD verification — tests were written before implementation (check git diff order)
-5. Logic audit and regression check
-6. AC verification if present
+The prompt must include all of the following verbatim:
 
-**If @qa returns NO-GO**: pass the failure report back to @developer as a retry. Count retries per step (max 3). On 3rd consecutive NO-GO, stop and Slack (see STEP 5: BLOCKED).
+```
+You are the developer agent. Implement exactly one plan step.
+
+## Ticket
+[ticket key] — [summary]
+
+## Branch
+[branch name] (already checked out)
+
+## This step (index [i])
+Title: [step.title]
+Why: [step.why]
+How: [step.how]
+Tests: [step.tests]
+Files: [step.files]
+Verification: [step.verification]
+
+## Acceptance criteria (full list)
+[acceptance_criteria from plan — verbatim, as bullet list]
+
+## Expected PR
+[expected_pr section from plan — verbatim]
+
+## CLAUDE.md
+[paste CLAUDE.md contents]
+
+## Instructions
+1. Write failing tests first if Tests field is present.
+2. Implement the step exactly as described.
+3. Run linter, formatter, and test suite per CLAUDE.md Commands.
+4. Return one of:
+   - DEVELOPER STATUS: DONE — [one-line summary of what was done]
+   - DEVELOPER STATUS: BLOCKED — [specific reason]
+```
+
+**Retry logic**: if developer returns `DEVELOPER STATUS: BLOCKED`, retry up to 3 times, prepending the failure reason to the prompt. On 3rd consecutive failure, go to STEP 5: BLOCKED.
+
+### 3c. Spawn QA subagent
+
+Spawn a fresh `qa` subagent via the Agent tool. Pass a self-contained prompt:
+
+```
+You are the QA agent. Verify one completed plan step.
+
+## Ticket
+[ticket key] — [summary]
+
+## Step verified (index [i])
+Title: [step.title]
+Why: [step.why]
+How: [step.how]
+Tests: [step.tests]
+Files: [step.files — the only files that should have changed]
+Verification: [step.verification]
+
+## Acceptance criteria
+[acceptance_criteria from plan — verbatim]
+
+## Expected PR
+[expected_pr section from plan — verbatim]
+
+## CLAUDE.md
+[paste CLAUDE.md contents]
+
+## Instructions
+Run in order:
+1. Linter — command from CLAUDE.md Commands → Lint
+2. Formatter check — command from CLAUDE.md Commands → Format
+3. Test suite — command from CLAUDE.md Commands → Tests
+4. Logic audit: does the implementation match the step's How and Verification?
+5. AC check: which acceptance criteria does this step satisfy?
+
+Return one of:
+- QA STATUS: GO — [brief summary, ACs covered]
+- QA STATUS: NO-GO — [specific failure reason, what must be fixed]
+```
+
+**If QA returns NO-GO**: pass the failure report back to a new developer subagent as a retry. Count retries per step (max 3). On 3rd consecutive NO-GO, go to STEP 5: BLOCKED.
 
 ### 3d. Commit
+
 Stage only the files listed in the step's `Files` field:
 ```bash
 git add [file1] [file2] ...
@@ -76,8 +142,12 @@ No body unless the why is genuinely non-obvious from the subject line.
 No Co-Authored-By or attribution lines.
 
 ### 3e. Mark step done
-Call `registry_set(project_name, "plans.[ticket].plan_steps.[i].status", "done")`.
-If registry unavailable, update the local JSON file.
+
+```
+registry_update_step(project_name, ticket, i, "done")
+```
+
+If registry unavailable, update the local JSON file directly.
 
 Proceed to the next pending step.
 
@@ -125,7 +195,7 @@ If a step hits 3 consecutive failures (developer or qa):
    Fix the issue, then run /build ONE-XXXX to resume.
    ```
 
-3. Leave mission state with the failed step as `"in_progress"` so the next `/build` invocation resumes at the right step.
+3. Call `registry_update_step(project_name, ticket, i, "blocked")` so the next `/build` resumes at the right step.
 
 ---
 
@@ -135,3 +205,4 @@ If a step hits 3 consecutive failures (developer or qa):
 - Never commit `CLAUDE.md` during the build — only step files.
 - Never push to remote — that happens in `/ship`.
 - If a step discovers out-of-scope improvements: note them in the commit message, do not implement them.
+- Step subagents are isolated — they cannot see this conversation. The prompt you pass them is their entire context.

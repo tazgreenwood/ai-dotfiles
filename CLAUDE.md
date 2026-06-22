@@ -87,6 +87,11 @@ Lists all plans for a project. Status is `"shipped"` if all plan steps have stat
 #### `registry_get_plan(name: string, ticket: string) -> map[string]any | error`
 Returns the full plan JSON for a ticket.
 
+#### `registry_update_step(name: string, ticket: string, step_index: int, status: string) -> {ok: bool, step_index: int, status: string} | error`
+Updates the status of a single step by zero-based index. Preferred over `registry_write_plan` for status-only changes — no full plan round-trip.
+
+Valid statuses: `pending`, `in_progress`, `done`, `blocked`.
+
 #### `registry_write_plan(name: string, ticket: string, data: map[string]any) -> {ok: bool, file: string} | error`
 Writes or updates a plan file. Used by `/plan` to persist mission state.
 

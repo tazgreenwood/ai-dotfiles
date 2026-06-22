@@ -21,7 +21,7 @@ Continue regardless.
 Read `CLAUDE.md` in the current working directory. Note:
 - Tech stack and test commands (under `## Commands`)
 - Rules and hard constraints
-- Any active plan: call `registry_list_plans(project_name)` first; fall back to `~/.claude/plan-*.json` for files with pending steps. If found, ask the user if they want to resume or start fresh.
+- Any active plan: call `registry_list_plans(project_name)`. If found, ask the user if they want to resume or start fresh.
 - Domain glossary and API contracts
 
 ### Brownfield gate
@@ -165,7 +165,6 @@ When the user approves, persist the plan via registry MCP:
 
 1. Detect project name: parse from `git remote get-url origin` (e.g. `tazgreenwood/private-dotfiles` → `private-dotfiles`), or read the `## Project` field from `CLAUDE.md` if present.
 2. Call `registry_write_plan(project_name, ticket, plan_data)` where `plan_data` is the full mission state object below.
-3. Also write a local copy to `~/.claude/plan-[TICKET].json` as a fallback cache (no-ticket plans use the auto-generated key, e.g. `DOTFILES-3`).
 
 ```json
 {
@@ -229,7 +228,7 @@ When the user approves, persist the plan via registry MCP:
 Tell the user:
 
 ```
-Plan written. Mission state saved to registry ([project]/[TICKET]) and ~/.claude/plan-[TICKET].json
+Plan written. Mission state saved to registry ([project]/[TICKET]).
 
 Next: open a new chat and run /build to execute the plan.
 The build will run automatically and Slack you when done.
