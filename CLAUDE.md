@@ -115,6 +115,20 @@ Appends an entry to `data/{project}/audit.json`. Caller provides all fields; `_r
 }
 ```
 
+#### `registry_get_resources(name: string, category?: string) -> {resources: map[string]any} | error`
+Returns cached project resources, optionally filtered by category. Resources live under the `resources` key in `project.json`.
+
+```
+Response: { "resources": { "grafana": { "api_dashboard": "http://..." }, "slack": { "standup_channel": "C0XXX" }, "aws": { "log_group": "/app/logs" }, "bitbucket": { "repos": "mapi-js,emily" } } }
+```
+
+When `category` is provided (e.g. `"grafana"`), only that category's entries are returned:
+```
+Response: { "resources": { "grafana": { "api_dashboard": "http://..." } } }
+```
+
+Returns `{ "resources": {} }` if the project has no resources stored yet.
+
 #### `registry_get_audit(name: string, since?: string, until?: string) -> {entries: [map[string]any], total: int}`
 Queries audit entries by date range. Dates are ISO 8601 (YYYY-MM-DD) and inclusive.
 
