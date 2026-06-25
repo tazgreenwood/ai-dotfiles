@@ -1,8 +1,17 @@
 export function getWtDir(
   _repoRoot: string,
-  _remote: string,
-  _branch: string,
-  _wtBase?: string,
+  remote: string,
+  branch: string,
+  wtBase?: string,
 ): string {
-  throw new Error("not implemented");
+  const base = wtBase ?? `${process.env.HOME}/.worktrees`;
+
+  // Strip trailing .git, then take basename — works for both ssh and https remotes
+  const stripped = remote.replace(/\.git$/, "");
+  const repoName = stripped.split(/[/:]/).pop()!;
+
+  // Use only the last segment after splitting on "/"
+  const branchDir = branch.split("/").pop()!;
+
+  return `${base}/${repoName}/${branchDir}`;
 }
