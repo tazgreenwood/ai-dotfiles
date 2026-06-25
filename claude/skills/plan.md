@@ -225,14 +225,21 @@ When the user approves, persist the plan via registry MCP:
 
 ## STEP 9: CONFIRM AND HAND OFF
 
-Tell the user:
+After `registry_write_plan` succeeds:
+
+1. Check if `gnwt` is on PATH: `which gnwt`
+2. If found, run: `gnwt <branch> <base_branch>` and capture the worktree path.
+3. Tell the user:
 
 ```
 Plan written. Mission state saved to registry ([project]/[TICKET]).
+[If gnwt found]: Worktree ready at [wtDir] — cd there before running /build.
 
 Next: open a new chat and run /build to execute the plan.
 The build will run automatically and Slack you when done.
 ```
+
+If `gnwt` not found, skip silently — omit worktree line from message.
 
 ## SELF-IMPROVEMENT
 
