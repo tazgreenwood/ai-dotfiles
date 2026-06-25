@@ -4,7 +4,7 @@ export function getWtDir(
   branch: string,
   wtBase?: string,
 ): string {
-  const base = wtBase ?? `${process.env.HOME}/.worktrees`;
+  const base = wtBase ?? `${process.env.HOME ?? require("os").homedir()}/.worktrees`;
 
   // Strip trailing .git, then take basename — works for both ssh and https remotes
   const stripped = remote.replace(/\.git$/, "");

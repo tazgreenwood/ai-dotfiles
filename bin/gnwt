@@ -17,7 +17,7 @@ const wtBase = process.env.WORKTREE_BASE ?? `${process.env.HOME}/.worktrees`;
 
 const wtDir = getWtDir(repoRoot, remote, branch, wtBase);
 
-execSync(`git worktree add -b ${branch} ${wtDir} ${base}`, { stdio: "inherit" });
+execSync(`git worktree add -b "${branch}" "${wtDir}" "${base}"`, { stdio: "inherit" });
 
 // Copy untracked root files (not directories) to the new worktree
 const untrackedOutput = execSync(

@@ -15,6 +15,6 @@ const wtBase = process.env.WORKTREE_BASE ?? `${process.env.HOME}/.worktrees`;
 
 const wtDir = getWtDir(repoRoot, remote, branch, wtBase);
 
-execSync(`git worktree add ${wtDir} ${branch}`, { stdio: "inherit" });
+execSync(`git worktree add "${wtDir}" "${branch}"`, { stdio: "inherit" });
 
 console.log(wtDir);
