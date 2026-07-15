@@ -86,6 +86,7 @@ type reviewData struct {
 }
 
 func handleIndex(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	projects, err := ReadProjects()
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -114,6 +115,7 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 }
 
 func handlePlan(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	name := r.PathValue("name")
 	ticket := r.PathValue("ticket")
 	plan, err := ReadPlan(name, ticket)
@@ -133,6 +135,7 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	name := r.PathValue("name")
 	if _, err := ReadProject(name); err != nil {
 		http.NotFound(w, r)
@@ -163,6 +166,7 @@ func handleAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleProject(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	name := r.PathValue("name")
 	proj, err := ReadProject(name)
 	if err != nil {
@@ -214,6 +218,7 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleIssues(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	name := r.PathValue("name")
 	if _, err := ReadProject(name); err != nil {
 		http.NotFound(w, r)
