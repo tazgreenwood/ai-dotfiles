@@ -1,6 +1,6 @@
 # CODE REVIEW
 
-You are the code reviewer skill. Review either a pull request or a local, uncommitted diff: fetch the diff, analyze it, and post inline findings via Bitbucket MCP (PR mode only).
+You are the code reviewer skill. Review either a pull request or a local, uncommitted diff: fetch the diff, analyze it, prove behavior via real or mock execution, and present the results as a local HTML report.
 
 ---
 
@@ -116,22 +116,38 @@ Attach the captured output (real or mock) to the corresponding finding(s) from S
 
 ---
 
-## STEP 7: POST INLINE COMMENTS
+## STEP 7: GENERATE AND OPEN HTML REPORT
 
-**PR mode only.** For each finding from @reviewer:
+Applies to **both PR mode and local mode** — this is the final action of the skill. No inline Bitbucket comments are posted by this skill (that behavior belongs to `pr-respond.md`, not `code-review.md`).
 
-Call `bitbucket_add_pr_comment(workspace, repo_slug, pr_id, comment_text, file_path, line_number)`.
+### Assemble the report data
 
-Format each comment as:
+Gather everything produced by earlier steps:
+- **Summary** — one-paragraph overview of the change and the verdict (APPROVED / APPROVED WITH WARNINGS / REJECTED)
+- **Why** — PR title + description (PR mode) or branch name + recent commit messages (local mode), from STEP 2
+- **Diff overview** — files changed, additions/deletions, from STEP 3
+- **Execution mode** — `real` or `mock`, from STEP 6
+- **Execution log** — the captured stdout/stderr or mock invocation output, from STEP 6
+- **Suggestions/findings** — the list of findings from STEP 5, each tagged with severity (`bug`, `security`, `style`, `question`) and which execution mode (real/mock) backs it, from STEP 6
+
+### Render to a self-contained HTML file
+
+Write a single self-contained HTML file (inline `<style>`, no external assets) using the section layout established by `claude/ui/templates/review.html` as the reference structure: Title, Summary, Why, Diff Overview, Execution Results (mode + log), Suggestions.
+
+Write it to a temp path:
+```bash
+mktemp -t code-review-XXXX.html
 ```
-[severity]: [problem]. [fix].
+
+Populate the file's sections with the assembled data (escape HTML-sensitive characters in diff/log content).
+
+### Open the report
+
+```bash
+open <path>
 ```
 
-Where severity is one of: `bug`, `security`, `style`, `question`.
-
-If a finding is general (not tied to a specific line), post it as a top-level PR comment without file/line.
-
-**Local mode:** skip this step — there is no PR to comment on. Findings are reported directly to the user (see STEP 8).
+If `open` is unavailable (non-macOS), print the file path to the user instead.
 
 ---
 
@@ -143,7 +159,7 @@ CODE REVIEW COMPLETE
 PR: [pr_url]
 Author: [author]
 Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
-Comments posted: [N]
+Report: [path to HTML file] (opened in browser)
 ```
 
 **Local mode:**
@@ -151,8 +167,8 @@ Comments posted: [N]
 CODE REVIEW COMPLETE
 Branch: [branch_name] → [base_branch]
 Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
-Findings: [N] (printed above — no PR to comment on)
-Execution: [real test run / synthesized mock — see findings above]
+Execution: [real test run / synthesized mock — see report]
+Report: [path to HTML file] (opened in browser)
 ```
 
 ## SELF-IMPROVEMENT
