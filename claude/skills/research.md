@@ -116,7 +116,7 @@ At the end of each run, reflect on what you learned. If anything is worth saving
 ```
 registry_set(project_name, "resources.{category}.{key}", value)
 ```
-Categories: `grafana`, `slack`, `aws`, `bitbucket`, `confluence`, `jira`.
+Categories: `grafana`, `slack`, `aws`, `bitbucket`, `confluence`, `jira`, `scripts`.
 Example: `registry_set("emily", "resources.grafana.api_dashboard", "http://grafana/d/abc123")`
 
 **Save reusable commands/lookups** — any command or lookup derived this run that could be reused instead of re-derived next time:
