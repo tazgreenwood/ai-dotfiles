@@ -278,6 +278,38 @@ func TestRenderReview_ContainsExpectedSections(t *testing.T) {
 	}
 }
 
+// ── Cache-Control headers ──────────────────────────────────────────────────────
+
+func TestHandlers_SetNoStoreCacheControl(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+	setupProjectFixture(t, dir, "existing")
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	paths := []string{
+		"/",
+		"/projects/existing",
+		"/projects/existing/plans/TICKET-1",
+		"/projects/existing/audit",
+		"/projects/existing/issues",
+	}
+
+	for _, path := range paths {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+
+		cc := resp.Header.Get("Cache-Control")
+		if cc != "no-store" {
+			t.Errorf("GET %s: want Cache-Control %q, got %q", path, "no-store", cc)
+		}
+	}
+}
+
 func TestGetAudit_WithQueryParams_FiltersResults(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
