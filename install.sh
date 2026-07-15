@@ -56,17 +56,6 @@ EOF
   fi
 fi
 
-# ── Bin Scripts ───────────────────────────────────────────────────────────────
-echo "Linking bin scripts..."
-mkdir -p "$HOME/.local/bin"
-for script in "$DOTFILES/bin"/*; do
-  [ -f "$script" ] || continue
-  [[ "$script" == *.ts ]] && continue
-  chmod +x "$script"
-  ln -sf "$script" "$HOME/.local/bin/$(basename "$script")"
-  echo "  ✓ $(basename "$script")"
-done
-
 # ── Registry MCP Server ────────────────────────────────────────────────────────
 SERVER_DIR="$DOTFILES/claude/mcp/server"
 BINARY="$SERVER_DIR/registry"

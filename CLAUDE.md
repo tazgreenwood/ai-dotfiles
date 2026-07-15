@@ -28,7 +28,7 @@ The codebase provides a suite of user-facing skills and supporting MCP tools:
 
 **MCP Servers**:
 - **Registry Server** (`claude/mcp/server/`):
-  - `registry.go` — project metadata, plan storage, audit trail, issue reporting (uses `~/.config/clearlink-registry/data/`)
+  - `registry.go` — project metadata, plan storage, audit trail, issue reporting (uses `~/.config/registry/data/`)
   - `main.go` — JSON-RPC dispatcher and MCP setup
 - **Bitbucket Server** (`claude/mcp/bitbucket/`):
   - `bitbucket.go` — PR, branch, and commit operations
@@ -39,9 +39,12 @@ The codebase provides a suite of user-facing skills and supporting MCP tools:
 
 **Key flows**:
 1. **Plan**: Auto-increment fake ticket counter in registry; store plan JSON in `registry_write_plan`
-2. **Ship**: Write rich audit entry via `registry_write_audit`; skip JIRA transition if ticket key is auto-generated
-3. **Shipped**: Query audit entries via `registry_get_audit` with date range filtering
-4. **Resource discovery**: Skills discover external resources (dashboards, channels, repos, log groups) at runtime; save via `registry_set()` to resources subtree; hook injects these on next session
+2. **Build**: Load plan from registry, execute steps with status tracking via `registry_update_step`, STOP with error if registry unavailable
+3. **Ship**: Write rich audit entry via `registry_write_audit`; skip JIRA transition if ticket key is auto-generated; STOP with error if registry unavailable
+4. **Shipped**: Query audit entries via `registry_get_audit` with date range filtering
+5. **Resource discovery**: Skills discover external resources (dashboards, channels, repos, log groups) at runtime; save via `registry_set()` to resources subtree; hook injects these on next session
+
+**Registry is a hard dependency**: All phase skills (`/plan`, `/build`, `/ship`, `/init`) require the registry MCP server to be available. If registry is unavailable, skills STOP immediately with a clear error message — there is no fallback to local files. This ensures single source of truth and prevents data drift.
 
 ---
 
@@ -52,7 +55,7 @@ The codebase provides a suite of user-facing skills and supporting MCP tools:
   - Atlassian (JIRA, Confluence) — via `mcp__atlassian__*` tools
   - Slack — via `mcp__slack__*` tools
   - Bitbucket — via custom `bitbucket_*` tools
-- **Data storage**: JSON files in `~/.config/clearlink-registry/data/`
+- **Data storage**: JSON files in `~/.config/registry/data/`
 - **Test command**: `cd claude/ui && go test ./...`
 
 ---
@@ -205,6 +208,14 @@ Caller provides all fields; `_reported_at` (RFC3339) is added automatically.
   - Store in gitignored config files: fragile, per-machine, hard to reconcile.
 - **Consequences**: Skills are stateless discovery engines. Registry is the source of truth for external integrations. Hook dedupes per session (flag file) to avoid re-parsing on each prompt. New resources discovered by one skill are immediately available to others without restart.
 
+### [2026-07-14] — Registry is a hard dependency; no local fallback
+- **Context**: Early skill implementations fell back to local JSON files in `~/.claude/` when registry MCP was unavailable, creating dual sources of truth and data drift. This led to bugs where stale local data was used instead of authoritative registry state.
+- **Decision**: Registry MCP (`registry_write_plan`, `registry_get_plan`, `registry_list_plans`, `registry_update_step`, `registry_write_audit`) is now a mandatory hard dependency for `/plan`, `/build`, and `/ship`. All skills that depend on mission state or audit trail now STOP immediately with a clear error message if the registry MCP is unavailable. No fallback to local files.
+- **Rejected alternatives**:
+  - Dual-path with local fallback: creates data drift, audit trail inconsistency, and silent failures when local data is stale.
+  - Offline mode with sync-on-reconnect: adds complexity, doesn't prevent race conditions between offline edits and registry state.
+- **Consequences**: Skills require a working registry MCP connection to run. This simplifies the data model and ensures single source of truth. Operators must ensure the registry server is available before invoking `/plan`, `/build`, `/ship`, or `/init`. Error messages are clear ("Registry MCP is unavailable. Fix the MCP connection before running /build.").
+
 ---
 
 ## Domain Glossary
@@ -213,7 +224,7 @@ Caller provides all fields; `_reported_at` (RFC3339) is added automatically.
 - **Fake ticket**: Auto-generated key for projects without JIRA integration. Uses registry counter.
 - **Plan**: Mission state object with acceptance criteria, step breakdown, and status. Stored as JSON in registry.
 - **Audit entry**: Metadata about shipped work (ticket, type, impact, PR URL, files changed, story points, labels, date).
-- **Registry**: Persistent key-value store in `~/.config/registry/data/` with project metadata, plans, and audit trails.
+- **Registry**: Persistent key-value store in `~/.config/registry/data/` with project metadata, plans, and audit trails. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`, `/init`) are hard-dependent on registry availability (no local fallback).
 - **Resource cache**: External integrations (Slack channels, Grafana dashboards, Bitbucket repos, AWS log groups, etc.) stored under `project.resources` in registry. Organized by category (grafana, slack, aws, bitbucket, confluence, jira).
 - **Registry context**: System-reminder block emitted by `inject-registry-context` hook on session start; contains project metadata and all cached resources; used by skills to avoid redundant API calls.
 - **Skill**: User-invocable markdown prompt file that routes commands to agents. All skills include a SELF-IMPROVEMENT section for discovering and caching resources.
