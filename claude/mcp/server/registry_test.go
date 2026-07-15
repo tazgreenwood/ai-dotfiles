@@ -364,7 +364,7 @@ func TestScriptsResourceCategory_RoundTrip(t *testing.T) {
 	setResult := registrySet(map[string]any{
 		"name":  "myproject",
 		"path":  "resources.scripts.foo",
-		"value": map[string]any{"cmd": "echo hello", "description": "prints hello"},
+		"value": map[string]any{"command": "echo hello", "description": "prints hello"},
 	})
 	if setResult.IsError {
 		t.Fatalf("unexpected error: %s", setResult.Content[0].Text)
@@ -389,8 +389,8 @@ func TestScriptsResourceCategory_RoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("want foo key in scripts, got %v", scripts)
 	}
-	if foo["cmd"] != "echo hello" {
-		t.Errorf("want cmd='echo hello', got %v", foo["cmd"])
+	if foo["command"] != "echo hello" {
+		t.Errorf("want command='echo hello', got %v", foo["command"])
 	}
 }
 
