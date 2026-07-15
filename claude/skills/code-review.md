@@ -1,35 +1,60 @@
-# PR REVIEW
+# CODE REVIEW
 
-You are the PR reviewer skill. Review a teammate's pull request: fetch the diff, analyze it, and post inline findings via Bitbucket MCP.
+You are the code reviewer skill. Review either a pull request or a local, uncommitted diff: fetch the diff, analyze it, and post inline findings via Bitbucket MCP (PR mode only).
 
 ---
 
 ## STEP 1: GATHER INPUTS
 
-Accept either:
-- A PR ID (integer): `pr-review 42`
-- A Bitbucket PR URL: `pr-review https://bitbucket.org/clearlinkit/repo/pull-requests/42`
+Accept one of:
+- A PR ID (integer): `code-review 42`
+- A Bitbucket PR URL: `code-review https://bitbucket.org/clearlinkit/repo/pull-requests/42`
+- The literal `local`: `code-review local` — reviews uncommitted/unpushed local changes
 
-If no PR ID or URL provided, ask the user.
+If no argument is provided, ask the user.
+
+### PR mode (PR ID or URL)
 
 Detect the repo slug from the PR URL, or from `git remote get-url origin` if only an ID was given.
+
+### Local mode (`local`)
+
+Determine the base branch to diff against:
+- Use `repo.base` from `registry_get_project(project_name)` if available
+- Otherwise fall back to `main`
+
+Run:
+```bash
+git diff <base_branch>...HEAD
+```
+
+If there are no committed changes yet, also include uncommitted working tree changes:
+```bash
+git diff HEAD
+```
+
+No repo slug, PR ID, or Bitbucket lookup is needed in local mode.
 
 ---
 
 ## STEP 2: FETCH PR METADATA
 
-Call `bitbucket_get_pr(workspace, repo_slug, pr_id)`.
+**PR mode only.** Call `bitbucket_get_pr(workspace, repo_slug, pr_id)`.
 
 Extract:
 - Title, description, author
 - Source branch → destination branch
 - List of reviewers already assigned
 
+**Local mode:** skip this step — there is no PR metadata. Use the local branch name and the most recent commit message(s) since the base branch as the stand-in "why changed" context.
+
 ---
 
 ## STEP 3: FETCH DIFF
 
-Call `bitbucket_get_diff(workspace, repo_slug, pr_id)`.
+**PR mode:** Call `bitbucket_get_diff(workspace, repo_slug, pr_id)`.
+
+**Local mode:** Use the diff already gathered in STEP 1 (`git diff <base_branch>...HEAD`, plus uncommitted changes).
 
 Read the full diff. Note files changed, additions, deletions.
 
@@ -50,7 +75,7 @@ If not available locally, proceed without it.
 
 Pass:
 - Full diff output
-- PR title and description (as the acceptance spec)
+- PR title and description (PR mode) or branch name + recent commit messages (local mode), as the acceptance spec
 - CLAUDE.md contents (if available)
 - Instruction: "Review for correctness bugs, security issues, and scope. Do not praise. Return findings only."
 
@@ -60,7 +85,7 @@ Pass:
 
 ## STEP 6: POST INLINE COMMENTS
 
-For each finding from @reviewer:
+**PR mode only.** For each finding from @reviewer:
 
 Call `bitbucket_add_pr_comment(workspace, repo_slug, pr_id, comment_text, file_path, line_number)`.
 
@@ -73,17 +98,27 @@ Where severity is one of: `bug`, `security`, `style`, `question`.
 
 If a finding is general (not tied to a specific line), post it as a top-level PR comment without file/line.
 
+**Local mode:** skip this step — there is no PR to comment on. Findings are reported directly to the user (see STEP 7).
+
 ---
 
 ## STEP 7: CONFIRM
 
-Output:
+**PR mode:**
 ```
-PR REVIEW COMPLETE
+CODE REVIEW COMPLETE
 PR: [pr_url]
 Author: [author]
 Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
 Comments posted: [N]
+```
+
+**Local mode:**
+```
+CODE REVIEW COMPLETE
+Branch: [branch_name] → [base_branch]
+Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
+Findings: [N] (printed above — no PR to comment on)
 ```
 
 ## SELF-IMPROVEMENT
@@ -108,7 +143,7 @@ registry_set(project_name, "deploy.cluster", correct_value)
 ```
 
 **Improve this skill** — if a better approach was found, make a targeted minimal edit to:
-`/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles/claude/skills/pr-review.md`
+`/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles/claude/skills/code-review.md`
 Edit only the specific line or section that was wrong or incomplete. Do not rewrite the whole file.
 
 Skip all of the above if nothing new was learned.
