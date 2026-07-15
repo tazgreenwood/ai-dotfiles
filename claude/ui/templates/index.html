@@ -1,5 +1,8 @@
 {{define "content"}}
-<h1 class="text-3xl font-bold mb-8">Registry</h1>
+<div class="flex items-center justify-between mb-8">
+  <h1 class="text-3xl font-bold">Registry</h1>
+  <a href="" class="text-sm text-blue-600 hover:underline">Refresh</a>
+</div>
 {{if .Projects}}
 <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
   {{range .Projects}}

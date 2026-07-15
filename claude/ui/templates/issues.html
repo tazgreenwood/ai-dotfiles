@@ -1,5 +1,8 @@
 {{define "content"}}
-<h1 class="text-2xl font-bold mb-6">Issues &mdash; {{.ProjectName}}</h1>
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-2xl font-bold">Issues &mdash; {{.ProjectName}}</h1>
+  <a href="" class="text-sm text-blue-600 hover:underline">Refresh</a>
+</div>
 
 <form method="GET" class="mb-6">
   <fieldset class="border border-gray-200 rounded p-4">

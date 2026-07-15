@@ -1,5 +1,8 @@
 {{define "content"}}
-<h1 class="text-3xl font-bold mb-6">{{.Plan.Ticket}} &mdash; {{.Plan.Summary}}</h1>
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-3xl font-bold">{{.Plan.Ticket}} &mdash; {{.Plan.Summary}}</h1>
+  <a href="" class="text-sm text-blue-600 hover:underline">Refresh</a>
+</div>
 
 <div class="flex flex-wrap gap-6 text-sm text-gray-600 mb-10">
   {{if .Plan.Branch}}
