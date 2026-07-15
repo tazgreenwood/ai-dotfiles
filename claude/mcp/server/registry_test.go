@@ -233,6 +233,56 @@ func TestRegistryReportIssue_AcceptsWarning(t *testing.T) {
 	}
 }
 
+func setupUnwritableDataDir(t *testing.T) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "registry-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	// Create a plain file where the project subdirectory would need to be
+	// created, so os.MkdirAll fails with ENOTDIR when registry code tries
+	// to create plansDir/projectDir under it.
+	blocker := filepath.Join(dir, "myproject")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("REGISTRY_DATA_DIR", dir)
+}
+
+func TestRegistryWritePlan_UnwritableDataDir_ReturnsLoudError(t *testing.T) {
+	setupUnwritableDataDir(t)
+
+	result := registryWritePlan(map[string]any{
+		"name":   "myproject",
+		"ticket": "TEST-1",
+		"data":   map[string]any{"ticket": "TEST-1", "summary": "test plan"},
+	})
+
+	if !result.IsError {
+		t.Fatal("want registry_write_plan to return a loud error when data dir is unwritable, got success")
+	}
+	if result.Content[0].Text == "" {
+		t.Error("want non-empty error message")
+	}
+}
+
+func TestRegistryGetPlan_UnwritableDataDir_ReturnsLoudError(t *testing.T) {
+	setupUnwritableDataDir(t)
+
+	result := registryGetPlan(map[string]any{
+		"name":   "myproject",
+		"ticket": "TEST-1",
+	})
+
+	if !result.IsError {
+		t.Fatal("want registry_get_plan to return a loud error when plan cannot be read due to unwritable/blocked data dir, got success")
+	}
+	if result.Content[0].Text == "" {
+		t.Error("want non-empty error message")
+	}
+}
+
 func writeProjectJSON(t *testing.T, dir, name string, data map[string]any) {
 	t.Helper()
 	projectPath := filepath.Join(dir, name)
