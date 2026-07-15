@@ -74,6 +74,17 @@ type auditData struct {
 	Until       string
 }
 
+type reviewData struct {
+	Breadcrumbs   []breadcrumb
+	Title         string
+	Summary       string
+	Why           string
+	DiffOverview  string
+	ExecutionMode string
+	ExecutionLog  string
+	Suggestions   []string
+}
+
 func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	projects, err := ReadProjects()
 	if err != nil {
