@@ -28,7 +28,7 @@ The codebase provides a suite of user-facing skills and supporting MCP tools:
 
 **MCP Servers**:
 - **Registry Server** (`claude/mcp/server/`):
-  - `registry.go` — project metadata, plan storage, audit trail, issue reporting (uses `~/.config/clearlink-registry/data/`)
+  - `registry.go` — project metadata, plan storage, audit trail, issue reporting (uses `~/.config/registry/data/`)
   - `main.go` — JSON-RPC dispatcher and MCP setup
 - **Bitbucket Server** (`claude/mcp/bitbucket/`):
   - `bitbucket.go` — PR, branch, and commit operations
@@ -52,7 +52,7 @@ The codebase provides a suite of user-facing skills and supporting MCP tools:
   - Atlassian (JIRA, Confluence) — via `mcp__atlassian__*` tools
   - Slack — via `mcp__slack__*` tools
   - Bitbucket — via custom `bitbucket_*` tools
-- **Data storage**: JSON files in `~/.config/clearlink-registry/data/`
+- **Data storage**: JSON files in `~/.config/registry/data/`
 - **Test command**: `cd claude/ui && go test ./...`
 
 ---
