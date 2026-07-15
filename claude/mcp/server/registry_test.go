@@ -357,6 +357,43 @@ func TestGetResources_FiltersByCategory(t *testing.T) {
 	}
 }
 
+func TestScriptsResourceCategory_RoundTrip(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	setResult := registrySet(map[string]any{
+		"name":  "myproject",
+		"path":  "resources.scripts.foo",
+		"value": map[string]any{"command": "echo hello", "description": "prints hello"},
+	})
+	if setResult.IsError {
+		t.Fatalf("unexpected error: %s", setResult.Content[0].Text)
+	}
+
+	result := registryGetResources(map[string]any{"name": "myproject", "category": "scripts"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	resources, ok := resp["resources"].(map[string]any)
+	if !ok {
+		t.Fatalf("want resources map, got %T", resp["resources"])
+	}
+	scripts, ok := resources["scripts"].(map[string]any)
+	if !ok {
+		t.Fatalf("want scripts key in resources, got %v", resources)
+	}
+	foo, ok := scripts["foo"].(map[string]any)
+	if !ok {
+		t.Fatalf("want foo key in scripts, got %v", scripts)
+	}
+	if foo["command"] != "echo hello" {
+		t.Errorf("want command='echo hello', got %v", foo["command"])
+	}
+}
+
 func TestGetResources_EmptyWhenNone(t *testing.T) {
 	dir, cleanup := setupTestDataDir(t)
 	defer cleanup()

@@ -206,3 +206,16 @@ If a step hits 3 consecutive failures (developer or qa):
 - Never push to remote — that happens in `/ship`.
 - If a step discovers out-of-scope improvements: note them in the commit message, do not implement them.
 - Step subagents are isolated — they cannot see this conversation. The prompt you pass them is their entire context.
+
+---
+
+## SELF-IMPROVEMENT
+
+At the end of each run, reflect on what you learned. If anything is worth saving, act on it before returning to the user.
+
+**Save reusable commands/lookups** — any command or lookup derived this run that could be reused instead of re-derived next time:
+```
+registry_set(project_name, "resources.scripts.{name}", {command: "...", description: "...", learned_at: "<RFC3339 timestamp>"})
+```
+
+Skip if nothing new was learned.

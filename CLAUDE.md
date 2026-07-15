@@ -126,7 +126,16 @@ Appends an entry to `data/{project}/audit.json`. Caller provides all fields; `_r
 Returns cached project resources, optionally filtered by category. Resources live under the `resources` key in `project.json`.
 
 ```
-Response: { "resources": { "grafana": { "api_dashboard": "http://..." }, "slack": { "standup_channel": "C0XXX" }, "aws": { "log_group": "/app/logs" }, "bitbucket": { "repos": "mapi-js,emily" } } }
+Response: { "resources": { "grafana": { "api_dashboard": "http://..." }, "slack": { "standup_channel": "C0XXX" }, "aws": { "log_group": "/app/logs" }, "bitbucket": { "repos": "mapi-js,emily" }, "scripts": { "find_recent_prs": { "command": "gh pr list --state merged --limit 10", "description": "List recently merged PRs", "learned_at": "2026-07-14T00:00:00Z" } } } }
+```
+
+**Scripts category schema**: Each entry under `resources.scripts.{name}` follows:
+```json
+{
+  "command": "string",
+  "description": "string",
+  "learned_at": "string (RFC3339)"
+}
 ```
 
 When `category` is provided (e.g. `"grafana"`), only that category's entries are returned:
@@ -225,7 +234,7 @@ Caller provides all fields; `_reported_at` (RFC3339) is added automatically.
 - **Plan**: Mission state object with acceptance criteria, step breakdown, and status. Stored as JSON in registry.
 - **Audit entry**: Metadata about shipped work (ticket, type, impact, PR URL, files changed, story points, labels, date).
 - **Registry**: Persistent key-value store in `~/.config/registry/data/` with project metadata, plans, and audit trails. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`, `/init`) are hard-dependent on registry availability (no local fallback).
-- **Resource cache**: External integrations (Slack channels, Grafana dashboards, Bitbucket repos, AWS log groups, etc.) stored under `project.resources` in registry. Organized by category (grafana, slack, aws, bitbucket, confluence, jira).
+- **Resource cache**: External integrations (Slack channels, Grafana dashboards, Bitbucket repos, AWS log groups, etc.) stored under `project.resources` in registry. Organized by category (grafana, slack, aws, bitbucket, confluence, jira, scripts).
 - **Registry context**: System-reminder block emitted by `inject-registry-context` hook on session start; contains project metadata and all cached resources; used by skills to avoid redundant API calls.
 - **Skill**: User-invocable markdown prompt file that routes commands to agents. All skills include a SELF-IMPROVEMENT section for discovering and caching resources.
 - **Agent**: Background orchestration logic (e.g. `@jira`, `@confluence`, `@standup`) invoked by skills.
