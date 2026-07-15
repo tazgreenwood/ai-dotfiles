@@ -1,0 +1,46 @@
+{{define "content"}}
+<h1 class="text-2xl font-bold mb-6">{{if .Title}}{{.Title}}{{else}}Code Review{{end}}</h1>
+
+<section class="mb-8">
+  <h2 class="text-xl font-semibold mb-2">Summary</h2>
+  <p class="text-sm text-gray-700">{{.Summary}}</p>
+</section>
+
+{{if .Why}}
+<section class="mb-8">
+  <h2 class="text-xl font-semibold mb-2">Why</h2>
+  <p class="text-sm text-gray-700">{{.Why}}</p>
+</section>
+{{end}}
+
+{{if .DiffOverview}}
+<section class="mb-8">
+  <h2 class="text-xl font-semibold mb-2">Diff Overview</h2>
+  <pre class="text-sm bg-gray-50 border border-gray-200 rounded p-4 whitespace-pre-wrap">{{.DiffOverview}}</pre>
+</section>
+{{end}}
+
+<section class="mb-8">
+  <h2 class="text-xl font-semibold mb-2">Execution Results</h2>
+  {{if .ExecutionMode}}
+  <div class="mb-2">
+    <span class="font-medium text-gray-700 text-sm">Mode:</span>
+    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium {{if eq .ExecutionMode "real"}}bg-green-100 text-green-800{{else}}bg-yellow-100 text-yellow-800{{end}}">{{.ExecutionMode}}</span>
+  </div>
+  {{end}}
+  {{if .ExecutionLog}}
+  <pre class="text-sm bg-gray-50 border border-gray-200 rounded p-4 whitespace-pre-wrap">{{.ExecutionLog}}</pre>
+  {{end}}
+</section>
+
+{{if .Suggestions}}
+<section>
+  <h2 class="text-xl font-semibold mb-2">Suggestions</h2>
+  <ul class="list-disc list-inside space-y-1 text-sm text-gray-700">
+    {{range .Suggestions}}
+    <li>{{.}}</li>
+    {{end}}
+  </ul>
+</section>
+{{end}}
+{{end}}

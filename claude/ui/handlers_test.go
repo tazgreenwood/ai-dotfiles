@@ -240,6 +240,44 @@ func TestGetIssues_UnknownProjectReturns404(t *testing.T) {
 	}
 }
 
+// ── review.html template ───────────────────────────────────────────────────────
+
+func TestRenderReview_ContainsExpectedSections(t *testing.T) {
+	data := reviewData{
+		Breadcrumbs:   []breadcrumb{{Label: "Registry", URL: "/"}, {Label: "Code Review"}},
+		Title:         "Code Review — feat/DOTFILES-9",
+		Summary:       "Adds HTML report rendering for code review results",
+		Why:           "Need a readable output instead of raw diffs",
+		DiffOverview:  "3 files changed, 42 insertions, 5 deletions",
+		ExecutionMode: "mock",
+		ExecutionLog:  "ran synthesized inputs through changed functions: all passed",
+		Suggestions:   []string{"Add error handling for nil input", "Extract helper for repeated logic"},
+	}
+
+	rec := httptest.NewRecorder()
+	render(rec, "review.html", data)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	wantContains := []string{
+		data.Summary,
+		data.Why,
+		data.DiffOverview,
+		data.ExecutionMode,
+		data.ExecutionLog,
+		"Add error handling for nil input",
+		"Extract helper for repeated logic",
+	}
+	for _, want := range wantContains {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected rendered HTML to contain %q, got:\n%s", want, body)
+		}
+	}
+}
+
 func TestGetAudit_WithQueryParams_FiltersResults(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
