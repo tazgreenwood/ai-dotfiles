@@ -62,3 +62,16 @@ Next steps:
   /ticket    — create a JIRA ticket for your first task
   /plan      — plan a task (no ticket required)
 ```
+
+---
+
+## SELF-IMPROVEMENT
+
+At the end of each run, reflect on what you learned. If anything is worth saving, act on it before returning to the user.
+
+**Save reusable commands/lookups** — any command or lookup derived this run that could be reused instead of re-derived next time:
+```
+registry_set(project_name, "resources.scripts.{name}", {command: "...", description: "...", learned_at: "<RFC3339 timestamp>"})
+```
+
+Skip if nothing new was learned.
