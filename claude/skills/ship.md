@@ -13,8 +13,8 @@ You are the ship phase of the development workflow. The build is done — now re
 
 Find the active mission:
 1. If a ticket key provided (ONE-XXXX), call `registry_get_plan(project_name, ticket)` via registry MCP. Detect project name from git remote or CLAUDE.md.
-2. If registry unavailable, fall back to `~/.claude/plan-[TICKET].json`
-3. If no ticket provided, call `registry_list_plans(project_name)` and pick the plan with all steps `"done"`. Fall back to `~/.claude/plan-NO-TICKET.json` or any local plan JSON.
+2. If registry is unavailable, STOP immediately. Do not write any local file. Report: "Registry MCP is unavailable. Fix the MCP connection before running /ship."
+3. If no ticket provided, call `registry_list_plans(project_name)` and pick the plan with all steps `"done"`. If registry is unavailable, STOP and report the same error — do not fall back to a local file.
 4. If no mission state found, report: "No completed build found. Run /build first."
 
 Verify all plan steps are `"done"`. If any are still `"pending"` or `"in_progress"`, stop:
@@ -127,7 +127,7 @@ registry_write_audit(project_name, {
 ```
 
 Detect `project_name` the same way as `/plan`: parse from `git remote get-url origin`.
-If registry MCP unavailable, skip silently — do not block the ship.
+If registry MCP is unavailable, do not write a local file as a substitute. Report clearly: "WARNING: Registry MCP is unavailable — audit trail was NOT recorded. Fix the MCP connection and re-run to capture this entry." This does not block the ship; the PR has already been created.
 
 ---
 

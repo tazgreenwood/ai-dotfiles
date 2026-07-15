@@ -44,7 +44,7 @@ Call `registry_init_project(slug, workspace, localPath, base, prTarget)` to regi
 - `base`: user-provided base branch (default: `main`)
 - `prTarget`: user-provided PR target (default: same as base)
 
-If registry MCP unavailable, fall back to writing `~/.claude/repos.json` with the entry.
+If registry MCP is unavailable, STOP immediately. Do not write any local file. Report: "Registry MCP is unavailable. Fix the MCP connection before running /init."
 
 ---
 

@@ -10,8 +10,8 @@ You are the build phase of the development workflow. Execute the approved plan a
 
 Find the active mission:
 1. If a ticket key was provided (ONE-XXXX), call `registry_get_plan(project_name, ticket)` via the registry MCP. Detect project name from git remote or CLAUDE.md.
-2. If registry returns no plan (or MCP unavailable), fall back to `~/.claude/plan-[TICKET].json` (or legacy `~/.claude/[TICKET].json`)
-3. If no ticket provided, call `registry_list_plans(project_name)` and pick the plan with at least one step not `"done"`. Fall back to any `~/.claude/plan-*.json` or `~/.claude/[ticket-key].json` if registry unavailable.
+2. If registry returns no plan or the MCP is unavailable, STOP immediately. Do not write any local file. Report: "Registry MCP is unavailable. Fix the MCP connection before running /build."
+3. If no ticket provided, call `registry_list_plans(project_name)` and pick the plan with at least one step not `"done"`. If registry is unavailable, STOP and report the same error — do not fall back to a local file.
 4. If no mission state found, report: "No approved plan found. Run /plan first."
 
 Read `CLAUDE.md` — note Rules and Commands (test/lint/format).
@@ -42,7 +42,7 @@ Loop through all steps in mission state where `status = "pending"`. For each ste
 registry_update_step(project_name, ticket, i, "in_progress")
 ```
 
-If registry unavailable, update the local JSON file directly.
+If registry is unavailable, STOP and report the error to the user — do not write a local JSON file as a substitute.
 
 ### 3b. Spawn developer subagent
 
@@ -147,7 +147,7 @@ No Co-Authored-By or attribution lines.
 registry_update_step(project_name, ticket, i, "done")
 ```
 
-If registry unavailable, update the local JSON file directly.
+If registry is unavailable, STOP and report the error to the user — do not write a local JSON file as a substitute.
 
 Proceed to the next pending step.
 
