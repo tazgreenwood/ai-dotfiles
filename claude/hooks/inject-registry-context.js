@@ -88,7 +88,13 @@ if (categories.length > 0) {
     const entries = resources[cat];
     if (typeof entries === 'object' && entries !== null) {
       for (const [key, val] of Object.entries(entries)) {
-        lines.push(`  ${cat}.${key}: ${val}`);
+        if (cat === 'scripts' && typeof val === 'object' && val !== null) {
+          lines.push(`  ${cat}.${key}.command: ${val.command}`);
+          if (val.description) lines.push(`  ${cat}.${key}.description: ${val.description}`);
+          if (val.learned_at) lines.push(`  ${cat}.${key}.learned_at: ${val.learned_at}`);
+        } else {
+          lines.push(`  ${cat}.${key}: ${val}`);
+        }
       }
     }
   }
