@@ -221,9 +221,11 @@ If `open` is unavailable (non-macOS), print the file path to the user instead.
 
 ### STEP 4b: Write to registry
 
+Map the overall result to `status` (`pass` for ✅ ALL CLEAR or 🔧 pre-existing errors cleared, `fail` for ❌ ISSUES FOUND, `pending` for ⏳ DEPLOYING) and write a one-line `summary` (e.g. "All clear — 3/3 services healthy" or "2 services unhealthy, errors found"). `date` is today's date in ISO 8601 (`YYYY-MM-DD`).
+
 Call:
 ```
-registry_write_deploy_check(app, {app, env, cluster, profile, result, services, errors_before, errors_after, report_path})
+registry_write_deploy_check(app, {app, env, cluster, profile, status, summary, date, services, errors_before, errors_after, report_path})
 ```
 
 If this call fails, warn but do not block — print a warning line and continue to the final report, do not stop the skill.
