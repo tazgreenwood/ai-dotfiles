@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,6 +35,10 @@ func setupProjectFixture(t *testing.T, dataDir, projectName string) {
 
 	writeFixture(t, filepath.Join(dataDir, projectName, "audit.json"), []map[string]any{
 		{"ticket": "TICKET-1", "type": "feature", "summary": "Add thing", "date": "2026-06-01"},
+	})
+
+	writeFixture(t, filepath.Join(dataDir, projectName, "deploy_checks.json"), []map[string]any{
+		{"app": "emily", "status": "pass", "summary": "All checks passed", "date": "2026-06-01"},
 	})
 }
 
@@ -79,6 +84,33 @@ func TestGetProject_ExistingReturns200(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("want 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetProject_ShowsRecentDeployChecksSection(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+	setupProjectFixture(t, dir, "existing")
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing")
+	if err != nil {
+		t.Fatalf("GET /projects/existing: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	if !strings.Contains(string(body), "Recent Deploy Checks") {
+		t.Errorf("expected body to contain %q, got:\n%s", "Recent Deploy Checks", body)
+	}
+	if !strings.Contains(string(body), "/projects/existing/deploy-checks") {
+		t.Errorf("expected body to contain link to %q, got:\n%s", "/projects/existing/deploy-checks", body)
 	}
 }
 

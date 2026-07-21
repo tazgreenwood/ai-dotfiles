@@ -48,11 +48,12 @@ type issueData struct {
 }
 
 type projectData struct {
-	Breadcrumbs []breadcrumb
-	Project     Project
-	Plans       []planSummary
-	RecentAudit []AuditEntry
-	IssueCount  int
+	Breadcrumbs        []breadcrumb
+	Project            Project
+	Plans              []planSummary
+	RecentAudit        []AuditEntry
+	RecentDeployChecks []DeployCheckEntry
+	IssueCount         int
 }
 
 type planSummary struct {
@@ -240,6 +241,12 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 		recent = recent[len(recent)-5:]
 	}
 
+	allDeployChecks, _ := ReadDeployChecks(name, "", "")
+	recentDeployChecks := allDeployChecks
+	if len(recentDeployChecks) > 5 {
+		recentDeployChecks = recentDeployChecks[len(recentDeployChecks)-5:]
+	}
+
 	issues, _ := ReadIssues(name, "")
 
 	data := projectData{
@@ -247,10 +254,11 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 			{Label: "Registry", URL: "/"},
 			{Label: name},
 		},
-		Project:     proj,
-		Plans:       plans,
-		RecentAudit: recent,
-		IssueCount:  len(issues),
+		Project:            proj,
+		Plans:              plans,
+		RecentAudit:        recent,
+		RecentDeployChecks: recentDeployChecks,
+		IssueCount:         len(issues),
 	}
 
 	render(w, "project.html", data)
