@@ -174,6 +174,7 @@ CLOUDWATCH LOGS ({LOG_GROUP})
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   RESULT: ✅ ALL CLEAR
+  Report: {REPORT_PATH}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -191,6 +192,41 @@ If errors existed before deploy but not after:
 ```
   🔧  Pre-existing errors cleared by this deploy
 ```
+
+---
+
+### STEP 4a: Generate HTML report
+
+Assemble the report data:
+- **Deploy check summary** — app, env, cluster, profile, timestamp
+- **ECS service health** — the per-service results from STEP 2a (name, desired/running/pending, status)
+- **CloudWatch logs** — before/after deploy log comparison from STEP 3
+- **Overall result** — ✅ ALL CLEAR / ❌ ISSUES FOUND / ⏳ DEPLOYING / 🔧 pre-existing errors cleared, from STEP 4
+
+Write a single self-contained HTML file (inline `<style>`, no external assets) with sections: Title, Deploy Check Summary (app/env/cluster/profile/timestamp), ECS Services table, CloudWatch Logs (before/after), Result.
+
+Write it to a temp path:
+```bash
+mktemp -t deploy-check-XXXX.html
+```
+
+Escape HTML-sensitive characters in log content.
+
+Open the report:
+```bash
+open <path>
+```
+
+If `open` is unavailable (non-macOS), print the file path to the user instead.
+
+### STEP 4b: Write to registry
+
+Call:
+```
+registry_write_deploy_check(app, {app, env, cluster, profile, result, services, errors_before, errors_after, report_path})
+```
+
+If this call fails, warn but do not block — print a warning line and continue to the final report, do not stop the skill.
 
 ## SELF-IMPROVEMENT
 
