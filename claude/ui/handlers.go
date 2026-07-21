@@ -34,10 +34,10 @@ type indexData struct {
 }
 
 type projectSummary struct {
-	Name        string
-	PlanCount   int
-	AuditCount  int
-	IssueCount  int
+	Name       string
+	PlanCount  int
+	AuditCount int
+	IssueCount int
 }
 
 type issueData struct {
@@ -70,6 +70,14 @@ type auditData struct {
 	Breadcrumbs []breadcrumb
 	ProjectName string
 	Entries     []AuditEntry
+	Since       string
+	Until       string
+}
+
+type deployChecksData struct {
+	Breadcrumbs []breadcrumb
+	ProjectName string
+	Entries     []DeployCheckEntry
 	Since       string
 	Until       string
 }
@@ -163,6 +171,37 @@ func handleAudit(w http.ResponseWriter, r *http.Request) {
 		Until:       until,
 	}
 	render(w, "audit.html", data)
+}
+
+func handleDeployChecks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	name := r.PathValue("name")
+	if _, err := ReadProject(name); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	since := r.URL.Query().Get("since")
+	until := r.URL.Query().Get("until")
+	entries, err := ReadDeployChecks(name, since, until)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Date > entries[j].Date
+	})
+	data := deployChecksData{
+		Breadcrumbs: []breadcrumb{
+			{Label: "Registry", URL: "/"},
+			{Label: name, URL: "/projects/" + name},
+			{Label: "Deploy Checks"},
+		},
+		ProjectName: name,
+		Entries:     entries,
+		Since:       since,
+		Until:       until,
+	}
+	render(w, "deploy_checks.html", data)
 }
 
 func handleProject(w http.ResponseWriter, r *http.Request) {

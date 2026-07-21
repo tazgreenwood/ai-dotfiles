@@ -203,6 +203,57 @@ func ReadIssues(name, severity string) ([]IssueEntry, error) {
 	return filtered, nil
 }
 
+type DeployCheckEntry struct {
+	App          string `json:"app,omitempty"`
+	Env          string `json:"env,omitempty"`
+	Cluster      string `json:"cluster,omitempty"`
+	Profile      string `json:"profile,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	Services     any    `json:"services,omitempty"`
+	ErrorsBefore any    `json:"errors_before,omitempty"`
+	ErrorsAfter  any    `json:"errors_after,omitempty"`
+	ReportPath   string `json:"report_path,omitempty"`
+	Date         string `json:"date,omitempty"`
+	RecordedAt   string `json:"_recorded_at,omitempty"`
+}
+
+func ReadDeployChecks(name, since, until string) ([]DeployCheckEntry, error) {
+	f := filepath.Join(dataDir(), name, "deploy_checks.json")
+	b, err := os.ReadFile(f)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []DeployCheckEntry{}, nil
+		}
+		return nil, err
+	}
+	var entries []DeployCheckEntry
+	if err := json.Unmarshal(b, &entries); err != nil {
+		return nil, err
+	}
+	var filtered []DeployCheckEntry
+	for _, e := range entries {
+		d := e.Date
+		if d == "" {
+			d = e.RecordedAt
+		}
+		if len(d) > 10 {
+			d = d[:10]
+		}
+		if since != "" && d < since {
+			continue
+		}
+		if until != "" && d > until {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	if filtered == nil {
+		filtered = []DeployCheckEntry{}
+	}
+	return filtered, nil
+}
+
 func ReadAudit(name, since, until string) ([]AuditEntry, error) {
 	af := filepath.Join(dataDir(), name, "audit.json")
 	b, err := os.ReadFile(af)

@@ -1,0 +1,74 @@
+{{define "content"}}
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-2xl font-bold">Deploy Checks &mdash; {{.ProjectName}}</h1>
+  <a href="" class="text-sm text-blue-600 hover:underline">Refresh</a>
+</div>
+
+<form method="GET" class="mb-6">
+  <fieldset class="border border-gray-200 rounded p-4">
+    <legend class="text-sm font-medium text-gray-700 px-1">Filter by date</legend>
+    <div class="flex flex-wrap gap-4 items-end">
+      <div>
+        <label for="since" class="block text-sm text-gray-600 mb-1">From</label>
+        <input type="date" id="since" name="since" value="{{.Since}}" class="border border-gray-300 rounded px-2 py-1 text-sm">
+      </div>
+      <div>
+        <label for="until" class="block text-sm text-gray-600 mb-1">To</label>
+        <input type="date" id="until" name="until" value="{{.Until}}" class="border border-gray-300 rounded px-2 py-1 text-sm">
+      </div>
+      <button type="submit" class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">Filter</button>
+    </div>
+  </fieldset>
+</form>
+
+<table class="w-full text-sm border-collapse">
+  <thead>
+    <tr class="border-b border-gray-200 text-left text-gray-600">
+      <th aria-sort="descending" class="py-2 pr-4 font-medium">Date</th>
+      <th class="py-2 pr-4 font-medium">App</th>
+      <th class="py-2 pr-4 font-medium">Env</th>
+      <th class="py-2 pr-4 font-medium">Status</th>
+      <th class="py-2 pr-4 font-medium">Services</th>
+      <th class="py-2 font-medium">Summary</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{if .Entries}}
+      {{range .Entries}}
+      <tr class="border-b border-gray-100 hover:bg-gray-50">
+        <td class="py-2 pr-4 text-gray-700">{{if .Date}}{{.Date}}{{else}}{{.RecordedAt}}{{end}}</td>
+        <td class="py-2 pr-4 font-mono text-xs">{{.App}}</td>
+        <td class="py-2 pr-4 text-gray-600">{{.Env}}</td>
+        <td class="py-2 pr-4 text-gray-600">{{.Status}}</td>
+        <td class="py-2 pr-4 text-gray-600">{{if .Services}}{{.Services}}{{else}}&mdash;{{end}}</td>
+        <td class="py-2">{{.Summary}}</td>
+      </tr>
+      {{end}}
+    {{else}}
+      <tr>
+        <td colspan="6" class="py-4 text-center text-gray-400">No deploy-check entries found</td>
+      </tr>
+    {{end}}
+  </tbody>
+</table>
+
+<script>
+(function() {
+  var th = document.querySelector('th[aria-sort]');
+  if (!th) return;
+  th.style.cursor = 'pointer';
+  th.addEventListener('click', function() {
+    var asc = th.getAttribute('aria-sort') === 'ascending';
+    th.setAttribute('aria-sort', asc ? 'descending' : 'ascending');
+    var tbody = th.closest('table').querySelector('tbody');
+    var rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort(function(a, b) {
+      var ad = a.cells[0].textContent.trim();
+      var bd = b.cells[0].textContent.trim();
+      return asc ? ad.localeCompare(bd) : bd.localeCompare(ad);
+    });
+    rows.forEach(function(r) { tbody.appendChild(r); });
+  });
+})();
+</script>
+{{end}}
