@@ -314,6 +314,103 @@ func TestReadAudit_MissingFileReturnsEmpty(t *testing.T) {
 	}
 }
 
+// ── ReadDeployChecks ───────────────────────────────────────────────────────────
+
+func TestReadDeployChecks_ReturnsAllEntries(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	entries := []map[string]any{
+		{"status": "pass", "summary": "Deploy checked out", "date": "2026-05-01"},
+		{"status": "fail", "summary": "Deploy failed health check", "date": "2026-06-01"},
+	}
+	writeFixture(t, filepath.Join(dir, "myproject", "deploy_checks.json"), entries)
+
+	got, err := ReadDeployChecks("myproject", "", "")
+	if err != nil {
+		t.Fatalf("ReadDeployChecks() error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(got))
+	}
+}
+
+func TestReadDeployChecks_FiltersBySince(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	entries := []map[string]any{
+		{"status": "pass", "date": "2026-04-15"},
+		{"status": "pass", "date": "2026-05-01"},
+		{"status": "fail", "date": "2026-06-10"},
+	}
+	writeFixture(t, filepath.Join(dir, "myproject", "deploy_checks.json"), entries)
+
+	got, err := ReadDeployChecks("myproject", "2026-05-01", "")
+	if err != nil {
+		t.Fatalf("ReadDeployChecks() error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 entries (since 2026-05-01), got %d", len(got))
+	}
+}
+
+func TestReadDeployChecks_FiltersByUntil(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	entries := []map[string]any{
+		{"status": "pass", "date": "2026-04-15"},
+		{"status": "pass", "date": "2026-05-01"},
+		{"status": "fail", "date": "2026-06-10"},
+	}
+	writeFixture(t, filepath.Join(dir, "myproject", "deploy_checks.json"), entries)
+
+	got, err := ReadDeployChecks("myproject", "", "2026-05-01")
+	if err != nil {
+		t.Fatalf("ReadDeployChecks() error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 entries (until 2026-05-01), got %d", len(got))
+	}
+}
+
+func TestReadDeployChecks_FiltersBySinceAndUntil(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	entries := []map[string]any{
+		{"status": "pass", "date": "2026-04-15"},
+		{"status": "pass", "date": "2026-05-01"},
+		{"status": "fail", "date": "2026-06-10"},
+	}
+	writeFixture(t, filepath.Join(dir, "myproject", "deploy_checks.json"), entries)
+
+	got, err := ReadDeployChecks("myproject", "2026-05-01", "2026-05-31")
+	if err != nil {
+		t.Fatalf("ReadDeployChecks() error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 entry (2026-05-01 to 2026-05-31), got %d", len(got))
+	}
+	if got[0].Status != "pass" {
+		t.Errorf("want Status=pass, got %q", got[0].Status)
+	}
+}
+
+func TestReadDeployChecks_MissingFileReturnsEmpty(t *testing.T) {
+	_, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	got, err := ReadDeployChecks("nonexistent", "", "")
+	if err != nil {
+		t.Fatalf("ReadDeployChecks() for missing project should not error, got: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want 0 entries for missing project, got %d", len(got))
+	}
+}
+
 // ── ReadIssues ─────────────────────────────────────────────────────────────────
 
 func TestReadIssues_ReturnsEntries(t *testing.T) {

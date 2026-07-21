@@ -179,6 +179,48 @@ func TestGetAudit_MissingProjectReturns404(t *testing.T) {
 	}
 }
 
+// ── GET /projects/{name}/deploy-checks ─────────────────────────────────────────
+
+func TestGetDeployChecks_ExistingReturns200(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+	setupProjectFixture(t, dir, "existing")
+	writeFixture(t, filepath.Join(dir, "existing", "deploy_checks.json"), []map[string]any{
+		{"status": "pass", "summary": "Deploy checked out", "date": "2026-06-01"},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing/deploy-checks")
+	if err != nil {
+		t.Fatalf("GET /projects/existing/deploy-checks: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("want 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestGetDeployChecks_MissingProjectReturns404(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/nonexistent/deploy-checks")
+	if err != nil {
+		t.Fatalf("GET /projects/nonexistent/deploy-checks: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("want 404, got %d", resp.StatusCode)
+	}
+}
+
 // ── Content-type helpers ───────────────────────────────────────────────────────
 
 func TestGetProject_ResponseIsJSON(t *testing.T) {
@@ -284,6 +326,9 @@ func TestHandlers_SetNoStoreCacheControl(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 	setupProjectFixture(t, dir, "existing")
+	writeFixture(t, filepath.Join(dir, "existing", "deploy_checks.json"), []map[string]any{
+		{"status": "pass", "date": "2026-06-01"},
+	})
 
 	ts := newTestServer(t, dir)
 	defer ts.Close()
@@ -294,6 +339,7 @@ func TestHandlers_SetNoStoreCacheControl(t *testing.T) {
 		"/projects/existing/plans/TICKET-1",
 		"/projects/existing/audit",
 		"/projects/existing/issues",
+		"/projects/existing/deploy-checks",
 	}
 
 	for _, path := range paths {
