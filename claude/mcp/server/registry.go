@@ -267,6 +267,25 @@ func registryWriteAudit(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"ok": true, "total_entries": len(log)})
 }
 
+func registryWriteDeployCheck(args map[string]any) ToolResult {
+	name := str(args, "name")
+	entry, ok := args["entry"].(map[string]any)
+	if name == "" || !ok {
+		return toolErr("name and entry required")
+	}
+	file := filepath.Join(projectDir(name), "deploy_checks.json")
+	var log []any
+	if data, err := os.ReadFile(file); err == nil {
+		_ = json.Unmarshal(data, &log)
+	}
+	entry["_recorded_at"] = time.Now().UTC().Format(time.RFC3339)
+	log = append(log, entry)
+	if err := writeJSON(file, log); err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "total_entries": len(log)})
+}
+
 func registryReportIssue(args map[string]any) ToolResult {
 	project := str(args, "project")
 	if project == "" {
@@ -374,6 +393,51 @@ func registryGetAudit(args map[string]any) ToolResult {
 	}
 	file := filepath.Join(projectDir(name), "audit.json")
 	var log []any
+	if data, err := os.ReadFile(file); err == nil {
+		_ = json.Unmarshal(data, &log)
+	}
+	since := str(args, "since")
+	until := str(args, "until")
+	if since == "" && until == "" {
+		return toolOK(map[string]any{"entries": log, "total": len(log)})
+	}
+	filtered := make([]any, 0)
+	for _, raw := range log {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		// Try "date" field first (YYYY-MM-DD), fall back to "_recorded_at"
+		dateStr, _ := entry["date"].(string)
+		if dateStr == "" {
+			dateStr, _ = entry["_recorded_at"].(string)
+		}
+		if dateStr == "" {
+			continue
+		}
+		// Normalize to YYYY-MM-DD prefix for comparison
+		d := dateStr
+		if len(d) > 10 {
+			d = d[:10]
+		}
+		if since != "" && d < since {
+			continue
+		}
+		if until != "" && d > until {
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	return toolOK(map[string]any{"entries": filtered, "total": len(filtered)})
+}
+
+func registryGetDeployChecks(args map[string]any) ToolResult {
+	name := str(args, "name")
+	if name == "" {
+		return toolErr("name required")
+	}
+	file := filepath.Join(projectDir(name), "deploy_checks.json")
+	log := make([]any, 0)
 	if data, err := os.ReadFile(file); err == nil {
 		_ = json.Unmarshal(data, &log)
 	}
@@ -527,6 +591,31 @@ func registryTools() []Tool {
 					"entry": map[string]any{"type": "object", "description": "Include: action, ticket, actor, details"},
 				},
 				"required": []string{"name", "entry"},
+			},
+		},
+		{
+			Name:        "registry_write_deploy_check",
+			Description: "Append an entry to the project deploy-check log",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":  map[string]any{"type": "string"},
+					"entry": map[string]any{"type": "object", "description": "Include: status, date, and other deploy-check metadata"},
+				},
+				"required": []string{"name", "entry"},
+			},
+		},
+		{
+			Name:        "registry_get_deploy_checks",
+			Description: "Query deploy-check log entries by date range",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":  map[string]any{"type": "string"},
+					"since": map[string]any{"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
+					"until": map[string]any{"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
+				},
+				"required": []string{"name"},
 			},
 		},
 		{

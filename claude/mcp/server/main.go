@@ -134,6 +134,10 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryWriteAudit(args)
 	case "registry_get_audit":
 		return registryGetAudit(args)
+	case "registry_write_deploy_check":
+		return registryWriteDeployCheck(args)
+	case "registry_get_deploy_checks":
+		return registryGetDeployChecks(args)
 	case "registry_get_resources":
 		return registryGetResources(args)
 	case "registry_report_issue":
