@@ -295,6 +295,18 @@ func writeProjectJSON(t *testing.T, dir, name string, data map[string]any) {
 	}
 }
 
+func writeProjectFile(t *testing.T, dir, name, filename string, data any) {
+	t.Helper()
+	projectPath := filepath.Join(dir, name)
+	if err := os.MkdirAll(projectPath, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	b, _ := json.Marshal(data)
+	if err := os.WriteFile(filepath.Join(projectPath, filename), b, 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
 func TestGetResources_ReturnsAll(t *testing.T) {
 	dir, cleanup := setupTestDataDir(t)
 	defer cleanup()
@@ -415,5 +427,193 @@ func TestGetResources_EmptyWhenNone(t *testing.T) {
 	}
 	if len(resources) != 0 {
 		t.Errorf("want empty resources, got %v", resources)
+	}
+}
+
+// ── registryWriteDeployCheck ────────────────────────────────────────────────────
+
+func TestRegistryWriteDeployCheck_WritesEntry(t *testing.T) {
+	dir, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	args := map[string]any{
+		"name": "myproject",
+		"entry": map[string]any{
+			"status": "pass",
+			"date":   "2026-07-21",
+		},
+	}
+	result := registryWriteDeployCheck(args)
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	file := filepath.Join(dir, "myproject", "deploy_checks.json")
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("deploy_checks.json not created: %v", err)
+	}
+	var log []map[string]any
+	if err := json.Unmarshal(b, &log); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(log) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(log))
+	}
+	if log[0]["status"] != "pass" {
+		t.Errorf("want status=pass, got %v", log[0]["status"])
+	}
+}
+
+func TestRegistryWriteDeployCheck_AddsRecordedAt(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	args := map[string]any{
+		"name":  "myproject",
+		"entry": map[string]any{"status": "fail"},
+	}
+	registryWriteDeployCheck(args)
+
+	file := filepath.Join(dataDir(), "myproject", "deploy_checks.json")
+	b, _ := os.ReadFile(file)
+	var log []map[string]any
+	json.Unmarshal(b, &log)
+
+	if _, ok := log[0]["_recorded_at"]; !ok {
+		t.Error("want _recorded_at field, not present")
+	}
+}
+
+func TestRegistryWriteDeployCheck_ReturnsTotalEntries(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	args := map[string]any{
+		"name":  "myproject",
+		"entry": map[string]any{"status": "pass"},
+	}
+	registryWriteDeployCheck(args)
+	result := registryWriteDeployCheck(args)
+
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+
+	if resp["ok"] != true {
+		t.Errorf("want ok=true, got %v", resp["ok"])
+	}
+	total, _ := resp["total_entries"].(float64)
+	if total != 2 {
+		t.Errorf("want total_entries=2, got %v", resp["total_entries"])
+	}
+}
+
+func TestRegistryWriteDeployCheck_MissingNameOrEntry(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	result := registryWriteDeployCheck(map[string]any{"name": "myproject"})
+	if !result.IsError {
+		t.Fatal("want error when entry missing, got none")
+	}
+
+	result = registryWriteDeployCheck(map[string]any{"entry": map[string]any{"status": "pass"}})
+	if !result.IsError {
+		t.Fatal("want error when name missing, got none")
+	}
+}
+
+// ── registryGetDeployChecks ─────────────────────────────────────────────────────
+
+func TestRegistryGetDeployChecks_ReturnsAllEntries(t *testing.T) {
+	dir, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	log := []map[string]any{
+		{"status": "pass", "date": "2026-05-01"},
+		{"status": "fail", "date": "2026-06-01"},
+	}
+	writeProjectFile(t, dir, "myproject", "deploy_checks.json", log)
+
+	result := registryGetDeployChecks(map[string]any{"name": "myproject"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	total, _ := resp["total"].(float64)
+	if total != 2 {
+		t.Fatalf("want total=2, got %v", resp["total"])
+	}
+}
+
+func TestRegistryGetDeployChecks_FiltersBySince(t *testing.T) {
+	dir, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	log := []map[string]any{
+		{"status": "pass", "date": "2026-04-15"},
+		{"status": "pass", "date": "2026-05-01"},
+		{"status": "fail", "date": "2026-06-10"},
+	}
+	writeProjectFile(t, dir, "myproject", "deploy_checks.json", log)
+
+	result := registryGetDeployChecks(map[string]any{"name": "myproject", "since": "2026-05-01"})
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	total, _ := resp["total"].(float64)
+	if total != 2 {
+		t.Fatalf("want total=2 (since 2026-05-01), got %v", resp["total"])
+	}
+}
+
+func TestRegistryGetDeployChecks_FiltersByUntil(t *testing.T) {
+	dir, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	log := []map[string]any{
+		{"status": "pass", "date": "2026-04-15"},
+		{"status": "pass", "date": "2026-05-01"},
+		{"status": "fail", "date": "2026-06-10"},
+	}
+	writeProjectFile(t, dir, "myproject", "deploy_checks.json", log)
+
+	result := registryGetDeployChecks(map[string]any{"name": "myproject", "until": "2026-05-01"})
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	total, _ := resp["total"].(float64)
+	if total != 2 {
+		t.Fatalf("want total=2 (until 2026-05-01), got %v", resp["total"])
+	}
+}
+
+func TestRegistryGetDeployChecks_EmptyWhenMissing(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	result := registryGetDeployChecks(map[string]any{"name": "nonexistent"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	entries, ok := resp["entries"].([]any)
+	if !ok {
+		t.Fatalf("want entries array, got %T", resp["entries"])
+	}
+	if len(entries) != 0 {
+		t.Errorf("want empty entries, got %v", entries)
+	}
+}
+
+func TestRegistryGetDeployChecks_MissingName(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	result := registryGetDeployChecks(map[string]any{})
+	if !result.IsError {
+		t.Fatal("want error when name missing, got none")
 	}
 }
