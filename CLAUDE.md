@@ -225,6 +225,14 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
   - Offline mode w/ sync-on-reconnect: adds complexity, doesn't stop race conditions between offline edits + registry state.
 - **Consequences**: Skills need working registry MCP connection to run. Simplifies data model, ensures single source of truth. Operators must ensure registry server up before `/plan`, `/build`, `/ship`, `/init`. Error msgs clear ("Registry MCP is unavailable. Fix the MCP connection before running /build.").
 
+### [2026-07-22] — Agent model pinning: cheap models for lookups, expensive for reasoning
+- **Context**: Agents serve different purposes (data lookup vs complex reasoning) with different cost/capability tradeoffs. Need consistent strategy to avoid overpaying for simple operations while ensuring reasoning agents have sufficient model capacity.
+- **Decision**: Pin read-only/lookup agents (investigator, jira, confluence) to `claude-haiku-4-5-20251001` (cheap model). Explicitly document complex-reasoning agents (developer, planner, reviewer, security) as inheriting session model with frontmatter comment `# model: inherits session model (intentional — complex reasoning task)`.
+- **Rejected alternatives**:
+  - All agents same model: wastes budget on cheap read-only operations; expensive models on simple lookups.
+  - All agents cheap model: breaks complex planning/review/security reasoning; false economy — cheap models fail on reasoning tasks.
+- **Consequences**: Cost-efficient inference across agent fleet. Lookup operations run fast/cheap. Complex reasoning tasks inherit session model (typically Sonnet/Opus tier). New agents added going forward should be categorized + pinned accordingly (lookup → haiku, reasoning → inherit).
+
 ---
 
 ## Domain Glossary
