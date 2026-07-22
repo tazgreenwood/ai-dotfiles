@@ -18,21 +18,25 @@ Called on HIGH-risk steps in Active Plan (auth, payments, data migrations, share
 
 ## Audit checklist
 
-Flag only what's present in diff — no speculation.
+Flag only what's present in diff — no speculation. Cite the rule ID in every finding.
 
-| Category (OWASP) | Severity | Flag when |
-|---|---|---|
-| Injection (A03) | CRITICAL | Unsanitized user input reaches SQL query, shell command, LDAP query, XML parser, or template renderer; string concatenation instead of parameterized statements. |
-| Broken Authentication (A07) | CRITICAL | Hardcoded credentials/tokens/API keys; auth bypassed or missing on protected route; session tokens in localStorage or non-HttpOnly cookies; CSRF absent on state-changing requests. |
-| Sensitive Data Exposure (A02) | CRITICAL / WARNING | **CRITICAL:** PII, payment data, or credentials logged, returned in API responses, transmitted without TLS, or committed to VCS. **WARNING:** Response returns excess data or exposes internal stack traces to clients. |
-| Broken Access Control (A01) | CRITICAL | Auth check missing on protected resource, or horizontal/vertical privilege escalation possible. |
-| Security Misconfiguration (A05) | WARNING | Debug mode/dev flags left enabled, CORS overly permissive, security headers (CSP, HSTS, X-Frame-Options) absent on new endpoints. |
-| Vulnerable Dependencies (A06) | CRITICAL / WARNING | **CRITICAL:** New dependency has known CVE at pinned version. **WARNING:** New dependency not pinned to specific version. |
-| Insecure Direct Object Reference | CRITICAL | Object IDs exposed in URLs or request bodies with no ownership validation. |
-| Insecure Design (A04) | WARNING | Business logic abusable without exploiting code (rate-limit bypass, workflow skipping, missing input bounds). |
-| Software and Data Integrity (A08) | CRITICAL / WARNING | **CRITICAL:** Untrusted data deserialized without validation. **WARNING:** New dependency added without integrity verification (no lockfile or hash check). |
-| Security Logging and Monitoring (A09) | WARNING | Security-relevant actions (login, permission change, data export) produce no log entry. |
-| Server-Side Request Forgery (A10) | CRITICAL | User-controlled input constructs outbound HTTP request without allowlist validation. |
+| Rule | Severity | OWASP-2025 | Flag when |
+|---|---|---|---|
+| SECURITY-01 Encryption at Rest and in Transit | CRITICAL | A04 Cryptographic Failures | Data store lacks encryption-at-rest config, or connection uses unencrypted/pre-TLS1.2 protocol. |
+| SECURITY-02 Access Logging on Network Intermediaries | WARNING | A09 Logging & Alerting Failures | Load balancer, API gateway, or CDN resource defined without access logging enabled. |
+| SECURITY-03 Application-Level Logging | WARNING | A09 Logging & Alerting Failures | Service entry point lacks structured logger, or secrets/PII appear in log output. |
+| SECURITY-04 HTTP Security Headers | WARNING | A02 Security Misconfiguration | HTML-serving endpoint missing CSP, HSTS, X-Content-Type-Options, X-Frame-Options, or Referrer-Policy. |
+| SECURITY-05 Input Validation on All API Parameters | CRITICAL | A05 Injection | API handler lacks type/length/format validation; raw input concatenated into SQL/shell/query; user-controlled input drives an outbound HTTP request with no allowlist (SSRF). |
+| SECURITY-06 Least-Privilege Access Policies | CRITICAL | A01 Broken Access Control | IAM policy/role uses wildcard action or resource without documented exception. |
+| SECURITY-07 Restrictive Network Configuration | WARNING | A02 Security Misconfiguration | Firewall/security-group rule allows inbound `0.0.0.0/0` on a port other than 80/443 on a public LB, or private subnet routes directly to an internet gateway. |
+| SECURITY-08 Application-Level Access Control | CRITICAL | A01 Broken Access Control | Endpoint missing authz check, IDOR (resource ID with no ownership check), privileged route with no server-side role check, or wildcard CORS on authenticated endpoint. |
+| SECURITY-09 Security Hardening and Misconfiguration Prevention | WARNING | A02 Security Misconfiguration | Default credentials present, debug/error responses leak stack traces or internals, or cloud storage allows public access without documented exception. |
+| SECURITY-10 Software Supply Chain Security | CRITICAL / WARNING | A03 Software Supply Chain Failures | **CRITICAL:** new dependency has a known CVE. **WARNING:** dependency unpinned or no vulnerability scan configured. |
+| SECURITY-11 Secure Design Principles | WARNING | A06 Insecure Design | Business logic abusable without exploiting code (rate-limit bypass, workflow skip, missing bounds) or auth logic scattered instead of isolated. |
+| SECURITY-12 Authentication and Credential Management | CRITICAL | A07 Authentication Failures | Hardcoded credentials/tokens; weak/non-adaptive password hashing; session cookie missing Secure/HttpOnly/SameSite; login endpoint with no brute-force protection. |
+| SECURITY-13 Software and Data Integrity Verification | CRITICAL | A08 Software or Data Integrity Failures | Untrusted data deserialized without validation; external CDN script missing SRI hash; critical data change not auditable. |
+| SECURITY-14 Alerting and Monitoring | WARNING | A09 Logging & Alerting Failures | No alerting on repeated auth failures/privilege escalation/authz violations; log group has no retention policy or is deletable by the app's own role. |
+| SECURITY-15 Exception Handling and Fail-Safe Defaults | CRITICAL / WARNING | A10 Mishandling of Exceptional Conditions | **CRITICAL:** error path fails open (grants access/continues) or external call has no error handling. **WARNING:** user-facing error exposes internal details, or resources not released on error path. |
 
 ## Output
 
@@ -42,12 +46,12 @@ SECURITY STATUS: GO
 
 ```
 SECURITY STATUS: GO WITH WARNINGS
-- [WARNING] [description] — [file:line]
+- [WARNING] [SECURITY-NN: description] — [file:line]
 ```
 
 ```
 SECURITY STATUS: BLOCK
-- [CRITICAL] [description] — [file:line]
+- [CRITICAL] [SECURITY-NN: description] — [file:line]
 ```
 
 BLOCK output: specific enough that developer knows exact change needed.
