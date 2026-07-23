@@ -35,7 +35,7 @@ Codebase = user-facing skills + supporting MCP tools:
   - `main.go` — JSON-RPC dispatcher, MCP setup
 
 **Hooks** (`claude/hooks/`):
-- `inject-registry-context.js` — UserPromptSubmit hook; reads project metadata + resources from registry; emits as system-reminder; dedupes per session
+- `inject-registry-context.js` — UserPromptSubmit hook; reads project metadata + resources from registry; emits as system-reminder; dedupes per session. Applies best-effort Headroom compression to context block via `tools/hooks/headroom_compress.py` subprocess; graceful fallback to raw output if python3 or headroom-ai unavailable (try/catch, no exception propagated).
 
 **Key flows**:
 1. **Plan**: Auto-increment fake ticket counter in registry; store plan JSON in `registry_write_plan`
@@ -50,12 +50,13 @@ Codebase = user-facing skills + supporting MCP tools:
 
 ## Tech Stack
 
-- **Language**: Go (MCP server), Markdown (skills/prompts)
+- **Language**: Go (MCP server), Markdown (skills/prompts), Python (hook utilities)
 - **External APIs**:
   - Atlassian (JIRA, Confluence) — via `mcp__atlassian__*` tools
   - Slack — via `mcp__slack__*` tools
   - Bitbucket — via custom `bitbucket_*` tools
 - **Data storage**: JSON files in `~/.config/registry/data/`
+- **Dependencies**: `headroom-ai>=0.32.1` (Python package, optional for compression in `inject-registry-context.js`)
 - **Test command**: `cd claude/ui && go test ./...`
 
 ---
@@ -232,6 +233,16 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
   - All agents same model: wastes budget on cheap read-only operations; expensive models on simple lookups.
   - All agents cheap model: breaks complex planning/review/security reasoning; false economy — cheap models fail on reasoning tasks.
 - **Consequences**: Cost-efficient inference across agent fleet. Lookup operations run fast/cheap. Complex reasoning tasks inherit session model (typically Sonnet/Opus tier). New agents added going forward should be categorized + pinned accordingly (lookup → haiku, reasoning → inherit).
+
+### [2026-07-23] — Best-effort context compression with graceful fallback, no local state
+- **Context**: Registry context block injected at session start can grow large, risking token limit breaches. Need automatic compression, but can't add brittle mandatory dependencies or state management overhead.
+- **Decision**: `inject-registry-context.js` wraps context in try/catch, calls `headroom_compress.py` subprocess (Python + headroom-ai) w/ 3s timeout. On success with non-empty output, use compressed block. On any failure (ImportError, timeout, headroom error), silently revert to original uncompressed block. No exception propagates; session always continues.
+- **Rejected alternatives**:
+  - Dual-path with cached compressed + raw files: adds state sync complexity, data drift, no reliability gain.
+  - Mandatory compression: breaks if python3/headroom unavailable; unacceptable for CLI tool.
+  - Skip compression: context unbounded, eventual token limit hit.
+  - Async compression in background: complexity, timing unpredictability.
+- **Consequences**: ~0–3s worst-case latency added to session start (subprocess spawn + compression timeout). Graceful degradation: tool always works. Headroom dependency is optional (try/catch fallback). Cost: one subprocess invocation per session.
 
 ---
 
