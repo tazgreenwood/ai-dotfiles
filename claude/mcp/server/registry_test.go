@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func setupTestDataDir(t *testing.T) (string, func()) {
@@ -615,5 +616,207 @@ func TestRegistryGetDeployChecks_MissingName(t *testing.T) {
 	result := registryGetDeployChecks(map[string]any{})
 	if !result.IsError {
 		t.Fatal("want error when name missing, got none")
+	}
+}
+
+// ── SQLite-backed store (DOTFILES-23) ────────────────────────────────────────
+//
+// These tests exercise the store type that will back all registry data
+// (projects, plans, audit, issues, deploy checks) in a single SQLite DB
+// (WAL mode). No implementation exists yet — store.go lands in the next step.
+
+func openTestStore(t *testing.T) *store {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "registry.db")
+	s, err := newStore(dbPath)
+	if err != nil {
+		t.Fatalf("newStore: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func TestStore_ProjectDotPathRoundtrip(t *testing.T) {
+	s := openTestStore(t)
+
+	if err := s.SetProject("myproject", map[string]any{"name": "myproject"}); err != nil {
+		t.Fatalf("SetProject: %v", err)
+	}
+
+	data, err := s.GetProject("myproject")
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	dotSet(data, "deploy.cluster", "general-production")
+	if err := s.SetProject("myproject", data); err != nil {
+		t.Fatalf("SetProject (update): %v", err)
+	}
+
+	data2, err := s.GetProject("myproject")
+	if err != nil {
+		t.Fatalf("GetProject (after update): %v", err)
+	}
+	if got := dotGet(data2, "deploy.cluster"); got != "general-production" {
+		t.Errorf("want deploy.cluster=general-production, got %v", got)
+	}
+}
+
+func TestStore_PlanWriteGetUpdateStep(t *testing.T) {
+	s := openTestStore(t)
+
+	plan := map[string]any{
+		"ticket":  "TEST-1",
+		"summary": "test plan",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "pending"},
+		},
+	}
+	if err := s.WritePlan("myproject", "TEST-1", plan); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	got, err := s.GetPlan("myproject", "TEST-1")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	id1 := got["id"]
+	if id1 == nil {
+		t.Fatal("want id assigned on first write, got nil")
+	}
+	createdAt1, _ := got["created_at"].(string)
+	if createdAt1 == "" {
+		t.Fatal("want created_at stamped on first write, got empty")
+	}
+
+	if err := s.UpdateStep("myproject", "TEST-1", 0, "done"); err != nil {
+		t.Fatalf("UpdateStep: %v", err)
+	}
+
+	got2, err := s.GetPlan("myproject", "TEST-1")
+	if err != nil {
+		t.Fatalf("GetPlan (after UpdateStep): %v", err)
+	}
+	if got2["id"] != id1 {
+		t.Errorf("want id unchanged after UpdateStep, want %v got %v", id1, got2["id"])
+	}
+	if got2["created_at"] != createdAt1 {
+		t.Errorf("want created_at unchanged after UpdateStep, want %v got %v", createdAt1, got2["created_at"])
+	}
+	steps, ok := got2["plan_steps"].([]any)
+	if !ok || len(steps) != 1 {
+		t.Fatalf("want 1 plan_step, got %v", got2["plan_steps"])
+	}
+	step0, _ := steps[0].(map[string]any)
+	if step0["status"] != "done" {
+		t.Errorf("want step 0 status=done, got %v", step0["status"])
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	plan["summary"] = "updated summary"
+	if err := s.WritePlan("myproject", "TEST-1", plan); err != nil {
+		t.Fatalf("WritePlan (rewrite): %v", err)
+	}
+	got3, err := s.GetPlan("myproject", "TEST-1")
+	if err != nil {
+		t.Fatalf("GetPlan (after rewrite): %v", err)
+	}
+	if got3["id"] != id1 {
+		t.Errorf("want id unchanged after rewrite, want %v got %v", id1, got3["id"])
+	}
+	if got3["created_at"] != createdAt1 {
+		t.Errorf("want created_at unchanged after rewrite, want %v got %v", createdAt1, got3["created_at"])
+	}
+}
+
+func TestStore_AuditWriteAndDateRangeFilter(t *testing.T) {
+	s := openTestStore(t)
+
+	entries := []map[string]any{
+		{"ticket": "T1", "date": "2026-04-15"},
+		{"ticket": "T2", "date": "2026-05-01"},
+		{"ticket": "T3", "date": "2026-06-10"},
+	}
+	for _, e := range entries {
+		if _, err := s.WriteAudit("myproject", e); err != nil {
+			t.Fatalf("WriteAudit: %v", err)
+		}
+	}
+
+	filtered, total, err := s.GetAudit("myproject", "2026-05-01", "")
+	if err != nil {
+		t.Fatalf("GetAudit: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("want total=2 (since 2026-05-01), got %d", total)
+	}
+	if len(filtered) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(filtered))
+	}
+	if filtered[0]["ticket"] != "T2" || filtered[1]["ticket"] != "T3" {
+		t.Errorf("want order [T2, T3], got [%v, %v]", filtered[0]["ticket"], filtered[1]["ticket"])
+	}
+
+	filtered, total, err = s.GetAudit("myproject", "", "2026-05-01")
+	if err != nil {
+		t.Fatalf("GetAudit (until): %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("want total=2 (until 2026-05-01), got %d", total)
+	}
+	if filtered[0]["ticket"] != "T1" || filtered[1]["ticket"] != "T2" {
+		t.Errorf("want order [T1, T2], got [%v, %v]", filtered[0]["ticket"], filtered[1]["ticket"])
+	}
+}
+
+func TestStore_IssueRoundtrip(t *testing.T) {
+	s := openTestStore(t)
+
+	total, err := s.WriteIssue("myproject", map[string]any{
+		"tool":     "registry_get_project",
+		"error":    "project not found",
+		"severity": "error",
+	})
+	if err != nil {
+		t.Fatalf("WriteIssue: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("want total=1, got %d", total)
+	}
+
+	issues, err := s.GetIssues("myproject")
+	if err != nil {
+		t.Fatalf("GetIssues: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("want 1 issue, got %d", len(issues))
+	}
+	if issues[0]["tool"] != "registry_get_project" {
+		t.Errorf("want tool=registry_get_project, got %v", issues[0]["tool"])
+	}
+}
+
+func TestStore_DeployCheckRoundtrip(t *testing.T) {
+	s := openTestStore(t)
+
+	total, err := s.WriteDeployCheck("myproject", map[string]any{
+		"status": "pass",
+		"date":   "2026-05-01",
+	})
+	if err != nil {
+		t.Fatalf("WriteDeployCheck: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("want total=1, got %d", total)
+	}
+
+	entries, total2, err := s.GetDeployChecks("myproject", "", "")
+	if err != nil {
+		t.Fatalf("GetDeployChecks: %v", err)
+	}
+	if total2 != 1 {
+		t.Fatalf("want total=1, got %d", total2)
+	}
+	if entries[0]["status"] != "pass" {
+		t.Errorf("want status=pass, got %v", entries[0]["status"])
 	}
 }
