@@ -236,19 +236,19 @@ func TestRegistryReportIssue_AcceptsWarning(t *testing.T) {
 
 func setupUnwritableDataDir(t *testing.T) {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "registry-test-*")
+	parent, err := os.MkdirTemp("", "registry-test-*")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	// Create a plain file where the project subdirectory would need to be
-	// created, so os.MkdirAll fails with ENOTDIR when registry code tries
-	// to create plansDir/projectDir under it.
-	blocker := filepath.Join(dir, "myproject")
+	t.Cleanup(func() { os.RemoveAll(parent) })
+	// Point REGISTRY_DATA_DIR at a path that is itself a plain file (not a
+	// directory), so the SQLite store fails to open/create registry.db
+	// underneath it with ENOTDIR.
+	blocker := filepath.Join(parent, "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("not a directory"), 0644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	t.Setenv("REGISTRY_DATA_DIR", dir)
+	t.Setenv("REGISTRY_DATA_DIR", blocker)
 }
 
 func TestRegistryWritePlan_UnwritableDataDir_ReturnsLoudError(t *testing.T) {

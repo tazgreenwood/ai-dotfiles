@@ -113,6 +113,27 @@ func (s *store) GetProject(name string) (map[string]any, error) {
 	return data, nil
 }
 
+func (s *store) ListProjects() ([]string, error) {
+	rows, err := s.db.Query(`SELECT name FROM projects ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
 // ── plans ────────────────────────────────────────────────────────────────────
 
 func (s *store) WritePlan(project, ticket string, plan map[string]any) error {
@@ -147,6 +168,40 @@ func (s *store) GetPlan(project, ticket string) (map[string]any, error) {
 	data["id"] = id
 	data["created_at"] = createdAt
 	return data, nil
+}
+
+func (s *store) ListPlans(project string) ([]map[string]any, error) {
+	rows, err := s.db.Query(
+		`SELECT id, ticket, created_at, data FROM plans WHERE project = ? ORDER BY id`,
+		project,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var plans []map[string]any
+	for rows.Next() {
+		var id int64
+		var ticket, createdAt, raw string
+		if err := rows.Scan(&id, &ticket, &createdAt, &raw); err != nil {
+			return nil, err
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			return nil, err
+		}
+		data["id"] = id
+		data["created_at"] = createdAt
+		if t, _ := data["ticket"].(string); t == "" {
+			data["ticket"] = ticket
+		}
+		plans = append(plans, data)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return plans, nil
 }
 
 func (s *store) UpdateStep(project, ticket string, stepIndex int, status string) error {
