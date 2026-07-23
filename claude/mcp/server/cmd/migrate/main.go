@@ -286,6 +286,31 @@ func migrateProject(db *sql.DB, dataDir, project string) error {
 		}
 	}
 
+	if raw, ok, err := readJSONFile(filepath.Join(dir, "issues.json")); err != nil {
+		return fmt.Errorf("read issues.json: %w", err)
+	} else if ok {
+		var entries []map[string]any
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			return fmt.Errorf("unmarshal issues.json: %w", err)
+		}
+		for _, entry := range entries {
+			reportedAt, _ := entry["_recorded_at"].(string)
+			if reportedAt == "" {
+				reportedAt = time.Now().UTC().Format(time.RFC3339)
+			}
+			b, err := json.Marshal(entry)
+			if err != nil {
+				return fmt.Errorf("marshal issue entry: %w", err)
+			}
+			if _, err := db.Exec(
+				`INSERT INTO issues (project, reported_at, data) VALUES (?, ?, ?)`,
+				project, reportedAt, string(b),
+			); err != nil {
+				return fmt.Errorf("insert issue entry: %w", err)
+			}
+		}
+	}
+
 	if raw, ok, err := readJSONFile(filepath.Join(dir, "deploy_checks.json")); err != nil {
 		return fmt.Errorf("read deploy_checks.json: %w", err)
 	} else if ok {
@@ -423,6 +448,45 @@ func verifyProject(db *sql.DB, dataDir, project string) (bool, string) {
 				}
 				if ok {
 					lines = append(lines, fmt.Sprintf("  audit.json: PASS (%d entries)", len(want)))
+				} else {
+					passed = false
+				}
+			}
+		}
+	}
+
+	// issues.json
+	if raw, ok, err := readJSONFile(filepath.Join(dir, "issues.json")); err != nil {
+		passed, lines = false, append(lines, fmt.Sprintf("  issues.json: FAIL (read error: %v)", err))
+	} else if ok {
+		var want []map[string]any
+		json.Unmarshal(raw, &want)
+		rows, err := db.Query(`SELECT data FROM issues WHERE project = ? ORDER BY id ASC`, project)
+		if err != nil {
+			passed, lines = false, append(lines, fmt.Sprintf("  issues.json: FAIL (db query error: %v)", err))
+		} else {
+			var got []map[string]any
+			for rows.Next() {
+				var gr string
+				rows.Scan(&gr)
+				var e map[string]any
+				json.Unmarshal([]byte(gr), &e)
+				got = append(got, e)
+			}
+			rows.Close()
+			if len(want) != len(got) {
+				passed = false
+				lines = append(lines, fmt.Sprintf("  issues.json: FAIL (count mismatch: want %d, got %d)", len(want), len(got)))
+			} else {
+				ok := true
+				for i := range want {
+					if !reflect.DeepEqual(want[i], got[i]) {
+						ok = false
+						lines = append(lines, fmt.Sprintf("  issues.json[%d]: FAIL\n    want: %v\n    got:  %v", i, want[i], got[i]))
+					}
+				}
+				if ok {
+					lines = append(lines, fmt.Sprintf("  issues.json: PASS (%d entries)", len(want)))
 				} else {
 					passed = false
 				}
