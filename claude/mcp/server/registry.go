@@ -1,11 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,29 +19,30 @@ func dataDir() string {
 	return filepath.Join(home, ".config", "registry", "data")
 }
 
-func projectDir(name string) string { return filepath.Join(dataDir(), name) }
-func plansDir(name string) string   { return filepath.Join(dataDir(), name, "plans") }
+// ── SQLite-backed store (DOTFILES-23) ───────────────────────────────────────────
+//
+// Lazily-initialized, cached per dataDir() path so tests that override
+// REGISTRY_DATA_DIR per-run each get an isolated DB, while production usage
+// (stable dataDir() across the process lifetime) reuses a single connection.
 
-// ── JSON helpers ───────────────────────────────────────────────────────────────
+var (
+	storesMu sync.Mutex
+	stores   = map[string]*store{}
+)
 
-func readJSON(path string) (map[string]any, error) {
-	b, err := os.ReadFile(path)
+func getStore() (*store, error) {
+	path := filepath.Join(dataDir(), "registry.db")
+	storesMu.Lock()
+	defer storesMu.Unlock()
+	if s, ok := stores[path]; ok {
+		return s, nil
+	}
+	s, err := newStore(path)
 	if err != nil {
 		return nil, err
 	}
-	var m map[string]any
-	return m, json.Unmarshal(b, &m)
-}
-
-func writeJSON(path string, data any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, b, 0644)
+	stores[path] = s
+	return s, nil
 }
 
 func dotGet(m map[string]any, path string) any {
@@ -86,7 +87,11 @@ func registryGetProject(args map[string]any) ToolResult {
 	if name == "" {
 		return toolErr("name required")
 	}
-	data, err := readJSON(filepath.Join(projectDir(name), "project.json"))
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	data, err := s.GetProject(name)
 	if err != nil {
 		return toolErr(fmt.Sprintf("project '%s' not found in registry", name))
 	}
@@ -103,13 +108,16 @@ func registrySet(args map[string]any) ToolResult {
 	if name == "" || path == "" {
 		return toolErr("name and path required")
 	}
-	file := filepath.Join(projectDir(name), "project.json")
-	data, err := readJSON(file)
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	data, err := s.GetProject(name)
 	if err != nil {
 		data = map[string]any{}
 	}
 	dotSet(data, path, value)
-	if err := writeJSON(file, data); err != nil {
+	if err := s.SetProject(name, data); err != nil {
 		return toolErr(err.Error())
 	}
 	return toolOK(map[string]any{"ok": true, "path": path, "value": value})
@@ -120,8 +128,11 @@ func registryInitProject(args map[string]any) ToolResult {
 	if name == "" {
 		return toolErr("name required")
 	}
-	file := filepath.Join(projectDir(name), "project.json")
-	if _, err := os.Stat(file); err == nil {
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	if _, err := s.GetProject(name); err == nil {
 		return toolErr(fmt.Sprintf("project '%s' already exists — use registry_set to update fields", name))
 	}
 	ws := str(args, "workspace")
@@ -146,10 +157,10 @@ func registryInitProject(args map[string]any) ToolResult {
 			"env":      strOr(args, "env", "production"),
 		},
 	}
-	if err := writeJSON(file, data); err != nil {
+	if err := s.SetProject(name, data); err != nil {
 		return toolErr(err.Error())
 	}
-	return toolOK(map[string]any{"ok": true, "created": file, "data": data})
+	return toolOK(map[string]any{"ok": true, "created": filepath.Join(dataDir(), "registry.db"), "data": data})
 }
 
 func strOr(args map[string]any, key, def string) string {
@@ -160,17 +171,13 @@ func strOr(args map[string]any, key, def string) string {
 }
 
 func registryListProjects(args map[string]any) ToolResult {
-	entries, err := os.ReadDir(dataDir())
+	s, err := getStore()
 	if err != nil {
 		return toolOK(map[string]any{"projects": []string{}})
 	}
-	var projects []string
-	for _, e := range entries {
-		if e.IsDir() {
-			if _, err := os.Stat(filepath.Join(dataDir(), e.Name(), "project.json")); err == nil {
-				projects = append(projects, e.Name())
-			}
-		}
+	projects, err := s.ListProjects()
+	if err != nil {
+		return toolOK(map[string]any{"projects": []string{}})
 	}
 	return toolOK(map[string]any{"projects": projects})
 }
@@ -180,23 +187,17 @@ func registryListPlans(args map[string]any) ToolResult {
 	if name == "" {
 		return toolErr("name required")
 	}
-	entries, err := os.ReadDir(plansDir(name))
+	s, err := getStore()
+	if err != nil {
+		return toolOK(map[string]any{"plans": []any{}})
+	}
+	rows, err := s.ListPlans(name)
 	if err != nil {
 		return toolOK(map[string]any{"plans": []any{}})
 	}
 	var plans []map[string]any
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		data, err := readJSON(filepath.Join(plansDir(name), e.Name()))
-		if err != nil {
-			continue
-		}
+	for _, data := range rows {
 		ticket, _ := data["ticket"].(string)
-		if ticket == "" {
-			ticket = strings.TrimSuffix(e.Name(), ".json")
-		}
 		status := "active"
 		if steps, ok := data["plan_steps"].([]any); ok {
 			allDone := true
@@ -227,7 +228,11 @@ func registryGetPlan(args map[string]any) ToolResult {
 	if name == "" || ticket == "" {
 		return toolErr("name and ticket required")
 	}
-	data, err := readJSON(filepath.Join(plansDir(name), ticket+".json"))
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	data, err := s.GetPlan(name, ticket)
 	if err != nil {
 		return toolErr(fmt.Sprintf("plan '%s' not found for project '%s'", ticket, name))
 	}
@@ -241,11 +246,14 @@ func registryWritePlan(args map[string]any) ToolResult {
 	if name == "" || ticket == "" || !ok {
 		return toolErr("name, ticket, and data required")
 	}
-	file := filepath.Join(plansDir(name), ticket+".json")
-	if err := writeJSON(file, data); err != nil {
+	s, err := getStore()
+	if err != nil {
 		return toolErr(err.Error())
 	}
-	return toolOK(map[string]any{"ok": true, "file": file})
+	if err := s.WritePlan(name, ticket, data); err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "file": filepath.Join(dataDir(), "registry.db")})
 }
 
 func registryWriteAudit(args map[string]any) ToolResult {
@@ -254,17 +262,16 @@ func registryWriteAudit(args map[string]any) ToolResult {
 	if name == "" || !ok {
 		return toolErr("name and entry required")
 	}
-	file := filepath.Join(projectDir(name), "audit.json")
-	var log []any
-	if data, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(data, &log)
-	}
-	entry["_recorded_at"] = time.Now().UTC().Format(time.RFC3339)
-	log = append(log, entry)
-	if err := writeJSON(file, log); err != nil {
+	s, err := getStore()
+	if err != nil {
 		return toolErr(err.Error())
 	}
-	return toolOK(map[string]any{"ok": true, "total_entries": len(log)})
+	entry["_recorded_at"] = time.Now().UTC().Format(time.RFC3339)
+	total, err := s.WriteAudit(name, entry)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "total_entries": total})
 }
 
 func registryWriteDeployCheck(args map[string]any) ToolResult {
@@ -273,17 +280,16 @@ func registryWriteDeployCheck(args map[string]any) ToolResult {
 	if name == "" || !ok {
 		return toolErr("name and entry required")
 	}
-	file := filepath.Join(projectDir(name), "deploy_checks.json")
-	var log []any
-	if data, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(data, &log)
-	}
-	entry["_recorded_at"] = time.Now().UTC().Format(time.RFC3339)
-	log = append(log, entry)
-	if err := writeJSON(file, log); err != nil {
+	s, err := getStore()
+	if err != nil {
 		return toolErr(err.Error())
 	}
-	return toolOK(map[string]any{"ok": true, "total_entries": len(log)})
+	entry["_recorded_at"] = time.Now().UTC().Format(time.RFC3339)
+	total, err := s.WriteDeployCheck(name, entry)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "total_entries": total})
 }
 
 func registryReportIssue(args map[string]any) ToolResult {
@@ -300,11 +306,6 @@ func registryReportIssue(args map[string]any) ToolResult {
 	if severity == "" {
 		severity = "error"
 	}
-	file := filepath.Join(projectDir(project), "issues.json")
-	var issues []any
-	if data, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(data, &issues)
-	}
 	entry := map[string]any{
 		"tool":         tool,
 		"error":        errMsg,
@@ -314,11 +315,15 @@ func registryReportIssue(args map[string]any) ToolResult {
 	if ctx := str(args, "context"); ctx != "" {
 		entry["context"] = ctx
 	}
-	issues = append(issues, entry)
-	if err := writeJSON(file, issues); err != nil {
+	s, err := getStore()
+	if err != nil {
 		return toolErr(err.Error())
 	}
-	return toolOK(map[string]any{"ok": true, "total_issues": len(issues)})
+	total, err := s.WriteIssue(project, entry)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "total_issues": total})
 }
 
 func registryUpdateStep(args map[string]any) ToolResult {
@@ -338,26 +343,14 @@ func registryUpdateStep(args map[string]any) ToolResult {
 	default:
 		return toolErr("step_index must be a number")
 	}
-	file := filepath.Join(plansDir(name), ticket+".json")
-	data, err := readJSON(file)
+	s, err := getStore()
 	if err != nil {
+		return toolErr(err.Error())
+	}
+	if _, err := s.GetPlan(name, ticket); err != nil {
 		return toolErr(fmt.Sprintf("plan '%s' not found for project '%s'", ticket, name))
 	}
-	steps, ok := data["plan_steps"].([]any)
-	if !ok {
-		return toolErr("plan has no plan_steps array")
-	}
-	if idx < 0 || idx >= len(steps) {
-		return toolErr(fmt.Sprintf("step_index %d out of range (plan has %d steps)", idx, len(steps)))
-	}
-	step, ok := steps[idx].(map[string]any)
-	if !ok {
-		return toolErr(fmt.Sprintf("step %d is not an object", idx))
-	}
-	step["status"] = status
-	steps[idx] = step
-	data["plan_steps"] = steps
-	if err := writeJSON(file, data); err != nil {
+	if err := s.UpdateStep(name, ticket, idx, status); err != nil {
 		return toolErr(err.Error())
 	}
 	return toolOK(map[string]any{"ok": true, "step_index": idx, "status": status})
@@ -368,7 +361,11 @@ func registryGetResources(args map[string]any) ToolResult {
 	if name == "" {
 		return toolErr("name required")
 	}
-	data, err := readJSON(filepath.Join(projectDir(name), "project.json"))
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	data, err := s.GetProject(name)
 	if err != nil {
 		return toolErr(fmt.Sprintf("project '%s' not found in registry", name))
 	}
@@ -391,44 +388,18 @@ func registryGetAudit(args map[string]any) ToolResult {
 	if name == "" {
 		return toolErr("name required")
 	}
-	file := filepath.Join(projectDir(name), "audit.json")
-	var log []any
-	if data, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(data, &log)
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
 	}
-	since := str(args, "since")
-	until := str(args, "until")
-	if since == "" && until == "" {
-		return toolOK(map[string]any{"entries": log, "total": len(log)})
+	entries, total, err := s.GetAudit(name, str(args, "since"), str(args, "until"))
+	if err != nil {
+		return toolErr(err.Error())
 	}
-	filtered := make([]any, 0)
-	for _, raw := range log {
-		entry, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		// Try "date" field first (YYYY-MM-DD), fall back to "_recorded_at"
-		dateStr, _ := entry["date"].(string)
-		if dateStr == "" {
-			dateStr, _ = entry["_recorded_at"].(string)
-		}
-		if dateStr == "" {
-			continue
-		}
-		// Normalize to YYYY-MM-DD prefix for comparison
-		d := dateStr
-		if len(d) > 10 {
-			d = d[:10]
-		}
-		if since != "" && d < since {
-			continue
-		}
-		if until != "" && d > until {
-			continue
-		}
-		filtered = append(filtered, raw)
+	if entries == nil {
+		entries = []map[string]any{}
 	}
-	return toolOK(map[string]any{"entries": filtered, "total": len(filtered)})
+	return toolOK(map[string]any{"entries": entries, "total": total})
 }
 
 func registryGetDeployChecks(args map[string]any) ToolResult {
@@ -436,44 +407,18 @@ func registryGetDeployChecks(args map[string]any) ToolResult {
 	if name == "" {
 		return toolErr("name required")
 	}
-	file := filepath.Join(projectDir(name), "deploy_checks.json")
-	log := make([]any, 0)
-	if data, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(data, &log)
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
 	}
-	since := str(args, "since")
-	until := str(args, "until")
-	if since == "" && until == "" {
-		return toolOK(map[string]any{"entries": log, "total": len(log)})
+	entries, total, err := s.GetDeployChecks(name, str(args, "since"), str(args, "until"))
+	if err != nil {
+		return toolErr(err.Error())
 	}
-	filtered := make([]any, 0)
-	for _, raw := range log {
-		entry, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		// Try "date" field first (YYYY-MM-DD), fall back to "_recorded_at"
-		dateStr, _ := entry["date"].(string)
-		if dateStr == "" {
-			dateStr, _ = entry["_recorded_at"].(string)
-		}
-		if dateStr == "" {
-			continue
-		}
-		// Normalize to YYYY-MM-DD prefix for comparison
-		d := dateStr
-		if len(d) > 10 {
-			d = d[:10]
-		}
-		if since != "" && d < since {
-			continue
-		}
-		if until != "" && d > until {
-			continue
-		}
-		filtered = append(filtered, raw)
+	if entries == nil {
+		entries = []map[string]any{}
 	}
-	return toolOK(map[string]any{"entries": filtered, "total": len(filtered)})
+	return toolOK(map[string]any{"entries": entries, "total": total})
 }
 
 func allTools() []Tool {
