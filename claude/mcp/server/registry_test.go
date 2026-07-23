@@ -19,7 +19,7 @@ func setupTestDataDir(t *testing.T) (string, func()) {
 }
 
 func TestRegistryReportIssue_WritesIssue(t *testing.T) {
-	dir, cleanup := setupTestDataDir(t)
+	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
 
 	args := map[string]any{
@@ -32,14 +32,13 @@ func TestRegistryReportIssue_WritesIssue(t *testing.T) {
 		t.Fatalf("unexpected error: %s", result.Content[0].Text)
 	}
 
-	issuesFile := filepath.Join(dir, "myproject", "issues.json")
-	b, err := os.ReadFile(issuesFile)
+	s, err := getStore()
 	if err != nil {
-		t.Fatalf("issues.json not created: %v", err)
+		t.Fatalf("getStore: %v", err)
 	}
-	var issues []map[string]any
-	if err := json.Unmarshal(b, &issues); err != nil {
-		t.Fatalf("invalid json: %v", err)
+	issues, err := s.GetIssues("myproject")
+	if err != nil {
+		t.Fatalf("GetIssues: %v", err)
 	}
 	if len(issues) != 1 {
 		t.Fatalf("want 1 issue, got %d", len(issues))
@@ -63,10 +62,14 @@ func TestRegistryReportIssue_AddsRecordedAt(t *testing.T) {
 	}
 	registryReportIssue(args)
 
-	issuesFile := filepath.Join(dataDir(), "myproject", "issues.json")
-	b, _ := os.ReadFile(issuesFile)
-	var issues []map[string]any
-	json.Unmarshal(b, &issues)
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	issues, err := s.GetIssues("myproject")
+	if err != nil {
+		t.Fatalf("GetIssues: %v", err)
+	}
 
 	if _, ok := issues[0]["_recorded_at"]; !ok {
 		t.Error("want _recorded_at field, not present")
@@ -74,7 +77,7 @@ func TestRegistryReportIssue_AddsRecordedAt(t *testing.T) {
 }
 
 func TestRegistryReportIssue_DefaultsProjectToPrivateDotfiles(t *testing.T) {
-	dir, cleanup := setupTestDataDir(t)
+	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
 
 	args := map[string]any{
@@ -86,9 +89,16 @@ func TestRegistryReportIssue_DefaultsProjectToPrivateDotfiles(t *testing.T) {
 		t.Fatalf("unexpected error: %s", result.Content[0].Text)
 	}
 
-	issuesFile := filepath.Join(dir, "private-dotfiles", "issues.json")
-	if _, err := os.Stat(issuesFile); err != nil {
-		t.Fatalf("want issues.json at private-dotfiles/issues.json, not found: %v", err)
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	issues, err := s.GetIssues("private-dotfiles")
+	if err != nil {
+		t.Fatalf("GetIssues: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("want 1 issue for private-dotfiles, got %d", len(issues))
 	}
 }
 
@@ -103,10 +113,14 @@ func TestRegistryReportIssue_DefaultsSeverityToError(t *testing.T) {
 	}
 	registryReportIssue(args)
 
-	issuesFile := filepath.Join(dataDir(), "myproject", "issues.json")
-	b, _ := os.ReadFile(issuesFile)
-	var issues []map[string]any
-	json.Unmarshal(b, &issues)
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	issues, err := s.GetIssues("myproject")
+	if err != nil {
+		t.Fatalf("GetIssues: %v", err)
+	}
 
 	if issues[0]["severity"] != "error" {
 		t.Errorf("want severity=error, got %v", issues[0]["severity"])
@@ -224,10 +238,14 @@ func TestRegistryReportIssue_AcceptsWarning(t *testing.T) {
 	}
 	registryReportIssue(args)
 
-	issuesFile := filepath.Join(dataDir(), "myproject", "issues.json")
-	b, _ := os.ReadFile(issuesFile)
-	var issues []map[string]any
-	json.Unmarshal(b, &issues)
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	issues, err := s.GetIssues("myproject")
+	if err != nil {
+		t.Fatalf("GetIssues: %v", err)
+	}
 
 	if issues[0]["severity"] != "warning" {
 		t.Errorf("want severity=warning, got %v", issues[0]["severity"])
@@ -284,35 +302,22 @@ func TestRegistryGetPlan_UnwritableDataDir_ReturnsLoudError(t *testing.T) {
 	}
 }
 
-func writeProjectJSON(t *testing.T, dir, name string, data map[string]any) {
+func writeProjectData(t *testing.T, name string, data map[string]any) {
 	t.Helper()
-	projectPath := filepath.Join(dir, name)
-	if err := os.MkdirAll(projectPath, 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
 	}
-	b, _ := json.Marshal(data)
-	if err := os.WriteFile(filepath.Join(projectPath, "project.json"), b, 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-}
-
-func writeProjectFile(t *testing.T, dir, name, filename string, data any) {
-	t.Helper()
-	projectPath := filepath.Join(dir, name)
-	if err := os.MkdirAll(projectPath, 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	b, _ := json.Marshal(data)
-	if err := os.WriteFile(filepath.Join(projectPath, filename), b, 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	if err := s.SetProject(name, data); err != nil {
+		t.Fatalf("SetProject: %v", err)
 	}
 }
 
 func TestGetResources_ReturnsAll(t *testing.T) {
-	dir, cleanup := setupTestDataDir(t)
+	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
 
-	writeProjectJSON(t, dir, "myproject", map[string]any{
+	writeProjectData(t, "myproject", map[string]any{
 		"name": "myproject",
 		"resources": map[string]any{
 			"grafana": map[string]any{"dashboard": "http://grafana/d/abc"},
@@ -340,10 +345,10 @@ func TestGetResources_ReturnsAll(t *testing.T) {
 }
 
 func TestGetResources_FiltersByCategory(t *testing.T) {
-	dir, cleanup := setupTestDataDir(t)
+	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
 
-	writeProjectJSON(t, dir, "myproject", map[string]any{
+	writeProjectData(t, "myproject", map[string]any{
 		"name": "myproject",
 		"resources": map[string]any{
 			"grafana": map[string]any{"dashboard": "http://grafana/d/abc"},
@@ -408,10 +413,10 @@ func TestScriptsResourceCategory_RoundTrip(t *testing.T) {
 }
 
 func TestGetResources_EmptyWhenNone(t *testing.T) {
-	dir, cleanup := setupTestDataDir(t)
+	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
 
-	writeProjectJSON(t, dir, "myproject", map[string]any{
+	writeProjectData(t, "myproject", map[string]any{
 		"name": "myproject",
 	})
 
@@ -434,7 +439,7 @@ func TestGetResources_EmptyWhenNone(t *testing.T) {
 // ── registryWriteDeployCheck ────────────────────────────────────────────────────
 
 func TestRegistryWriteDeployCheck_WritesEntry(t *testing.T) {
-	dir, cleanup := setupTestDataDir(t)
+	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
 
 	args := map[string]any{
@@ -449,14 +454,13 @@ func TestRegistryWriteDeployCheck_WritesEntry(t *testing.T) {
 		t.Fatalf("unexpected error: %s", result.Content[0].Text)
 	}
 
-	file := filepath.Join(dir, "myproject", "deploy_checks.json")
-	b, err := os.ReadFile(file)
+	s, err := getStore()
 	if err != nil {
-		t.Fatalf("deploy_checks.json not created: %v", err)
+		t.Fatalf("getStore: %v", err)
 	}
-	var log []map[string]any
-	if err := json.Unmarshal(b, &log); err != nil {
-		t.Fatalf("invalid json: %v", err)
+	log, _, err := s.GetDeployChecks("myproject", "", "")
+	if err != nil {
+		t.Fatalf("GetDeployChecks: %v", err)
 	}
 	if len(log) != 1 {
 		t.Fatalf("want 1 entry, got %d", len(log))
@@ -476,10 +480,14 @@ func TestRegistryWriteDeployCheck_AddsRecordedAt(t *testing.T) {
 	}
 	registryWriteDeployCheck(args)
 
-	file := filepath.Join(dataDir(), "myproject", "deploy_checks.json")
-	b, _ := os.ReadFile(file)
-	var log []map[string]any
-	json.Unmarshal(b, &log)
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	log, _, err := s.GetDeployChecks("myproject", "", "")
+	if err != nil {
+		t.Fatalf("GetDeployChecks: %v", err)
+	}
 
 	if _, ok := log[0]["_recorded_at"]; !ok {
 		t.Error("want _recorded_at field, not present")
@@ -526,15 +534,27 @@ func TestRegistryWriteDeployCheck_MissingNameOrEntry(t *testing.T) {
 
 // ── registryGetDeployChecks ─────────────────────────────────────────────────────
 
+func seedDeployChecks(t *testing.T, name string, entries []map[string]any) {
+	t.Helper()
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	for _, e := range entries {
+		if _, err := s.WriteDeployCheck(name, e); err != nil {
+			t.Fatalf("WriteDeployCheck: %v", err)
+		}
+	}
+}
+
 func TestRegistryGetDeployChecks_ReturnsAllEntries(t *testing.T) {
-	dir, cleanup := setupTestDataDir(t)
+	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
 
-	log := []map[string]any{
+	seedDeployChecks(t, "myproject", []map[string]any{
 		{"status": "pass", "date": "2026-05-01"},
 		{"status": "fail", "date": "2026-06-01"},
-	}
-	writeProjectFile(t, dir, "myproject", "deploy_checks.json", log)
+	})
 
 	result := registryGetDeployChecks(map[string]any{"name": "myproject"})
 	if result.IsError {
@@ -550,15 +570,14 @@ func TestRegistryGetDeployChecks_ReturnsAllEntries(t *testing.T) {
 }
 
 func TestRegistryGetDeployChecks_FiltersBySince(t *testing.T) {
-	dir, cleanup := setupTestDataDir(t)
+	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
 
-	log := []map[string]any{
+	seedDeployChecks(t, "myproject", []map[string]any{
 		{"status": "pass", "date": "2026-04-15"},
 		{"status": "pass", "date": "2026-05-01"},
 		{"status": "fail", "date": "2026-06-10"},
-	}
-	writeProjectFile(t, dir, "myproject", "deploy_checks.json", log)
+	})
 
 	result := registryGetDeployChecks(map[string]any{"name": "myproject", "since": "2026-05-01"})
 	var resp map[string]any
@@ -570,15 +589,14 @@ func TestRegistryGetDeployChecks_FiltersBySince(t *testing.T) {
 }
 
 func TestRegistryGetDeployChecks_FiltersByUntil(t *testing.T) {
-	dir, cleanup := setupTestDataDir(t)
+	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
 
-	log := []map[string]any{
+	seedDeployChecks(t, "myproject", []map[string]any{
 		{"status": "pass", "date": "2026-04-15"},
 		{"status": "pass", "date": "2026-05-01"},
 		{"status": "fail", "date": "2026-06-10"},
-	}
-	writeProjectFile(t, dir, "myproject", "deploy_checks.json", log)
+	})
 
 	result := registryGetDeployChecks(map[string]any{"name": "myproject", "until": "2026-05-01"})
 	var resp map[string]any

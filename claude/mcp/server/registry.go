@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,8 +18,6 @@ func dataDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "registry", "data")
 }
-
-func projectDir(name string) string { return filepath.Join(dataDir(), name) }
 
 // ── SQLite-backed store (DOTFILES-23) ───────────────────────────────────────────
 //
@@ -46,28 +43,6 @@ func getStore() (*store, error) {
 	}
 	stores[path] = s
 	return s, nil
-}
-
-// ── JSON helpers ───────────────────────────────────────────────────────────────
-
-func readJSON(path string) (map[string]any, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	return m, json.Unmarshal(b, &m)
-}
-
-func writeJSON(path string, data any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, b, 0644)
 }
 
 func dotGet(m map[string]any, path string) any {
@@ -145,9 +120,6 @@ func registrySet(args map[string]any) ToolResult {
 	if err := s.SetProject(name, data); err != nil {
 		return toolErr(err.Error())
 	}
-	// Mirror to legacy project.json for handlers not yet migrated to the store
-	// (registry_get_resources) — remove once that handler moves off file I/O.
-	_ = writeJSON(filepath.Join(projectDir(name), "project.json"), data)
 	return toolOK(map[string]any{"ok": true, "path": path, "value": value})
 }
 
@@ -188,11 +160,7 @@ func registryInitProject(args map[string]any) ToolResult {
 	if err := s.SetProject(name, data); err != nil {
 		return toolErr(err.Error())
 	}
-	file := filepath.Join(projectDir(name), "project.json")
-	// Mirror to legacy project.json for handlers not yet migrated to the store
-	// (registry_get_resources) — remove once that handler moves off file I/O.
-	_ = writeJSON(file, data)
-	return toolOK(map[string]any{"ok": true, "created": file, "data": data})
+	return toolOK(map[string]any{"ok": true, "created": filepath.Join(dataDir(), "registry.db"), "data": data})
 }
 
 func strOr(args map[string]any, key, def string) string {
@@ -294,17 +262,16 @@ func registryWriteAudit(args map[string]any) ToolResult {
 	if name == "" || !ok {
 		return toolErr("name and entry required")
 	}
-	file := filepath.Join(projectDir(name), "audit.json")
-	var log []any
-	if data, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(data, &log)
-	}
-	entry["_recorded_at"] = time.Now().UTC().Format(time.RFC3339)
-	log = append(log, entry)
-	if err := writeJSON(file, log); err != nil {
+	s, err := getStore()
+	if err != nil {
 		return toolErr(err.Error())
 	}
-	return toolOK(map[string]any{"ok": true, "total_entries": len(log)})
+	entry["_recorded_at"] = time.Now().UTC().Format(time.RFC3339)
+	total, err := s.WriteAudit(name, entry)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "total_entries": total})
 }
 
 func registryWriteDeployCheck(args map[string]any) ToolResult {
@@ -313,17 +280,16 @@ func registryWriteDeployCheck(args map[string]any) ToolResult {
 	if name == "" || !ok {
 		return toolErr("name and entry required")
 	}
-	file := filepath.Join(projectDir(name), "deploy_checks.json")
-	var log []any
-	if data, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(data, &log)
-	}
-	entry["_recorded_at"] = time.Now().UTC().Format(time.RFC3339)
-	log = append(log, entry)
-	if err := writeJSON(file, log); err != nil {
+	s, err := getStore()
+	if err != nil {
 		return toolErr(err.Error())
 	}
-	return toolOK(map[string]any{"ok": true, "total_entries": len(log)})
+	entry["_recorded_at"] = time.Now().UTC().Format(time.RFC3339)
+	total, err := s.WriteDeployCheck(name, entry)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "total_entries": total})
 }
 
 func registryReportIssue(args map[string]any) ToolResult {
@@ -340,11 +306,6 @@ func registryReportIssue(args map[string]any) ToolResult {
 	if severity == "" {
 		severity = "error"
 	}
-	file := filepath.Join(projectDir(project), "issues.json")
-	var issues []any
-	if data, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(data, &issues)
-	}
 	entry := map[string]any{
 		"tool":         tool,
 		"error":        errMsg,
@@ -354,11 +315,15 @@ func registryReportIssue(args map[string]any) ToolResult {
 	if ctx := str(args, "context"); ctx != "" {
 		entry["context"] = ctx
 	}
-	issues = append(issues, entry)
-	if err := writeJSON(file, issues); err != nil {
+	s, err := getStore()
+	if err != nil {
 		return toolErr(err.Error())
 	}
-	return toolOK(map[string]any{"ok": true, "total_issues": len(issues)})
+	total, err := s.WriteIssue(project, entry)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "total_issues": total})
 }
 
 func registryUpdateStep(args map[string]any) ToolResult {
@@ -396,7 +361,11 @@ func registryGetResources(args map[string]any) ToolResult {
 	if name == "" {
 		return toolErr("name required")
 	}
-	data, err := readJSON(filepath.Join(projectDir(name), "project.json"))
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	data, err := s.GetProject(name)
 	if err != nil {
 		return toolErr(fmt.Sprintf("project '%s' not found in registry", name))
 	}
@@ -419,44 +388,18 @@ func registryGetAudit(args map[string]any) ToolResult {
 	if name == "" {
 		return toolErr("name required")
 	}
-	file := filepath.Join(projectDir(name), "audit.json")
-	var log []any
-	if data, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(data, &log)
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
 	}
-	since := str(args, "since")
-	until := str(args, "until")
-	if since == "" && until == "" {
-		return toolOK(map[string]any{"entries": log, "total": len(log)})
+	entries, total, err := s.GetAudit(name, str(args, "since"), str(args, "until"))
+	if err != nil {
+		return toolErr(err.Error())
 	}
-	filtered := make([]any, 0)
-	for _, raw := range log {
-		entry, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		// Try "date" field first (YYYY-MM-DD), fall back to "_recorded_at"
-		dateStr, _ := entry["date"].(string)
-		if dateStr == "" {
-			dateStr, _ = entry["_recorded_at"].(string)
-		}
-		if dateStr == "" {
-			continue
-		}
-		// Normalize to YYYY-MM-DD prefix for comparison
-		d := dateStr
-		if len(d) > 10 {
-			d = d[:10]
-		}
-		if since != "" && d < since {
-			continue
-		}
-		if until != "" && d > until {
-			continue
-		}
-		filtered = append(filtered, raw)
+	if entries == nil {
+		entries = []map[string]any{}
 	}
-	return toolOK(map[string]any{"entries": filtered, "total": len(filtered)})
+	return toolOK(map[string]any{"entries": entries, "total": total})
 }
 
 func registryGetDeployChecks(args map[string]any) ToolResult {
@@ -464,44 +407,18 @@ func registryGetDeployChecks(args map[string]any) ToolResult {
 	if name == "" {
 		return toolErr("name required")
 	}
-	file := filepath.Join(projectDir(name), "deploy_checks.json")
-	log := make([]any, 0)
-	if data, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(data, &log)
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
 	}
-	since := str(args, "since")
-	until := str(args, "until")
-	if since == "" && until == "" {
-		return toolOK(map[string]any{"entries": log, "total": len(log)})
+	entries, total, err := s.GetDeployChecks(name, str(args, "since"), str(args, "until"))
+	if err != nil {
+		return toolErr(err.Error())
 	}
-	filtered := make([]any, 0)
-	for _, raw := range log {
-		entry, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		// Try "date" field first (YYYY-MM-DD), fall back to "_recorded_at"
-		dateStr, _ := entry["date"].(string)
-		if dateStr == "" {
-			dateStr, _ = entry["_recorded_at"].(string)
-		}
-		if dateStr == "" {
-			continue
-		}
-		// Normalize to YYYY-MM-DD prefix for comparison
-		d := dateStr
-		if len(d) > 10 {
-			d = d[:10]
-		}
-		if since != "" && d < since {
-			continue
-		}
-		if until != "" && d > until {
-			continue
-		}
-		filtered = append(filtered, raw)
+	if entries == nil {
+		entries = []map[string]any{}
 	}
-	return toolOK(map[string]any{"entries": filtered, "total": len(filtered)})
+	return toolOK(map[string]any{"entries": entries, "total": total})
 }
 
 func allTools() []Tool {

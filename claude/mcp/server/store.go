@@ -348,7 +348,12 @@ func (s *store) GetIssues(project string) ([]map[string]any, error) {
 // ── deploy checks ────────────────────────────────────────────────────────────
 
 func (s *store) WriteDeployCheck(project string, check map[string]any) (int, error) {
-	recordedAt := time.Now().UTC().Format(time.RFC3339)
+	// Prefer the entry's own "date" field (so since/until filtering matches the
+	// deploy check's reported date, not the write time), fall back to now.
+	recordedAt, _ := check["date"].(string)
+	if recordedAt == "" {
+		recordedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 	b, err := json.Marshal(check)
 	if err != nil {
 		return 0, err
