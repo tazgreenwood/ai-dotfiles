@@ -28,7 +28,8 @@ Codebase = user-facing skills + supporting MCP tools:
 
 **MCP Servers**:
 - **Registry Server** (`claude/mcp/server/`):
-  - `registry.go` — project metadata, plan storage, audit trail, issue reporting (uses `~/.config/registry/data/`)
+  - `registry.go` — MCP tool handlers for project metadata, plans, audit trail, issues, deploy checks
+  - `store.go` — SQLite-backed persistence layer (single DB at `~/.config/registry/data/registry.db`, WAL mode)
   - `main.go` — JSON-RPC dispatcher, MCP setup
 - **Bitbucket Server** (`claude/mcp/bitbucket/`):
   - `bitbucket.go` — PR, branch, commit ops
@@ -55,8 +56,10 @@ Codebase = user-facing skills + supporting MCP tools:
   - Atlassian (JIRA, Confluence) — via `mcp__atlassian__*` tools
   - Slack — via `mcp__slack__*` tools
   - Bitbucket — via custom `bitbucket_*` tools
-- **Data storage**: JSON files in `~/.config/registry/data/`
-- **Dependencies**: `headroom-ai>=0.32.1` (Python package, optional for compression in `inject-registry-context.js`)
+- **Data storage**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db`, replacing per-project JSON files
+- **Dependencies**:
+  - `modernc.org/sqlite` (pure-Go SQLite driver, no cgo, used by registry MCP server)
+  - `headroom-ai>=0.32.1` (Python package, optional for compression in `inject-registry-context.js`)
 - **Test command**: `cd claude/ui && go test ./...`
 
 ---
@@ -87,7 +90,7 @@ Sets value in project metadata via dot-path. Makes intermediate objects as neede
 Makes new project entry, defaults on missing fields.
 
 #### `registry_list_projects() -> {projects: []string}`
-Lists all projects w/ `project.json` file.
+Lists all projects in registry.
 
 #### `registry_list_plans(name: string) -> {plans: [{ticket: string, summary: string, status: "active"|"shipped"}]}`
 Lists all plans for project. Status `"shipped"` if all plan steps status `"done"`.
@@ -104,7 +107,7 @@ Valid statuses: `pending`, `in_progress`, `done`, `blocked`.
 Writes/updates plan file. Used by `/plan` to persist mission state.
 
 #### `registry_write_audit(name: string, entry: map[string]any) -> {ok: bool, total_entries: int} | error`
-Appends entry to `data/{project}/audit.json`. Caller gives all fields; `_recorded_at` (RFC3339) added auto.
+Appends entry to project's audit log in registry. Caller gives all fields; `_recorded_at` (RFC3339) added auto.
 
 **Audit entry schema** (per `ship.md` spec):
 ```json
@@ -124,7 +127,7 @@ Appends entry to `data/{project}/audit.json`. Caller gives all fields; `_recorde
 ```
 
 #### `registry_get_resources(name: string, category?: string) -> {resources: map[string]any} | error`
-Returns cached project resources, optionally filtered by category. Resources live under `resources` key in `project.json`.
+Returns cached project resources, optionally filtered by category. Resources live under `resources` key in project metadata.
 
 ```
 Response: { "resources": { "grafana": { "api_dashboard": "http://..." }, "slack": { "standup_channel": "C0XXX" }, "aws": { "log_group": "/app/logs" }, "bitbucket": { "repos": "mapi-js,emily" }, "scripts": { "find_recent_prs": { "command": "gh pr list --state merged --limit 10", "description": "List recently merged PRs", "learned_at": "2026-07-14T00:00:00Z" } } } }
@@ -152,7 +155,7 @@ Queries audit entries by date range. Dates ISO 8601 (YYYY-MM-DD), inclusive.
 **Date comparison logic**: Grabs first 10 chars of `date` field (or `_recorded_at` if missing), does lexicographic string compare. Works fine — ISO dates sort chronologically.
 
 #### `registry_report_issue(name: string, issue: map[string]any) -> {ok: bool, total_entries: int} | error`
-Appends issue report entry to `data/{project}/issues.json`. Logs failures, blockers, incidents during skill execution.
+Appends issue report entry to project's issue log in registry. Logs failures, blockers, incidents during skill execution.
 
 **Issue schema**:
 ```json
@@ -244,6 +247,14 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
   - Async compression in background: complexity, timing unpredictability.
 - **Consequences**: ~0–3s worst-case latency added to session start (subprocess spawn + compression timeout). Graceful degradation: tool always works. Headroom dependency is optional (try/catch fallback). Cost: one subprocess invocation per session.
 
+### [2026-07-23] — Registry storage: SQLite over Postgres/Docker
+- **Context**: JSON-per-project storage had load-all-then-filter-in-Go date-range queries for `registry_get_audit()` and `registry_get_deploy_checks()`, adding O(n) latency. Write races (TOCTOU) on concurrent plan updates. Needed indexed date-range queries, transactional writes, and atomic counter increments without adding ops burden or cloud dependencies.
+- **Decision**: Single embedded SQLite DB (WAL mode) at `~/.config/registry/data/registry.db`, using pure-Go `modernc.org/sqlite` driver (no cgo, no Postgres server, no Docker Compose, no cloud deployment). All 13 MCP tool signatures unchanged — transparent swap, backward-compatible. Migration: one-shot `cmd/migrate/main.go` tool backs up old JSON tree to `~/.config/registry/data.bak-{timestamp}`, then verifies zero-diff parity across all real projects before cleanup.
+- **Rejected alternatives**:
+  - Postgres + Docker Compose: adds ops overhead, requires running a separate service, unacceptable for single-operator personal tool.
+  - mattn/go-sqlite3 (cgo driver): breaks pure-Go cross-compilation; `modernc.org/sqlite` (pure-Go) is portable, no build dependencies.
+- **Consequences**: Plans table now has autoincrement id + created_at (stamped once, never overwritten). `registry_get_audit()` and `registry_get_deploy_checks()` use indexed SQL WHERE clauses instead of loading all data into Go. Old JSON files under `data/{project}/*.json` are dead weight, kept alongside timestamped backup for safety during rollout, not yet deleted. Counter increments are now atomic transactions. Tools become O(1) on range queries instead of O(n).
+
 ---
 
 ## Domain Glossary
@@ -252,7 +263,7 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
 - **Fake ticket**: Auto-gen key for projects w/o JIRA integration. Uses registry counter.
 - **Plan**: Mission state object w/ acceptance criteria, step breakdown, status. Stored as JSON in registry.
 - **Audit entry**: Metadata about shipped work (ticket, type, impact, PR URL, files changed, story points, labels, date).
-- **Registry**: Persistent key-value store in `~/.config/registry/data/` w/ project metadata, plans, audit trails. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`, `/init`) hard-dependent on registry uptime (no local fallback).
+- **Registry**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db` w/ project metadata, plans, audit trails, issues, deploy checks. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`, `/init`) hard-dependent on registry uptime (no local fallback).
 - **Resource cache**: External integrations (Slack channels, Grafana dashboards, Bitbucket repos, AWS log groups, etc.) stored under `project.resources` in registry. Organized by category (grafana, slack, aws, bitbucket, confluence, jira, scripts).
 - **Registry context**: System-reminder block emitted by `inject-registry-context` hook on session start; holds project metadata + all cached resources; used by skills to skip redundant API calls.
 - **Skill**: User-invocable markdown prompt file routing commands to agents. All skills include SELF-IMPROVEMENT section for discovering + caching resources.
