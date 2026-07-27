@@ -190,6 +190,56 @@ func TestRegistryUpdateStep_UpdatesStatus(t *testing.T) {
 	}
 }
 
+func TestRegistryWritePlan_InvalidAsyncGrouping_RejectedAndNotPersisted(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	plan := map[string]any{
+		"ticket":  "TEST-3",
+		"summary": "bad async grouping",
+		"plan_steps": []any{
+			map[string]any{
+				"title":          "step one",
+				"status":         "pending",
+				"execution":      "async",
+				"parallel_group": "group-a",
+				"files":          []any{"foo.go", "bar.go"},
+			},
+			map[string]any{
+				"title":          "step two",
+				"status":         "pending",
+				"execution":      "async",
+				"parallel_group": "group-a",
+				"files":          []any{"bar.go", "baz.go"},
+			},
+		},
+	}
+
+	result := registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-3", "data": plan})
+	if !result.IsError {
+		t.Fatal("want registry_write_plan to reject overlapping async parallel_group, got success")
+	}
+
+	got := registryGetPlan(map[string]any{"name": "myproject", "ticket": "TEST-3"})
+	if !got.IsError {
+		t.Fatal("want plan not persisted after rejected write, but registry_get_plan succeeded")
+	}
+
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	plans, err := s.ListPlans("myproject")
+	if err != nil {
+		t.Fatalf("ListPlans: %v", err)
+	}
+	for _, p := range plans {
+		if p["ticket"] == "TEST-3" {
+			t.Fatal("want TEST-3 not present in ListPlans after rejected write")
+		}
+	}
+}
+
 func TestRegistryUpdateStep_OutOfRange(t *testing.T) {
 	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
