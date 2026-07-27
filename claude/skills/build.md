@@ -34,7 +34,39 @@ git checkout -b [branch]
 
 ## STEP 3: EXECUTE PLAN STEPS
 
-Loop through all steps in mission state where `status = "pending"`. For each step at index `i`:
+### 3.0 Partition pending steps into runs
+
+Take all steps in mission state where `status = "pending"`, in plan order, and partition them into **runs**:
+
+- A **sync run** is a single step where `step.execution` is `"sync"` or absent (default: sync).
+- An **async run** is a maximal contiguous block of pending steps where `step.execution == "async"` and all steps share the same `step.parallel_group` value.
+
+Process runs in plan order, one run at a time. Within a run, follow the appropriate flow below.
+
+#### Sync run
+
+For the single step at index `i`, follow 3a–3e exactly as described (unchanged).
+
+#### Async run
+
+For a run of steps at indices `[i1, i2, ...]` sharing `parallel_group`:
+
+1. **Concurrent isolated execution** — for every step in the run, at the same time:
+   - Mark the step `in_progress` via `registry_update_step` (3a, unchanged).
+   - Create a fresh git worktree branched off the feature branch's current HEAD: `git worktree add [worktree_path] -b [branch]-step-[i] [branch]`.
+   - Spawn a `developer` subagent via the Agent tool with `isolation: "worktree"`, pointing it at `[worktree_path]` instead of the shared checkout, using the same self-contained prompt format as 3b (branch name = `[branch]-step-[i]`).
+   - Run the developer → QA cycle for that step independently inside its worktree, following 3b/3c verbatim (same retry logic: up to 3 developer retries, up to 3 QA NO-GO retries). Commit inside the worktree per 3d once QA returns GO.
+   - If any step in the run hits its 3rd consecutive developer or QA failure, go to STEP 5: BLOCKED for that step (other steps in the run may keep running to completion, but the run as a whole cannot proceed to merge until every step resolves).
+
+2. **Sequential merge-back** — once every step in the run has reached `QA STATUS: GO` and been committed in its worktree, merge the worktrees back into the feature branch **one at a time, in step-id (index) order**:
+   ```bash
+   git checkout [branch]
+   git merge --no-ff [branch]-step-[i]
+   ```
+   - On success: `git worktree remove [worktree_path]`, then mark the step `done` via `registry_update_step` (3e, unchanged).
+   - On merge conflict: `git merge --abort`, mark that step `blocked` via `registry_update_step(project_name, ticket, i, "blocked")`, and go to STEP 5: BLOCKED. Do not attempt to auto-resolve conflicts.
+
+Proceed to the next run once the current run's steps are all `done` (or the flow has diverted to STEP 5: BLOCKED).
 
 ### 3a. Mark step in progress
 

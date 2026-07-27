@@ -40,7 +40,7 @@ Codebase = user-facing skills + supporting MCP tools:
 
 **Key flows**:
 1. **Plan**: Auto-increment fake ticket counter in registry; store plan JSON in `registry_write_plan`
-2. **Build**: Load plan from registry, run steps w/ status tracking via `registry_update_step`, STOP w/ error if registry down
+2. **Build**: Load plan from registry, run steps w/ status tracking via `registry_update_step`, STOP w/ error if registry down. Async runs (contiguous `plan_steps` sharing a `parallel_group`) execute concurrently via git-worktree isolation — one worktree per step — merged back into the feature branch sequentially in step-id order via `git merge --no-ff`.
 3. **Ship**: Write rich audit entry via `registry_write_audit`; skip JIRA transition if ticket key auto-gen; STOP w/ error if registry down
 4. **Shipped**: Query audit entries via `registry_get_audit` w/ date range filter
 5. **Resource discovery**: Skills find external resources (dashboards, channels, repos, log groups) at runtime; save via `registry_set()` to resources subtree; hook injects on next session
@@ -104,6 +104,12 @@ Valid statuses: `pending`, `in_progress`, `done`, `blocked`.
 
 #### `registry_write_plan(name: string, ticket: string, data: map[string]any) -> {ok: bool, file: string} | error`
 Writes/updates plan file. Used by `/plan` to persist mission state.
+
+**Plan step schema additions**: Each entry in `plan_steps[]` may carry:
+- `execution`: `"sync"|"async"` (default `"sync"`) — `"async"` marks the step eligible for concurrent execution during `/build`.
+- `parallel_group`: `int` — only meaningful when `execution` is `"async"`; identifies which contiguous block of async steps run concurrently together.
+
+`registry_write_plan` validates async groups at write time (`validatePlanSteps`): rejects (returns an error, does not persist) any plan where async steps sharing a `parallel_group` have overlapping files, or where a step's files are missing/unknown.
 
 #### `registry_write_audit(name: string, entry: map[string]any) -> {ok: bool, total_entries: int} | error`
 Appends entry to project's audit log in registry. Caller gives all fields; `_recorded_at` (RFC3339) added auto.
@@ -269,6 +275,8 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
 - **Skill**: User-invocable markdown prompt file routing commands to agents. All skills include SELF-IMPROVEMENT section for discovering + caching resources.
 - **Agent**: Background orchestration logic (e.g. `@jira`, `@confluence`, `@standup`) invoked by skills.
 - **Hook**: Node.js script (in `claude/hooks/`) registered in settings.json, runs at defined event (e.g. UserPromptSubmit) to inject context or setup.
+- **Parallel group**: `int` identifying a contiguous block of async plan steps meant to run concurrently in `/build`; validated for non-overlapping files at plan-write time.
+- **Async step**: A plan step marked `execution:"async"`; runs concurrently with other steps in the same `parallel_group`, each in an isolated git worktree, merged back into the feature branch in step-id order.
 
 ---
 

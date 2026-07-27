@@ -83,6 +83,9 @@
             {{if .Files}}
             <span class="text-[11px] text-zinc-400 dark:text-zinc-500">{{len .Files}} file{{if ne (len .Files) 1}}s{{end}}</span>
             {{end}}
+            {{if .ParallelGroup}}
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium {{groupColorClass .ParallelGroup}}">⇉ Group {{.ParallelGroup}}</span>
+            {{end}}
           </div>
         </button>
         {{end}}

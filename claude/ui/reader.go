@@ -43,15 +43,17 @@ type Project struct {
 }
 
 type PlanStep struct {
-	Step         int      `json:"step"`
-	Title        string   `json:"title,omitempty"`
-	Status       string   `json:"status"`
-	Why          string   `json:"why,omitempty"`
-	How          string   `json:"how,omitempty"`
-	Files        []string `json:"files,omitempty"`
-	Verification string   `json:"verification,omitempty"`
-	Risk         string   `json:"risk,omitempty"`
-	ID           int      `json:"id,omitempty"`
+	Step          int      `json:"step"`
+	Title         string   `json:"title,omitempty"`
+	Status        string   `json:"status"`
+	Why           string   `json:"why,omitempty"`
+	How           string   `json:"how,omitempty"`
+	Files         []string `json:"files,omitempty"`
+	Verification  string   `json:"verification,omitempty"`
+	Risk          string   `json:"risk,omitempty"`
+	ID            int      `json:"id,omitempty"`
+	Execution     string   `json:"execution,omitempty"`
+	ParallelGroup int      `json:"parallel_group,omitempty"`
 }
 
 type PlanMeta struct {

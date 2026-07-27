@@ -97,6 +97,7 @@ Flag any violations inline in the plan. Don't block — note it and adjust the d
   - **Files**: exact paths to touch
   - **Verification**: how developer confirms step is done
   - **Risk**: HIGH if step touches auth, payments, data migrations, security config, or external API contracts; LOW otherwise
+- Mark a step `execution: "async"` only when it touches a disjoint file set from every other step in its `parallel_group` and has no ordering dependency on them. Default `execution` to `"sync"` otherwise. Steps sharing a `parallel_group` must be contiguous in `plan_steps`.
 
 Flag any HIGH-risk steps with `⚠️ HIGH RISK` in the step title. These steps will receive a dedicated security audit in `/ship`.
 
@@ -184,7 +185,9 @@ When the user approves, persist the plan via registry MCP:
       "files": ["path/to/test/file"],
       "verification": "how to confirm step is done",
       "risk": "LOW",
-      "status": "pending"
+      "status": "pending",
+      "execution": "sync",
+      "parallel_group": null
     },
     {
       "id": 2,
@@ -195,7 +198,9 @@ When the user approves, persist the plan via registry MCP:
       "files": ["path/to/file"],
       "verification": "how to confirm step is done",
       "risk": "LOW",
-      "status": "pending"
+      "status": "pending",
+      "execution": "sync",
+      "parallel_group": null
     }
   ],
   "expected_pr": {
@@ -210,6 +215,10 @@ When the user approves, persist the plan via registry MCP:
   "pr_url": null
 }
 ```
+
+**`execution`** (`"sync"` | `"async"`, default `"sync"`): whether this step runs in the standard sequential single-checkout flow, or concurrently in an isolated worktree alongside other steps in the same `parallel_group`.
+
+**`parallel_group`** (int, only meaningful when `execution` is `"async"`): identifies which group of concurrently-run steps this step belongs to. `null`/omitted for `"sync"` steps.
 
 **Branch name**: derive from issue type and ticket key. This applies to both real JIRA keys (e.g. `ONE-XXXX`) and auto-generated fake ticket keys (e.g. `DOTFILES-3`) — the convention is identical:
 - Story / Task / Feature → `feat/ONE-XXXX-short-desc`

@@ -507,6 +507,73 @@ func TestGetPlan_BlockedStepHasDistinctStylingFromPending(t *testing.T) {
 	}
 }
 
+func TestGetPlan_RendersAsyncGroupBadgeWithSharedTint(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-ASYNC", map[string]any{
+		"ticket":  "TICKET-ASYNC",
+		"summary": "Async group badge test plan",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "Step Alpha Async", "status": "pending", "execution": "async", "parallel_group": 2, "files": []string{"a.go"}},
+			{"step": 2, "title": "Step Bravo Async", "status": "in_progress", "execution": "async", "parallel_group": 2, "files": []string{"b.go"}},
+			{"step": 3, "title": "Step Charlie Sync", "status": "pending", "execution": "sync", "files": []string{"c.go"}},
+		},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing/plans/TICKET-ASYNC")
+	if err != nil {
+		t.Fatalf("GET /projects/existing/plans/TICKET-ASYNC: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	body := string(bodyBytes)
+
+	const groupBadge = "⇉ Group 2"
+	const groupTintClass = "bg-violet-500/10"
+
+	alphaIdx := strings.Index(body, "Step Alpha Async")
+	if alphaIdx == -1 {
+		t.Fatalf("expected body to contain %q, got:\n%s", "Step Alpha Async", body)
+	}
+	bravoIdx := strings.Index(body, "Step Bravo Async")
+	if bravoIdx == -1 {
+		t.Fatalf("expected body to contain %q, got:\n%s", "Step Bravo Async", body)
+	}
+	charlieIdx := strings.Index(body, "Step Charlie Sync")
+	if charlieIdx == -1 {
+		t.Fatalf("expected body to contain %q, got:\n%s", "Step Charlie Sync", body)
+	}
+
+	alphaCard := body[alphaIdx : alphaIdx+strings.Index(body[alphaIdx:], "</button>")]
+	bravoCard := body[bravoIdx : bravoIdx+strings.Index(body[bravoIdx:], "</button>")]
+	charlieCard := body[charlieIdx : charlieIdx+strings.Index(body[charlieIdx:], "</button>")]
+
+	if !strings.Contains(alphaCard, groupBadge) {
+		t.Errorf("expected async step card to contain group badge %q, got:\n%s", groupBadge, alphaCard)
+	}
+	if !strings.Contains(alphaCard, groupTintClass) {
+		t.Errorf("expected async step card badge to carry shared tint class %q, got:\n%s", groupTintClass, alphaCard)
+	}
+	if !strings.Contains(bravoCard, groupBadge) {
+		t.Errorf("expected async step card to contain group badge %q, got:\n%s", groupBadge, bravoCard)
+	}
+	if !strings.Contains(bravoCard, groupTintClass) {
+		t.Errorf("expected async step card badge to carry shared tint class %q, got:\n%s", groupTintClass, bravoCard)
+	}
+	if strings.Contains(charlieCard, groupBadge) {
+		t.Errorf("expected sync step with no parallel_group to render no group badge, got:\n%s", charlieCard)
+	}
+}
+
 func TestGetAudit_WithQueryParams_FiltersResults(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
