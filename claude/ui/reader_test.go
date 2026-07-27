@@ -216,6 +216,43 @@ func TestReadProject_ReturnsProject(t *testing.T) {
 	}
 }
 
+func TestReadProject_NameFallsBackToSQLKeyWhenMissingFromJSON(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "address-qual", map[string]any{
+		"repo": map[string]any{"workspace": "tazgreenwood"},
+	})
+
+	proj, err := ReadProject("address-qual")
+	if err != nil {
+		t.Fatalf("ReadProject() error: %v", err)
+	}
+	if proj.Name != "address-qual" {
+		t.Errorf("want Name=address-qual (from SQL key), got %q", proj.Name)
+	}
+}
+
+func TestReadProjects_NameFallsBackToSQLKeyWhenMissingFromJSON(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "mapi", map[string]any{
+		"repo": map[string]any{"workspace": "tazgreenwood"},
+	})
+
+	projects, err := ReadProjects()
+	if err != nil {
+		t.Fatalf("ReadProjects() error: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("want 1 project, got %d: %v", len(projects), projects)
+	}
+	if projects[0].Name != "mapi" {
+		t.Errorf("want Name=mapi (from SQL key), got %q", projects[0].Name)
+	}
+}
+
 func TestReadProject_MissingReturnsError(t *testing.T) {
 	_, cleanup := setupFixtureDir(t)
 	defer cleanup()
@@ -329,6 +366,49 @@ func TestReadPlan_ReturnsPlan(t *testing.T) {
 	}
 	if plan.Summary != "Test plan" {
 		t.Errorf("want Summary='Test plan', got %q", plan.Summary)
+	}
+}
+
+func TestReadPlan_TicketFallsBackToSQLKeyWhenMissingFromJSON(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedPlan(t, dir, "myproject", "TICKET-2", map[string]any{
+		"summary": "Test plan without ticket field",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "Do the thing", "status": "active"},
+		},
+	})
+
+	plan, err := ReadPlan("myproject", "TICKET-2")
+	if err != nil {
+		t.Fatalf("ReadPlan() error: %v", err)
+	}
+	if plan.Ticket != "TICKET-2" {
+		t.Errorf("want Ticket=TICKET-2 (from SQL key), got %q", plan.Ticket)
+	}
+}
+
+func TestReadPlans_TicketFallsBackToSQLKeyWhenMissingFromJSON(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedPlan(t, dir, "myproject", "TICKET-3", map[string]any{
+		"summary": "Test plan without ticket field",
+		"plan_steps": []map[string]any{
+			{"step": 1, "status": "active"},
+		},
+	})
+
+	plans, err := ReadPlans("myproject")
+	if err != nil {
+		t.Fatalf("ReadPlans() error: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("want 1 plan, got %d", len(plans))
+	}
+	if plans[0].Ticket != "TICKET-3" {
+		t.Errorf("want Ticket=TICKET-3 (from SQL key), got %q", plans[0].Ticket)
 	}
 }
 

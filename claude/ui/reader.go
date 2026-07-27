@@ -1,11 +1,19 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
+
+	_ "modernc.org/sqlite"
 )
+
+// ── reader: SQLite-backed reads (DOTFILES-25) ────────────────────────────────
+//
+// Mirrors claude/mcp/server/store.go's dbPath resolution and query pattern.
+// Registry-ui is read-only against the same registry.db the MCP server
+// writes to: single source of truth, no separate JSON files.
 
 type Project struct {
 	Name  string         `json:"name"`
@@ -52,6 +60,29 @@ type AuditEntry struct {
 	RecordedAt string `json:"_recorded_at,omitempty"`
 }
 
+type IssueEntry struct {
+	Tool       string `json:"tool"`
+	Error      string `json:"error"`
+	Context    string `json:"context,omitempty"`
+	Severity   string `json:"severity"`
+	RecordedAt string `json:"_recorded_at,omitempty"`
+}
+
+type DeployCheckEntry struct {
+	App          string `json:"app,omitempty"`
+	Env          string `json:"env,omitempty"`
+	Cluster      string `json:"cluster,omitempty"`
+	Profile      string `json:"profile,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	Services     any    `json:"services,omitempty"`
+	ErrorsBefore any    `json:"errors_before,omitempty"`
+	ErrorsAfter  any    `json:"errors_after,omitempty"`
+	ReportPath   string `json:"report_path,omitempty"`
+	Date         string `json:"date,omitempty"`
+	RecordedAt   string `json:"_recorded_at,omitempty"`
+}
+
 func dataDir() string {
 	if d := os.Getenv("REGISTRY_DATA_DIR"); d != "" {
 		return d
@@ -60,29 +91,42 @@ func dataDir() string {
 	return filepath.Join(home, ".config", "registry", "data")
 }
 
+func dbPath() string {
+	return filepath.Join(dataDir(), "registry.db")
+}
+
+func openDB() (*sql.DB, error) {
+	return sql.Open("sqlite", dbPath())
+}
+
 func ReadProjects() ([]Project, error) {
-	base := dataDir()
-	entries, err := os.ReadDir(base)
+	db, err := openDB()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []Project{}, nil
-		}
 		return nil, err
 	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT name, data FROM projects ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
 	var projects []Project
-	for _, e := range entries {
-		if !e.IsDir() {
+	for rows.Next() {
+		var name, raw string
+		if err := rows.Scan(&name, &raw); err != nil {
+			return nil, err
+		}
+		var p Project
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
 			continue
 		}
-		pf := filepath.Join(base, e.Name(), "project.json")
-		if _, err := os.Stat(pf); err != nil {
-			continue
-		}
-		p, err := readProjectFile(pf)
-		if err != nil {
-			continue
-		}
+		p.Name = name
 		projects = append(projects, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if projects == nil {
 		projects = []Project{}
@@ -91,44 +135,48 @@ func ReadProjects() ([]Project, error) {
 }
 
 func ReadProject(name string) (Project, error) {
-	pf := filepath.Join(dataDir(), name, "project.json")
-	return readProjectFile(pf)
-}
-
-func readProjectFile(path string) (Project, error) {
-	b, err := os.ReadFile(path)
+	db, err := openDB()
 	if err != nil {
 		return Project{}, err
 	}
-	var p Project
-	if err := json.Unmarshal(b, &p); err != nil {
+	defer db.Close()
+
+	var raw string
+	if err := db.QueryRow(`SELECT data FROM projects WHERE name = ?`, name).Scan(&raw); err != nil {
 		return Project{}, err
 	}
+	var p Project
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return Project{}, err
+	}
+	p.Name = name
 	return p, nil
 }
 
 func ReadPlans(name string) ([]PlanMeta, error) {
-	plansDir := filepath.Join(dataDir(), name, "plans")
-	entries, err := os.ReadDir(plansDir)
+	db, err := openDB()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []PlanMeta{}, nil
-		}
 		return nil, err
 	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT ticket, data FROM plans WHERE project = ? ORDER BY id`, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
 	var metas []PlanMeta
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(plansDir, e.Name()))
-		if err != nil {
-			continue
+	for rows.Next() {
+		var ticket, raw string
+		if err := rows.Scan(&ticket, &raw); err != nil {
+			return nil, err
 		}
 		var plan Plan
-		if err := json.Unmarshal(b, &plan); err != nil {
+		if err := json.Unmarshal([]byte(raw), &plan); err != nil {
 			continue
 		}
+		plan.Ticket = ticket
 		status := "shipped"
 		if len(plan.PlanSteps) == 0 {
 			status = "active"
@@ -145,6 +193,9 @@ func ReadPlans(name string) ([]PlanMeta, error) {
 			Status:  status,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	if metas == nil {
 		metas = []PlanMeta{}
 	}
@@ -152,37 +203,52 @@ func ReadPlans(name string) ([]PlanMeta, error) {
 }
 
 func ReadPlan(name, ticket string) (Plan, error) {
-	pf := filepath.Join(dataDir(), name, "plans", ticket+".json")
-	b, err := os.ReadFile(pf)
+	db, err := openDB()
 	if err != nil {
+		return Plan{}, err
+	}
+	defer db.Close()
+
+	var raw string
+	if err := db.QueryRow(
+		`SELECT data FROM plans WHERE project = ? AND ticket = ?`, name, ticket,
+	).Scan(&raw); err != nil {
 		return Plan{}, err
 	}
 	var plan Plan
-	if err := json.Unmarshal(b, &plan); err != nil {
+	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
 		return Plan{}, err
 	}
+	plan.Ticket = ticket
 	return plan, nil
 }
 
-type IssueEntry struct {
-	Tool       string `json:"tool"`
-	Error      string `json:"error"`
-	Context    string `json:"context,omitempty"`
-	Severity   string `json:"severity"`
-	RecordedAt string `json:"_recorded_at,omitempty"`
-}
-
 func ReadIssues(name, severity string) ([]IssueEntry, error) {
-	f := filepath.Join(dataDir(), name, "issues.json")
-	b, err := os.ReadFile(f)
+	db, err := openDB()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []IssueEntry{}, nil
-		}
 		return nil, err
 	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT data FROM issues WHERE project = ? ORDER BY reported_at ASC`, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
 	var entries []IssueEntry
-	if err := json.Unmarshal(b, &entries); err != nil {
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var e IssueEntry
+		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	if severity == "" {
@@ -203,86 +269,94 @@ func ReadIssues(name, severity string) ([]IssueEntry, error) {
 	return filtered, nil
 }
 
-type DeployCheckEntry struct {
-	App          string `json:"app,omitempty"`
-	Env          string `json:"env,omitempty"`
-	Cluster      string `json:"cluster,omitempty"`
-	Profile      string `json:"profile,omitempty"`
-	Status       string `json:"status,omitempty"`
-	Summary      string `json:"summary,omitempty"`
-	Services     any    `json:"services,omitempty"`
-	ErrorsBefore any    `json:"errors_before,omitempty"`
-	ErrorsAfter  any    `json:"errors_after,omitempty"`
-	ReportPath   string `json:"report_path,omitempty"`
-	Date         string `json:"date,omitempty"`
-	RecordedAt   string `json:"_recorded_at,omitempty"`
-}
-
 func ReadDeployChecks(name, since, until string) ([]DeployCheckEntry, error) {
-	f := filepath.Join(dataDir(), name, "deploy_checks.json")
-	b, err := os.ReadFile(f)
+	db, err := openDB()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []DeployCheckEntry{}, nil
-		}
 		return nil, err
 	}
+	defer db.Close()
+
+	query := `SELECT data FROM deploy_checks WHERE project = ?`
+	args := []any{name}
+	if since != "" {
+		query += ` AND recorded_at >= ?`
+		args = append(args, since)
+	}
+	if until != "" {
+		query += ` AND recorded_at <= ?`
+		args = append(args, until)
+	}
+	query += ` ORDER BY recorded_at ASC`
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
 	var entries []DeployCheckEntry
-	if err := json.Unmarshal(b, &entries); err != nil {
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var e DeployCheckEntry
+		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	var filtered []DeployCheckEntry
-	for _, e := range entries {
-		d := e.Date
-		if d == "" {
-			d = e.RecordedAt
-		}
-		if len(d) > 10 {
-			d = d[:10]
-		}
-		if since != "" && d < since {
-			continue
-		}
-		if until != "" && d > until {
-			continue
-		}
-		filtered = append(filtered, e)
+	if entries == nil {
+		entries = []DeployCheckEntry{}
 	}
-	if filtered == nil {
-		filtered = []DeployCheckEntry{}
-	}
-	return filtered, nil
+	return entries, nil
 }
 
 func ReadAudit(name, since, until string) ([]AuditEntry, error) {
-	af := filepath.Join(dataDir(), name, "audit.json")
-	b, err := os.ReadFile(af)
+	db, err := openDB()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []AuditEntry{}, nil
-		}
 		return nil, err
 	}
+	defer db.Close()
+
+	query := `SELECT data FROM audit WHERE project = ?`
+	args := []any{name}
+	if since != "" {
+		query += ` AND date >= ?`
+		args = append(args, since)
+	}
+	if until != "" {
+		query += ` AND date <= ?`
+		args = append(args, until)
+	}
+	query += ` ORDER BY date ASC`
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
 	var entries []AuditEntry
-	if err := json.Unmarshal(b, &entries); err != nil {
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var e AuditEntry
+		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	var filtered []AuditEntry
-	for _, e := range entries {
-		d := e.Date
-		if len(d) > 10 {
-			d = d[:10]
-		}
-		if since != "" && d < since {
-			continue
-		}
-		if until != "" && d > until {
-			continue
-		}
-		filtered = append(filtered, e)
+	if entries == nil {
+		entries = []AuditEntry{}
 	}
-	if filtered == nil {
-		filtered = []AuditEntry{}
-	}
-	return filtered, nil
+	return entries, nil
 }
