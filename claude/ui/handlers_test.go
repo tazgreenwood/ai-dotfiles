@@ -387,6 +387,126 @@ func TestHandlers_SetNoStoreCacheControl(t *testing.T) {
 	}
 }
 
+// ── plan.html kanban board ─────────────────────────────────────────────────────
+
+// columnRegion returns the substring of body between the given column header
+// and the next column header in order (or end of body for the last column).
+// Fails the test if the header can't be located.
+func columnRegion(t *testing.T, body string, header string, nextHeaders ...string) string {
+	t.Helper()
+	start := strings.Index(body, header)
+	if start == -1 {
+		t.Fatalf("expected body to contain column header %q, got:\n%s", header, body)
+	}
+	start += len(header)
+	end := len(body)
+	for _, next := range nextHeaders {
+		if idx := strings.Index(body[start:], next); idx != -1 && start+idx < end {
+			end = start + idx
+		}
+	}
+	return body[start:end]
+}
+
+func TestGetPlan_RendersKanbanColumnsByStatus(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-KANBAN", map[string]any{
+		"ticket":  "TICKET-KANBAN",
+		"summary": "Kanban test plan",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "Step Alpha Pending", "status": "pending"},
+			{"step": 2, "title": "Step Bravo Active", "status": "in_progress"},
+			{"step": 3, "title": "Step Delta Stuck", "status": "blocked"},
+		},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing/plans/TICKET-KANBAN")
+	if err != nil {
+		t.Fatalf("GET /projects/existing/plans/TICKET-KANBAN: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	body := string(bodyBytes)
+
+	for _, header := range []string{"Pending", "In Progress", "Done", "Blocked"} {
+		if !strings.Contains(body, header) {
+			t.Errorf("expected body to contain column header %q, got:\n%s", header, body)
+		}
+	}
+
+	pendingRegion := columnRegion(t, body, "Pending", "In Progress", "Done", "Blocked")
+	if !strings.Contains(pendingRegion, "Step Alpha Pending") {
+		t.Errorf("expected Pending column to contain %q, got region:\n%s", "Step Alpha Pending", pendingRegion)
+	}
+
+	inProgressRegion := columnRegion(t, body, "In Progress", "Done", "Blocked")
+	if !strings.Contains(inProgressRegion, "Step Bravo Active") {
+		t.Errorf("expected In Progress column to contain %q, got region:\n%s", "Step Bravo Active", inProgressRegion)
+	}
+
+	doneRegion := columnRegion(t, body, "Done", "Blocked")
+	if !strings.Contains(doneRegion, "No steps") {
+		t.Errorf("expected empty Done column to render placeholder %q, got region:\n%s", "No steps", doneRegion)
+	}
+
+	blockedRegion := columnRegion(t, body, "Blocked")
+	if !strings.Contains(blockedRegion, "Step Delta Stuck") {
+		t.Errorf("expected Blocked column to contain %q, got region:\n%s", "Step Delta Stuck", blockedRegion)
+	}
+}
+
+func TestGetPlan_BlockedStepHasDistinctStylingFromPending(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-BLOCKED", map[string]any{
+		"ticket":  "TICKET-BLOCKED",
+		"summary": "Blocked styling test plan",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "Step Alpha Pending", "status": "pending"},
+			{"step": 2, "title": "Step Delta Stuck", "status": "blocked"},
+		},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing/plans/TICKET-BLOCKED")
+	if err != nil {
+		t.Fatalf("GET /projects/existing/plans/TICKET-BLOCKED: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	body := string(bodyBytes)
+
+	const blockedClass = "bg-red-100 text-red-800"
+
+	pendingRegion := columnRegion(t, body, "Pending", "In Progress", "Done", "Blocked")
+	if strings.Contains(pendingRegion, blockedClass) {
+		t.Errorf("blocked-specific class %q should not appear near pending step, got region:\n%s", blockedClass, pendingRegion)
+	}
+
+	blockedRegion := columnRegion(t, body, "Blocked")
+	if !strings.Contains(blockedRegion, blockedClass) {
+		t.Errorf("expected blocked step to carry distinct class %q, got region:\n%s", blockedClass, blockedRegion)
+	}
+}
+
 func TestGetAudit_WithQueryParams_FiltersResults(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
