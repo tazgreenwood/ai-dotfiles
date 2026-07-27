@@ -1,5 +1,5 @@
 {{define "content"}}
-<div class="flex items-center justify-between mb-6">
+<div class="flex items-center justify-between mb-6" data-project="{{(index .Breadcrumbs 1).Label}}">
   <h1 class="text-3xl font-bold">{{.Plan.Ticket}} &mdash; {{.Plan.Summary}}</h1>
   <a href="" class="text-sm text-blue-600 hover:underline">Refresh</a>
 </div>
@@ -48,7 +48,7 @@
   <h2 class="text-xl font-semibold mb-4">Steps</h2>
   <div class="space-y-3">
     {{range .Plan.PlanSteps}}
-    <details class="border border-gray-200 rounded-lg overflow-hidden"{{if ne .Status "done"}} open{{end}}>
+    <details class="border border-gray-200 rounded-lg overflow-hidden" data-step-id="{{.ID}}"{{if ne .Status "done"}} open{{end}}>
       <summary class="flex items-center justify-between px-4 py-3 bg-gray-50 cursor-pointer select-none">
         <span class="font-medium text-sm">Step {{.ID}}{{if .Title}} &mdash; {{.Title}}{{end}}</span>
         {{if eq .Status "done"}}
