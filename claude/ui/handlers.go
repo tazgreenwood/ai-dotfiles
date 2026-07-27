@@ -32,11 +32,26 @@ func sidebarProjects() []sidebarItem {
 	return items
 }
 
+// groupColorClass cycles a fixed small Tailwind palette by group number, so
+// steps sharing a parallel_group get a matching tint regardless of which
+// kanban column they land in.
+func groupColorClass(group int) string {
+	palette := []string{
+		"bg-sky-500/10 text-sky-700 dark:text-sky-400 ring-1 ring-inset ring-sky-500/20",
+		"bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-400 ring-1 ring-inset ring-fuchsia-500/20",
+		"bg-violet-500/10 text-violet-700 dark:text-violet-400 ring-1 ring-inset ring-violet-500/20",
+		"bg-teal-500/10 text-teal-700 dark:text-teal-400 ring-1 ring-inset ring-teal-500/20",
+		"bg-rose-500/10 text-rose-700 dark:text-rose-400 ring-1 ring-inset ring-rose-500/20",
+	}
+	return palette[group%len(palette)]
+}
+
 func render(w http.ResponseWriter, page string, data any) {
 	t, err := template.New("base.html").Funcs(template.FuncMap{
 		"sidebarProjects": sidebarProjects,
 		"add":             func(a, b int) int { return a + b },
 		"sub":             func(a, b int) int { return a - b },
+		"groupColorClass": groupColorClass,
 	}).ParseFS(templateFS, "templates/base.html", "templates/"+page)
 	if err != nil {
 		http.Error(w, "template parse error: "+err.Error(), http.StatusInternalServerError)
