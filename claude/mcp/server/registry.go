@@ -246,6 +246,11 @@ func registryWritePlan(args map[string]any) ToolResult {
 	if name == "" || ticket == "" || !ok {
 		return toolErr("name, ticket, and data required")
 	}
+	if planSteps, ok := data["plan_steps"].([]any); ok {
+		if err := validatePlanSteps(planSteps); err != nil {
+			return toolErr(err.Error())
+		}
+	}
 	s, err := getStore()
 	if err != nil {
 		return toolErr(err.Error())
