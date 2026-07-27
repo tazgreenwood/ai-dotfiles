@@ -494,7 +494,7 @@ func TestGetPlan_BlockedStepHasDistinctStylingFromPending(t *testing.T) {
 	}
 	body := string(bodyBytes)
 
-	const blockedClass = "bg-red-100 text-red-800"
+	const blockedClass = "bg-red-500/10 text-red-700"
 
 	pendingRegion := columnRegion(t, body, "Pending", "In Progress", "Done", "Blocked")
 	if strings.Contains(pendingRegion, blockedClass) {

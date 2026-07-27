@@ -1,15 +1,14 @@
 {{define "content"}}
-<div class="flex items-center justify-between mb-6" data-project="{{(index .Breadcrumbs 1).Label}}">
-  <h1 class="text-3xl font-bold">{{.Plan.Ticket}} &mdash; {{.Plan.Summary}}</h1>
-  <a href="" class="text-sm text-blue-600 hover:underline">Refresh</a>
+<div class="mb-6" data-project="{{(index .Breadcrumbs 1).Label}}">
+  <h1 class="text-2xl font-bold text-zinc-900 dark:text-zinc-50">{{.Plan.Ticket}} &mdash; {{.Plan.Summary}}</h1>
 </div>
 
-<div class="flex flex-wrap gap-6 text-sm text-gray-600 mb-10">
+<div class="flex flex-wrap gap-6 text-sm text-zinc-500 dark:text-zinc-400 mb-10">
   {{if .Plan.Branch}}
   <div>
-    <span class="font-medium text-gray-700">Branch:</span>
+    <span class="font-medium text-zinc-700 dark:text-zinc-300">Branch:</span>
     {{if .Plan.PRUrl}}
-    <a href="{{.Plan.PRUrl}}" class="text-blue-600 hover:underline font-mono">{{.Plan.Branch}}</a>
+    <a href="{{.Plan.PRUrl}}" class="text-zinc-600 dark:text-zinc-300 hover:underline font-mono">{{.Plan.Branch}}</a>
     {{else}}
     <span class="font-mono">{{.Plan.Branch}}</span>
     {{end}}
@@ -17,25 +16,25 @@
   {{end}}
   {{if .Plan.BaseBranch}}
   <div>
-    <span class="font-medium text-gray-700">Base:</span>
+    <span class="font-medium text-zinc-700 dark:text-zinc-300">Base:</span>
     <span class="font-mono">{{.Plan.BaseBranch}}</span>
   </div>
   {{end}}
   {{if .Plan.PRUrl}}
   <div>
-    <span class="font-medium text-gray-700">PR:</span>
-    <a href="{{.Plan.PRUrl}}" class="text-blue-600 hover:underline">{{.Plan.PRUrl}}</a>
+    <span class="font-medium text-zinc-700 dark:text-zinc-300">PR:</span>
+    <a href="{{.Plan.PRUrl}}" class="text-zinc-600 dark:text-zinc-300 hover:underline">{{.Plan.PRUrl}}</a>
   </div>
   {{end}}
 </div>
 
 {{if .Plan.AcceptanceCriteria}}
 <section class="mb-10">
-  <h2 class="text-xl font-semibold mb-4">Acceptance Criteria</h2>
-  <ul class="space-y-2 text-sm text-gray-700">
+  <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-4">Acceptance Criteria</h2>
+  <ul class="space-y-2 text-sm text-zinc-700 dark:text-zinc-300">
     {{range .Plan.AcceptanceCriteria}}
     <li class="flex items-start gap-2">
-      <span class="mt-0.5">&#9744;</span>
+      <span class="mt-0.5 text-zinc-400 dark:text-zinc-500">&#9744;</span>
       <span>{{.}}</span>
     </li>
     {{end}}
@@ -45,68 +44,133 @@
 
 {{if .Plan.PlanSteps}}
 <section>
-  <h2 class="text-xl font-semibold mb-4">Steps</h2>
-  <div class="grid grid-cols-4 gap-4">
+  <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-4">Steps</h2>
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
     {{range .Columns}}
-    <div class="flex flex-col gap-3">
-      <h3 class="text-sm font-semibold px-2 py-1 rounded{{if eq .Status "blocked"}} bg-red-50 text-red-800{{else}} bg-gray-50 text-gray-700{{end}}">{{.Header}}</h3>
-      {{if .Steps}}
-      {{range .Steps}}
-      <details class="border border-gray-200 rounded-lg overflow-hidden" data-step-id="{{.ID}}"{{if ne .Status "done"}} open{{end}}>
-        <summary class="flex items-center justify-between px-4 py-3 bg-gray-50 cursor-pointer select-none">
-          <span class="font-medium text-sm">Step {{.ID}}{{if .Title}} &mdash; {{.Title}}{{end}}</span>
-          {{if eq .Status "done"}}
-          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">done</span>
-          {{else if eq .Status "in_progress"}}
-          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">currently executing</span>
-          {{else if eq .Status "blocked"}}
-          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">blocked</span>
-          {{else}}
-          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">pending</span>
-          {{end}}
-        </summary>
-        <div class="px-4 py-4 text-sm text-gray-700 space-y-3">
-          {{if .Why}}
-          <div>
-            <span class="font-semibold">Why:</span>
-            <p class="mt-1">{{.Why}}</p>
+    <div class="rounded-xl border border-zinc-200/70 dark:border-zinc-800/70 bg-zinc-50/60 dark:bg-zinc-900/40 p-3">
+      <h3 class="flex items-center justify-between text-xs font-semibold uppercase tracking-wide px-1 py-1 mb-3{{if eq .Status "blocked"}} text-red-600 dark:text-red-400{{else}} text-zinc-500 dark:text-zinc-400{{end}}">
+        <span>{{.Header}}</span>
+        <span class="text-zinc-400 dark:text-zinc-500 font-normal">{{len .Steps}}</span>
+      </h3>
+      <div class="flex flex-col gap-2">
+        {{if .Steps}}
+        {{range .Steps}}
+        <button
+          type="button"
+          data-step-modal
+          data-title="Step {{.ID}}{{if .Title}} &mdash; {{.Title}}{{end}}"
+          data-why="{{.Why}}"
+          data-how="{{.How}}"
+          data-verification="{{.Verification}}"
+          data-risk="{{.Risk}}"
+          data-files="{{range $i, $f := .Files}}{{if $i}}|||{{end}}{{$f}}{{end}}"
+          class="w-full text-left rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-3 shadow-sm hover:shadow-md hover:border-zinc-300 dark:hover:border-zinc-700 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:focus-visible:ring-zinc-600"
+        >
+          <div class="text-sm font-medium text-zinc-900 dark:text-zinc-100">Step {{.ID}}{{if .Title}} &mdash; {{.Title}}{{end}}</div>
+          <div data-badges class="mt-2 flex items-center gap-1.5 flex-wrap">
+            {{if eq .Status "done"}}
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-1 ring-inset ring-emerald-500/20">done</span>
+            {{else if eq .Status "in_progress"}}
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-500/10 text-amber-700 dark:text-amber-400 ring-1 ring-inset ring-amber-500/20">in progress</span>
+            {{else if eq .Status "blocked"}}
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-red-500/10 text-red-700 dark:text-red-400 ring-1 ring-inset ring-red-500/20">blocked</span>
+            {{else}}
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 ring-1 ring-inset ring-zinc-500/20">pending</span>
+            {{end}}
+            {{if .Risk}}
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium{{if eq .Risk "HIGH"}} bg-red-500/10 text-red-700 dark:text-red-400 ring-1 ring-inset ring-red-500/20{{else if eq .Risk "MEDIUM"}} bg-amber-500/10 text-amber-700 dark:text-amber-400 ring-1 ring-inset ring-amber-500/20{{else}} bg-zinc-500/10 text-zinc-500 dark:text-zinc-400 ring-1 ring-inset ring-zinc-500/20{{end}}">{{.Risk}} risk</span>
+            {{end}}
+            {{if .Files}}
+            <span class="text-[11px] text-zinc-400 dark:text-zinc-500">{{len .Files}} file{{if ne (len .Files) 1}}s{{end}}</span>
+            {{end}}
           </div>
-          {{end}}
-          {{if .How}}
-          <div>
-            <span class="font-semibold">How:</span>
-            <p class="mt-1">{{.How}}</p>
-          </div>
-          {{end}}
-          {{if .Files}}
-          <div>
-            <span class="font-semibold">Files:</span>
-            <div class="mt-1 flex flex-wrap gap-2">
-              {{range .Files}}<code class="bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded text-xs font-mono">{{.}}</code>{{end}}
-            </div>
-          </div>
-          {{end}}
-          {{if .Verification}}
-          <div>
-            <span class="font-semibold">Verification:</span>
-            <p class="mt-1">{{.Verification}}</p>
-          </div>
-          {{end}}
-          {{if .Risk}}
-          <div>
-            <span class="font-semibold">Risk:</span>
-            <p class="mt-1">{{.Risk}}</p>
-          </div>
-          {{end}}
-        </div>
-      </details>
-      {{end}}
-      {{else}}
-      <p class="text-sm text-gray-400 italic">No steps</p>
-      {{end}}
+        </button>
+        {{end}}
+        {{else}}
+        <p class="text-sm text-zinc-400 dark:text-zinc-500 italic px-1">No steps</p>
+        {{end}}
+      </div>
     </div>
     {{end}}
   </div>
 </section>
+
+<dialog id="step-modal" class="w-full max-w-lg rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 p-0 backdrop:bg-black/40 backdrop:backdrop-blur-sm">
+  <div class="p-5">
+    <div class="flex items-start justify-between gap-3 mb-3">
+      <h3 id="step-modal-title" class="text-base font-semibold pr-4"></h3>
+      <button type="button" id="step-modal-close" aria-label="Close" class="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400">&times;</button>
+    </div>
+    <div id="step-modal-status" class="mb-4 flex items-center gap-1.5 flex-wrap"></div>
+    <div id="step-modal-body" class="space-y-4 text-sm"></div>
+  </div>
+</dialog>
+
+<script>
+(function () {
+  function section(label, text) {
+    if (!text) return null;
+    var wrap = document.createElement('div');
+    var h = document.createElement('div');
+    h.className = 'font-medium text-zinc-500 dark:text-zinc-400 text-xs uppercase tracking-wide mb-1';
+    h.textContent = label;
+    var p = document.createElement('p');
+    p.className = 'text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap';
+    p.textContent = text;
+    wrap.appendChild(h);
+    wrap.appendChild(p);
+    return wrap;
+  }
+
+  function filesSection(filesStr) {
+    if (!filesStr) return null;
+    var wrap = document.createElement('div');
+    var h = document.createElement('div');
+    h.className = 'font-medium text-zinc-500 dark:text-zinc-400 text-xs uppercase tracking-wide mb-1';
+    h.textContent = 'Files';
+    var list = document.createElement('div');
+    list.className = 'flex flex-wrap gap-2';
+    filesStr.split('|||').forEach(function (f) {
+      var code = document.createElement('code');
+      code.className = 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 px-1.5 py-0.5 rounded text-xs font-mono';
+      code.textContent = f;
+      list.appendChild(code);
+    });
+    wrap.appendChild(h);
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  document.addEventListener('click', function (e) {
+    var dialog = document.getElementById('step-modal');
+    if (!dialog) return;
+
+    if (e.target.closest('#step-modal-close') || e.target.id === 'step-modal') {
+      dialog.close();
+      return;
+    }
+
+    var card = e.target.closest('[data-step-modal]');
+    if (!card) return;
+
+    dialog.querySelector('#step-modal-title').textContent = card.dataset.title;
+    var badgeSrc = card.querySelector('[data-badges]');
+    dialog.querySelector('#step-modal-status').innerHTML = badgeSrc ? badgeSrc.innerHTML : '';
+
+    var body = dialog.querySelector('#step-modal-body');
+    body.innerHTML = '';
+    [
+      section('Why', card.dataset.why),
+      section('How', card.dataset.how),
+      filesSection(card.dataset.files),
+      section('Verification', card.dataset.verification),
+    ].forEach(function (el) {
+      if (el) body.appendChild(el);
+    });
+
+    dialog.showModal();
+  });
+})();
+</script>
 {{end}}
 {{end}}

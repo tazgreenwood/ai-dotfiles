@@ -5,9 +5,30 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 
 	_ "modernc.org/sqlite"
 )
+
+// ticketNumRe extracts a trailing numeric suffix from ticket keys like
+// "DOTFILES-26" or "ONE-1234", used to recover true creation order for
+// plans migrated in DOTFILES-23 (whose id/created_at reflect alphabetical
+// migration order, not real chronology — see cmd/migrate/main.go).
+var ticketNumRe = regexp.MustCompile(`-(\d+)$`)
+
+func ticketNum(ticket string) (int, bool) {
+	m := ticketNumRe.FindStringSubmatch(ticket)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
 
 // ── reader: SQLite-backed reads (DOTFILES-25) ────────────────────────────────
 //
@@ -160,7 +181,7 @@ func ReadPlans(name string) ([]PlanMeta, error) {
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`SELECT ticket, data FROM plans WHERE project = ? ORDER BY id`, name)
+	rows, err := db.Query(`SELECT ticket, data FROM plans WHERE project = ? ORDER BY id DESC`, name)
 	if err != nil {
 		return nil, err
 	}
@@ -199,6 +220,14 @@ func ReadPlans(name string) ([]PlanMeta, error) {
 	if metas == nil {
 		metas = []PlanMeta{}
 	}
+	sort.SliceStable(metas, func(i, j int) bool {
+		ni, oki := ticketNum(metas[i].Ticket)
+		nj, okj := ticketNum(metas[j].Ticket)
+		if oki && okj {
+			return ni > nj
+		}
+		return false
+	})
 	return metas, nil
 }
 

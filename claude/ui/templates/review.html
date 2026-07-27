@@ -1,42 +1,42 @@
 {{define "content"}}
-<h1 class="text-2xl font-bold mb-6">{{if .Title}}{{.Title}}{{else}}Code Review{{end}}</h1>
+<h1 class="text-xl font-bold text-zinc-900 dark:text-zinc-50 mb-6">{{if .Title}}{{.Title}}{{else}}Code Review{{end}}</h1>
 
 <section class="mb-8">
-  <h2 class="text-xl font-semibold mb-2">Summary</h2>
-  <p class="text-sm text-gray-700">{{.Summary}}</p>
+  <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">Summary</h2>
+  <p class="text-sm text-zinc-700 dark:text-zinc-300">{{.Summary}}</p>
 </section>
 
 {{if .Why}}
 <section class="mb-8">
-  <h2 class="text-xl font-semibold mb-2">Why</h2>
-  <p class="text-sm text-gray-700">{{.Why}}</p>
+  <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">Why</h2>
+  <p class="text-sm text-zinc-700 dark:text-zinc-300">{{.Why}}</p>
 </section>
 {{end}}
 
 {{if .DiffOverview}}
 <section class="mb-8">
-  <h2 class="text-xl font-semibold mb-2">Diff Overview</h2>
-  <pre class="text-sm bg-gray-50 border border-gray-200 rounded p-4 whitespace-pre-wrap">{{.DiffOverview}}</pre>
+  <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">Diff Overview</h2>
+  <pre class="text-sm bg-zinc-50 dark:bg-zinc-900 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-800 rounded-lg p-4 whitespace-pre-wrap">{{.DiffOverview}}</pre>
 </section>
 {{end}}
 
 <section class="mb-8">
-  <h2 class="text-xl font-semibold mb-2">Execution Results</h2>
+  <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">Execution Results</h2>
   {{if .ExecutionMode}}
   <div class="mb-2">
-    <span class="font-medium text-gray-700 text-sm">Mode:</span>
-    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium {{if eq .ExecutionMode "real"}}bg-green-100 text-green-800{{else}}bg-yellow-100 text-yellow-800{{end}}">{{.ExecutionMode}}</span>
+    <span class="font-medium text-zinc-700 dark:text-zinc-300 text-sm">Mode:</span>
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium {{if eq .ExecutionMode "real"}}bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-1 ring-inset ring-emerald-500/20{{else}}bg-amber-500/10 text-amber-700 dark:text-amber-400 ring-1 ring-inset ring-amber-500/20{{end}}">{{.ExecutionMode}}</span>
   </div>
   {{end}}
   {{if .ExecutionLog}}
-  <pre class="text-sm bg-gray-50 border border-gray-200 rounded p-4 whitespace-pre-wrap">{{.ExecutionLog}}</pre>
+  <pre class="text-sm bg-zinc-50 dark:bg-zinc-900 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-800 rounded-lg p-4 whitespace-pre-wrap">{{.ExecutionLog}}</pre>
   {{end}}
 </section>
 
 {{if .Suggestions}}
 <section>
-  <h2 class="text-xl font-semibold mb-2">Suggestions</h2>
-  <ul class="list-disc list-inside space-y-1 text-sm text-gray-700">
+  <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">Suggestions</h2>
+  <ul class="list-disc list-inside space-y-1 text-sm text-zinc-700 dark:text-zinc-300">
     {{range .Suggestions}}
     <li>{{.}}</li>
     {{end}}

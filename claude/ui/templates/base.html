@@ -4,22 +4,84 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Registry</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2318181b'/%3E%3Ctext x='16' y='22' font-family='system-ui,sans-serif' font-size='17' font-weight='700' fill='white' text-anchor='middle'%3ER%3C/text%3E%3C/svg%3E">
+  <script>
+    (function () {
+      var stored = localStorage.getItem('theme');
+      var dark = stored ? stored === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.classList.toggle('dark', dark);
+    })();
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'class' };</script>
 </head>
-<body class="bg-white">
-  <div class="max-w-4xl mx-auto p-8">
-    {{if .Breadcrumbs}}
-    <nav class="mb-6 text-sm text-gray-500">
-      {{range $i, $b := .Breadcrumbs}}
-        {{if $i}}<span class="mx-1">/</span>{{end}}
-        {{if $b.URL}}<a href="{{$b.URL}}" class="hover:underline text-blue-600">{{$b.Label}}</a>{{else}}<span>{{$b.Label}}</span>{{end}}
-      {{end}}
-    </nav>
-    {{end}}
-    <div id="content">{{template "content" .}}</div>
+<body class="bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 antialiased transition-colors">
+  <div class="flex min-h-screen">
+    <aside class="w-60 shrink-0 border-r border-zinc-200 dark:border-zinc-800 flex flex-col h-screen sticky top-0">
+      <a href="/" class="flex items-center gap-2 px-5 h-14 border-b border-zinc-200 dark:border-zinc-800 font-semibold text-zinc-900 dark:text-zinc-100 shrink-0">
+        <span class="inline-flex items-center justify-center w-6 h-6 rounded-md bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-bold">R</span>
+        Registry
+      </a>
+      <nav class="flex-1 overflow-y-auto py-3">
+        <div class="px-5 pb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Projects</div>
+        {{$current := ""}}
+        {{if gt (len .Breadcrumbs) 1}}{{$current = (index .Breadcrumbs 1).Label}}{{end}}
+        {{range sidebarProjects}}
+        <a href="/projects/{{.Name}}" class="flex items-center justify-between gap-2 mx-2 px-3 py-1.5 rounded-md text-sm{{if eq .Name $current}} bg-zinc-100 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-medium{{else}} text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900{{end}}">
+          <span class="truncate">{{.Name}}</span>
+          <span class="text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0">{{.PlanCount}}</span>
+        </a>
+        {{end}}
+      </nav>
+      <div class="p-3 border-t border-zinc-200 dark:border-zinc-800 shrink-0">
+        <button
+          type="button"
+          id="theme-toggle"
+          class="w-full inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-sm text-zinc-500 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 transition-colors"
+        >
+          <svg id="theme-icon-sun" xmlns="http://www.w3.org/2000/svg" class="hidden w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          <svg id="theme-icon-moon" xmlns="http://www.w3.org/2000/svg" class="hidden w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <span id="theme-label">Dark mode</span>
+        </button>
+      </div>
+    </aside>
+    <div class="flex-1 min-w-0">
+      <header class="h-14 flex items-center justify-between px-8 border-b border-zinc-200 dark:border-zinc-800">
+        {{if .Breadcrumbs}}
+        <nav class="text-sm text-zinc-500 dark:text-zinc-400">
+          {{range $i, $b := .Breadcrumbs}}
+            {{if $i}}<span class="mx-1 text-zinc-300 dark:text-zinc-600">/</span>{{end}}
+            {{if $b.URL}}<a href="{{$b.URL}}" class="hover:underline text-zinc-600 dark:text-zinc-300">{{$b.Label}}</a>{{else}}<span>{{$b.Label}}</span>{{end}}
+          {{end}}
+        </nav>
+        {{else}}
+        <span></span>
+        {{end}}
+      </header>
+      <main class="px-8 py-8">
+        <div id="content">{{template "content" .}}</div>
+      </main>
+    </div>
   </div>
   <script>
     (function () {
+      var sun = document.getElementById('theme-icon-sun');
+      var moon = document.getElementById('theme-icon-moon');
+      var label = document.getElementById('theme-label');
+      function syncIcon() {
+        var dark = document.documentElement.classList.contains('dark');
+        sun.classList.toggle('hidden', !dark);
+        moon.classList.toggle('hidden', dark);
+        label.textContent = dark ? 'Light mode' : 'Dark mode';
+      }
+      syncIcon();
+      document.getElementById('theme-toggle').addEventListener('click', function () {
+        var dark = !document.documentElement.classList.contains('dark');
+        document.documentElement.classList.toggle('dark', dark);
+        localStorage.setItem('theme', dark ? 'dark' : 'light');
+        syncIcon();
+      });
+
       var contentEl = document.getElementById('content');
       var projectEl = contentEl.querySelector('[data-project]');
       if (!projectEl) return;
@@ -36,10 +98,6 @@
           return;
         }
         var scrollY = window.scrollY;
-        var openStepIds = [];
-        contentEl.querySelectorAll('details[data-step-id]').forEach(function (d) {
-          if (d.open) openStepIds.push(d.getAttribute('data-step-id'));
-        });
         fetch(location.href)
           .then(function (res) { return res.text(); })
           .then(function (html) {
@@ -47,10 +105,6 @@
             var newContent = newDoc.getElementById('content');
             if (!newContent) return;
             contentEl.innerHTML = newContent.innerHTML;
-            openStepIds.forEach(function (id) {
-              var el = contentEl.querySelector('details[data-step-id="' + id + '"]');
-              if (el) el.open = true;
-            });
             window.scrollTo(0, scrollY);
           })
           .catch(function () {});

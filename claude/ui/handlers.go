@@ -5,13 +5,39 @@ import (
 	"html/template"
 	"net/http"
 	"sort"
+	"strconv"
 )
+
+const plansPerPage = 10
 
 //go:embed templates
 var templateFS embed.FS
 
+type sidebarItem struct {
+	Name      string
+	PlanCount int
+}
+
+func sidebarProjects() []sidebarItem {
+	projects, err := ReadProjects()
+	if err != nil {
+		return nil
+	}
+	items := make([]sidebarItem, 0, len(projects))
+	for _, p := range projects {
+		plans, _ := ReadPlans(p.Name)
+		items = append(items, sidebarItem{Name: p.Name, PlanCount: len(plans)})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	return items
+}
+
 func render(w http.ResponseWriter, page string, data any) {
-	t, err := template.ParseFS(templateFS, "templates/base.html", "templates/"+page)
+	t, err := template.New("base.html").Funcs(template.FuncMap{
+		"sidebarProjects": sidebarProjects,
+		"add":             func(a, b int) int { return a + b },
+		"sub":             func(a, b int) int { return a - b },
+	}).ParseFS(templateFS, "templates/base.html", "templates/"+page)
 	if err != nil {
 		http.Error(w, "template parse error: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -31,6 +57,14 @@ type breadcrumb struct {
 type indexData struct {
 	Breadcrumbs []breadcrumb
 	Projects    []projectSummary
+	Stats       dashboardStats
+}
+
+type dashboardStats struct {
+	TotalProjects int
+	ActivePlans   int
+	ShippedPlans  int
+	OpenIssues    int
 }
 
 type projectSummary struct {
@@ -54,6 +88,21 @@ type projectData struct {
 	RecentAudit        []AuditEntry
 	RecentDeployChecks []DeployCheckEntry
 	IssueCount         int
+	Stats              projectStats
+	Page               int
+	TotalPages         int
+	HasPrev            bool
+	HasNext            bool
+}
+
+type projectStats struct {
+	TotalPlans        int
+	ShippedPlans      int
+	TotalSteps        int
+	DoneSteps         int
+	OpenIssues        int
+	LatestDeployApp   string
+	LatestDeployState string
 }
 
 type planSummary struct {
@@ -110,6 +159,7 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	summaries := make([]projectSummary, 0, len(projects))
+	stats := dashboardStats{TotalProjects: len(projects)}
 	for _, p := range projects {
 		plans, _ := ReadPlans(p.Name)
 		audit, _ := ReadAudit(p.Name, "", "")
@@ -120,11 +170,20 @@ func handleIndex(w http.ResponseWriter, _ *http.Request) {
 			AuditCount: len(audit),
 			IssueCount: len(issues),
 		})
+		for _, pl := range plans {
+			if pl.Status == "shipped" {
+				stats.ShippedPlans++
+			} else {
+				stats.ActivePlans++
+			}
+		}
+		stats.OpenIssues += len(issues)
 	}
 
 	data := indexData{
 		Breadcrumbs: []breadcrumb{{Label: "Registry", URL: "/"}},
 		Projects:    summaries,
+		Stats:       stats,
 	}
 
 	render(w, "index.html", data)
@@ -244,6 +303,7 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 
 	metas, _ := ReadPlans(name)
 	plans := make([]planSummary, 0, len(metas))
+	stats := projectStats{TotalPlans: len(metas)}
 	for _, m := range metas {
 		full, err := ReadPlan(name, m.Ticket)
 		done := 0
@@ -261,6 +321,11 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 			DoneSteps:  done,
 			TotalSteps: total,
 		})
+		if m.Status == "shipped" {
+			stats.ShippedPlans++
+		}
+		stats.TotalSteps += total
+		stats.DoneSteps += done
 	}
 
 	allAudit, _ := ReadAudit(name, "", "")
@@ -274,8 +339,32 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 	if len(recentDeployChecks) > 5 {
 		recentDeployChecks = recentDeployChecks[len(recentDeployChecks)-5:]
 	}
+	if len(allDeployChecks) > 0 {
+		latest := allDeployChecks[len(allDeployChecks)-1]
+		stats.LatestDeployApp = latest.App
+		stats.LatestDeployState = latest.Status
+	}
 
 	issues, _ := ReadIssues(name, "")
+	stats.OpenIssues = len(issues)
+
+	page := 1
+	if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 0 {
+		page = p
+	}
+	totalPages := max((len(plans)+plansPerPage-1)/plansPerPage, 1)
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * plansPerPage
+	end := start + plansPerPage
+	if start > len(plans) {
+		start = len(plans)
+	}
+	if end > len(plans) {
+		end = len(plans)
+	}
+	pagedPlans := plans[start:end]
 
 	data := projectData{
 		Breadcrumbs: []breadcrumb{
@@ -283,10 +372,15 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 			{Label: name},
 		},
 		Project:            proj,
-		Plans:              plans,
+		Plans:              pagedPlans,
 		RecentAudit:        recent,
 		RecentDeployChecks: recentDeployChecks,
 		IssueCount:         len(issues),
+		Stats:              stats,
+		Page:               page,
+		TotalPages:         totalPages,
+		HasPrev:            page > 1,
+		HasNext:            page < totalPages,
 	}
 
 	render(w, "project.html", data)

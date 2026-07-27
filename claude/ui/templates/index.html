@@ -1,22 +1,46 @@
 {{define "content"}}
-<div class="flex items-center justify-between mb-8">
-  <h1 class="text-3xl font-bold">Registry</h1>
-  <a href="" class="text-sm text-blue-600 hover:underline">Refresh</a>
+<div class="mb-8">
+  <h1 class="text-2xl font-bold text-zinc-900 dark:text-zinc-50">Dashboard</h1>
+  <p class="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Overview across all projects</p>
 </div>
+
+<div class="grid grid-cols-4 gap-4 mb-10">
+  <div class="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+    <div class="text-xs font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Projects</div>
+    <div class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-50">{{.Stats.TotalProjects}}</div>
+  </div>
+  <div class="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+    <div class="text-xs font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Active Plans</div>
+    <div class="mt-1 text-2xl font-semibold text-amber-600 dark:text-amber-400">{{.Stats.ActivePlans}}</div>
+  </div>
+  <div class="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+    <div class="text-xs font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Shipped Plans</div>
+    <div class="mt-1 text-2xl font-semibold text-emerald-600 dark:text-emerald-400">{{.Stats.ShippedPlans}}</div>
+  </div>
+  <div class="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
+    <div class="text-xs font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Open Issues</div>
+    <div class="mt-1 text-2xl font-semibold{{if gt .Stats.OpenIssues 0}} text-red-600 dark:text-red-400{{else}} text-zinc-900 dark:text-zinc-50{{end}}">{{.Stats.OpenIssues}}</div>
+  </div>
+</div>
+
+<h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-4">Projects</h2>
 {{if .Projects}}
-<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
   {{range .Projects}}
-  <a href="/projects/{{.Name}}" class="block border border-gray-200 rounded-lg p-5 hover:shadow-md transition-shadow">
-    <div class="font-bold text-lg text-gray-900 mb-2">{{.Name}}</div>
-    <div class="text-sm text-gray-500">
+  <a href="/projects/{{.Name}}" class="block rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-sm hover:shadow-md hover:border-zinc-300 dark:hover:border-zinc-700 transition-all">
+    <div class="font-semibold text-lg text-zinc-900 dark:text-zinc-100 mb-2">{{.Name}}</div>
+    <div class="text-sm text-zinc-500 dark:text-zinc-400 flex items-center gap-2 flex-wrap">
       <span>{{.PlanCount}} plan{{if ne .PlanCount 1}}s{{end}}</span>
-      <span class="mx-2">&middot;</span>
+      <span class="text-zinc-300 dark:text-zinc-600">&middot;</span>
       <span>{{.AuditCount}} audit entr{{if eq .AuditCount 1}}y{{else}}ies{{end}}</span>
+      {{if gt .IssueCount 0}}
+      <span class="ml-auto inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-red-500/10 text-red-700 dark:text-red-400 ring-1 ring-inset ring-red-500/20">{{.IssueCount}} issue{{if ne .IssueCount 1}}s{{end}}</span>
+      {{end}}
     </div>
   </a>
   {{end}}
 </div>
 {{else}}
-<p class="text-gray-500">No projects found</p>
+<p class="text-zinc-500 dark:text-zinc-400">No projects found</p>
 {{end}}
 {{end}}
