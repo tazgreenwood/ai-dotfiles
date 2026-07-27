@@ -36,7 +36,7 @@ Codebase = user-facing skills + supporting MCP tools:
   - `main.go` — JSON-RPC dispatcher, MCP setup
 
 **Hooks** (`claude/hooks/`):
-- `inject-registry-context.js` — UserPromptSubmit hook; reads project metadata + resources from registry; emits as system-reminder; dedupes per session. Applies best-effort Headroom compression to context block via `tools/hooks/headroom_compress.py` subprocess; graceful fallback to raw output if python3 or headroom-ai unavailable (try/catch, no exception propagated).
+- `inject-registry-context.js` — UserPromptSubmit hook; reads project metadata + resources from registry; emits as system-reminder; dedupes per session.
 
 **Key flows**:
 1. **Plan**: Auto-increment fake ticket counter in registry; store plan JSON in `registry_write_plan`
@@ -59,7 +59,6 @@ Codebase = user-facing skills + supporting MCP tools:
 - **Data storage**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db`, replacing per-project JSON files
 - **Dependencies**:
   - `modernc.org/sqlite` (pure-Go SQLite driver, no cgo, used by registry MCP server)
-  - `headroom-ai>=0.32.1` (Python package, optional for compression in `inject-registry-context.js`)
 - **Test command**: `cd claude/ui && go test ./...`
 
 ---
@@ -246,6 +245,7 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
   - Skip compression: context unbounded, eventual token limit hit.
   - Async compression in background: complexity, timing unpredictability.
 - **Consequences**: ~0–3s worst-case latency added to session start (subprocess spawn + compression timeout). Graceful degradation: tool always works. Headroom dependency is optional (try/catch fallback). Cost: one subprocess invocation per session.
+- **Superseded [2026-07-27, DOTFILES-24]**: Headroom compression reverted — removed from `inject-registry-context.js`. Extra complexity (subprocess spawn, timeout handling, optional Python dependency) wasn't worth the marginal benefit. User can run headroom independently outside this repo if desired.
 
 ### [2026-07-23] — Registry storage: SQLite over Postgres/Docker
 - **Context**: JSON-per-project storage had load-all-then-filter-in-Go date-range queries for `registry_get_audit()` and `registry_get_deploy_checks()`, adding O(n) latency. Write races (TOCTOU) on concurrent plan updates. Needed indexed date-range queries, transactional writes, and atomic counter increments without adding ops burden or cloud dependencies.
