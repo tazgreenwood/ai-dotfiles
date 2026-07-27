@@ -4,8 +4,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -18,26 +16,27 @@ func newTestServer(t *testing.T, dataDir string) *httptest.Server {
 	return httptest.NewServer(newRouter())
 }
 
-// setupProjectFixture writes a minimal project + plan + audit under dataDir.
+// setupProjectFixture seeds a minimal project + plan + audit + deploy check
+// into the registry.db under dataDir.
 func setupProjectFixture(t *testing.T, dataDir, projectName string) {
 	t.Helper()
 
-	writeFixture(t, filepath.Join(dataDir, projectName, "project.json"), map[string]any{
+	seedProject(t, dataDir, projectName, map[string]any{
 		"name": projectName,
 		"repo": map[string]any{"workspace": "tazgreenwood"},
 	})
 
-	writeFixture(t, filepath.Join(dataDir, projectName, "plans", "TICKET-1.json"), map[string]any{
+	seedPlan(t, dataDir, projectName, "TICKET-1", map[string]any{
 		"ticket":     "TICKET-1",
 		"summary":    "Test plan",
 		"plan_steps": []map[string]any{{"step": 1, "status": "done"}},
 	})
 
-	writeFixture(t, filepath.Join(dataDir, projectName, "audit.json"), []map[string]any{
+	seedAudit(t, dataDir, projectName, []map[string]any{
 		{"ticket": "TICKET-1", "type": "feature", "summary": "Add thing", "date": "2026-06-01"},
 	})
 
-	writeFixture(t, filepath.Join(dataDir, projectName, "deploy_checks.json"), []map[string]any{
+	seedDeployChecks(t, dataDir, projectName, []map[string]any{
 		{"app": "emily", "status": "pass", "summary": "All checks passed", "date": "2026-06-01"},
 	})
 }
@@ -217,7 +216,7 @@ func TestGetDeployChecks_ExistingReturns200(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 	setupProjectFixture(t, dir, "existing")
-	writeFixture(t, filepath.Join(dir, "existing", "deploy_checks.json"), []map[string]any{
+	seedDeployChecks(t, dir, "existing", []map[string]any{
 		{"status": "pass", "summary": "Deploy checked out", "date": "2026-06-01"},
 	})
 
@@ -358,7 +357,7 @@ func TestHandlers_SetNoStoreCacheControl(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 	setupProjectFixture(t, dir, "existing")
-	writeFixture(t, filepath.Join(dir, "existing", "deploy_checks.json"), []map[string]any{
+	seedDeployChecks(t, dir, "existing", []map[string]any{
 		{"status": "pass", "date": "2026-06-01"},
 	})
 
@@ -388,6 +387,126 @@ func TestHandlers_SetNoStoreCacheControl(t *testing.T) {
 	}
 }
 
+// ── plan.html kanban board ─────────────────────────────────────────────────────
+
+// columnRegion returns the substring of body between the given column header
+// and the next column header in order (or end of body for the last column).
+// Fails the test if the header can't be located.
+func columnRegion(t *testing.T, body string, header string, nextHeaders ...string) string {
+	t.Helper()
+	start := strings.Index(body, header)
+	if start == -1 {
+		t.Fatalf("expected body to contain column header %q, got:\n%s", header, body)
+	}
+	start += len(header)
+	end := len(body)
+	for _, next := range nextHeaders {
+		if idx := strings.Index(body[start:], next); idx != -1 && start+idx < end {
+			end = start + idx
+		}
+	}
+	return body[start:end]
+}
+
+func TestGetPlan_RendersKanbanColumnsByStatus(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-KANBAN", map[string]any{
+		"ticket":  "TICKET-KANBAN",
+		"summary": "Kanban test plan",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "Step Alpha Pending", "status": "pending"},
+			{"step": 2, "title": "Step Bravo Active", "status": "in_progress"},
+			{"step": 3, "title": "Step Delta Stuck", "status": "blocked"},
+		},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing/plans/TICKET-KANBAN")
+	if err != nil {
+		t.Fatalf("GET /projects/existing/plans/TICKET-KANBAN: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	body := string(bodyBytes)
+
+	for _, header := range []string{"Pending", "In Progress", "Done", "Blocked"} {
+		if !strings.Contains(body, header) {
+			t.Errorf("expected body to contain column header %q, got:\n%s", header, body)
+		}
+	}
+
+	pendingRegion := columnRegion(t, body, "Pending", "In Progress", "Done", "Blocked")
+	if !strings.Contains(pendingRegion, "Step Alpha Pending") {
+		t.Errorf("expected Pending column to contain %q, got region:\n%s", "Step Alpha Pending", pendingRegion)
+	}
+
+	inProgressRegion := columnRegion(t, body, "In Progress", "Done", "Blocked")
+	if !strings.Contains(inProgressRegion, "Step Bravo Active") {
+		t.Errorf("expected In Progress column to contain %q, got region:\n%s", "Step Bravo Active", inProgressRegion)
+	}
+
+	doneRegion := columnRegion(t, body, "Done", "Blocked")
+	if !strings.Contains(doneRegion, "No steps") {
+		t.Errorf("expected empty Done column to render placeholder %q, got region:\n%s", "No steps", doneRegion)
+	}
+
+	blockedRegion := columnRegion(t, body, "Blocked")
+	if !strings.Contains(blockedRegion, "Step Delta Stuck") {
+		t.Errorf("expected Blocked column to contain %q, got region:\n%s", "Step Delta Stuck", blockedRegion)
+	}
+}
+
+func TestGetPlan_BlockedStepHasDistinctStylingFromPending(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-BLOCKED", map[string]any{
+		"ticket":  "TICKET-BLOCKED",
+		"summary": "Blocked styling test plan",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "Step Alpha Pending", "status": "pending"},
+			{"step": 2, "title": "Step Delta Stuck", "status": "blocked"},
+		},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing/plans/TICKET-BLOCKED")
+	if err != nil {
+		t.Fatalf("GET /projects/existing/plans/TICKET-BLOCKED: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	body := string(bodyBytes)
+
+	const blockedClass = "bg-red-100 text-red-800"
+
+	pendingRegion := columnRegion(t, body, "Pending", "In Progress", "Done", "Blocked")
+	if strings.Contains(pendingRegion, blockedClass) {
+		t.Errorf("blocked-specific class %q should not appear near pending step, got region:\n%s", blockedClass, pendingRegion)
+	}
+
+	blockedRegion := columnRegion(t, body, "Blocked")
+	if !strings.Contains(blockedRegion, blockedClass) {
+		t.Errorf("expected blocked step to carry distinct class %q, got region:\n%s", blockedClass, blockedRegion)
+	}
+}
+
 func TestGetAudit_WithQueryParams_FiltersResults(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
@@ -396,11 +515,8 @@ func TestGetAudit_WithQueryParams_FiltersResults(t *testing.T) {
 		{"ticket": "DOTFILES-1", "type": "feature", "summary": "Old entry", "date": "2026-04-01"},
 		{"ticket": "DOTFILES-2", "type": "feature", "summary": "New entry", "date": "2026-06-01"},
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "existing"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	writeFixture(t, filepath.Join(dir, "existing", "project.json"), map[string]any{"name": "existing"})
-	writeFixture(t, filepath.Join(dir, "existing", "audit.json"), entries)
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedAudit(t, dir, "existing", entries)
 
 	ts := newTestServer(t, dir)
 	defer ts.Close()

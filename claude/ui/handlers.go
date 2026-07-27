@@ -65,6 +65,13 @@ type planSummary struct {
 type planData struct {
 	Breadcrumbs []breadcrumb
 	Plan        Plan
+	Columns     []planColumn
+}
+
+type planColumn struct {
+	Header string
+	Status string
+	Steps  []PlanStep
 }
 
 type auditData struct {
@@ -132,13 +139,34 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	columns := []planColumn{
+		{Header: "Pending", Status: "pending"},
+		{Header: "In Progress", Status: "in_progress"},
+		{Header: "Done", Status: "done"},
+		{Header: "Blocked", Status: "blocked"},
+	}
+	for _, s := range plan.PlanSteps {
+		matched := false
+		for i := range columns {
+			if columns[i].Status == s.Status {
+				columns[i].Steps = append(columns[i].Steps, s)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			columns[0].Steps = append(columns[0].Steps, s)
+		}
+	}
+
 	data := planData{
 		Breadcrumbs: []breadcrumb{
 			{Label: "Registry", URL: "/"},
 			{Label: name, URL: "/projects/" + name},
 			{Label: ticket},
 		},
-		Plan: plan,
+		Plan:    plan,
+		Columns: columns,
 	}
 	render(w, "plan.html", data)
 }

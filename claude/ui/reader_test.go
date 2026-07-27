@@ -1,35 +1,167 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	_ "modernc.org/sqlite"
 )
 
-// setupFixtureDir creates a temp registry data dir and sets REGISTRY_DATA_DIR.
-// Returns a cleanup function.
+// setupFixtureDir creates a temp registry data dir containing a registry.db
+// seeded with the store.go schema (projects/plans/audit/deploy_checks/issues,
+// each with a JSON `data` column), and sets REGISTRY_DATA_DIR to point at it.
 func setupFixtureDir(t *testing.T) (dataDir string, cleanup func()) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "registry-ui-test-*")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
+	db := openFixtureDB(t, dir)
+	db.Close()
 	t.Setenv("REGISTRY_DATA_DIR", dir)
 	return dir, func() { os.RemoveAll(dir) }
 }
 
-func writeFixture(t *testing.T, path string, v any) {
+// openFixtureDB opens (creating if needed) the registry.db under dir and
+// ensures the schema mirrors claude/mcp/server/store.go's createSchema.
+func openFixtureDB(t *testing.T, dir string) *sql.DB {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+	db, err := sql.Open("sqlite", filepath.Join(dir, "registry.db"))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
 	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS projects (
+			name TEXT PRIMARY KEY,
+			data TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS plans (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			ticket TEXT NOT NULL,
+			status TEXT,
+			created_at TEXT NOT NULL,
+			data TEXT NOT NULL,
+			UNIQUE(project, ticket)
+		)`,
+		`CREATE TABLE IF NOT EXISTS audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			date TEXT NOT NULL,
+			data TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS issues (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			reported_at TEXT NOT NULL,
+			data TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS deploy_checks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			recorded_at TEXT NOT NULL,
+			data TEXT NOT NULL
+		)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("create schema: %v", err)
+		}
+	}
+	return db
+}
+
+func marshalFixture(t *testing.T, v any) string {
+	t.Helper()
 	b, err := json.Marshal(v)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	if err := os.WriteFile(path, b, 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	return string(b)
+}
+
+// seedProject inserts a row into the projects table.
+func seedProject(t *testing.T, dir, name string, data map[string]any) {
+	t.Helper()
+	db := openFixtureDB(t, dir)
+	defer db.Close()
+	if _, err := db.Exec(
+		`INSERT INTO projects (name, data) VALUES (?, ?)
+		 ON CONFLICT(name) DO UPDATE SET data=excluded.data`,
+		name, marshalFixture(t, data),
+	); err != nil {
+		t.Fatalf("seedProject: %v", err)
+	}
+}
+
+// seedPlan inserts a row into the plans table.
+func seedPlan(t *testing.T, dir, project, ticket string, data map[string]any) {
+	t.Helper()
+	db := openFixtureDB(t, dir)
+	defer db.Close()
+	status, _ := data["status"].(string)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.Exec(
+		`INSERT INTO plans (project, ticket, status, created_at, data) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(project, ticket) DO UPDATE SET status=excluded.status, data=excluded.data`,
+		project, ticket, status, now, marshalFixture(t, data),
+	); err != nil {
+		t.Fatalf("seedPlan: %v", err)
+	}
+}
+
+// seedAudit inserts a row into the audit table.
+func seedAudit(t *testing.T, dir, project string, entries []map[string]any) {
+	t.Helper()
+	db := openFixtureDB(t, dir)
+	defer db.Close()
+	for _, e := range entries {
+		date, _ := e["date"].(string)
+		if _, err := db.Exec(
+			`INSERT INTO audit (project, date, data) VALUES (?, ?, ?)`,
+			project, date, marshalFixture(t, e),
+		); err != nil {
+			t.Fatalf("seedAudit: %v", err)
+		}
+	}
+}
+
+// seedDeployChecks inserts rows into the deploy_checks table.
+func seedDeployChecks(t *testing.T, dir, project string, entries []map[string]any) {
+	t.Helper()
+	db := openFixtureDB(t, dir)
+	defer db.Close()
+	for _, e := range entries {
+		recordedAt, _ := e["date"].(string)
+		if recordedAt == "" {
+			recordedAt, _ = e["_recorded_at"].(string)
+		}
+		if _, err := db.Exec(
+			`INSERT INTO deploy_checks (project, recorded_at, data) VALUES (?, ?, ?)`,
+			project, recordedAt, marshalFixture(t, e),
+		); err != nil {
+			t.Fatalf("seedDeployChecks: %v", err)
+		}
+	}
+}
+
+// seedIssues inserts rows into the issues table.
+func seedIssues(t *testing.T, dir, project string, entries []map[string]any) {
+	t.Helper()
+	db := openFixtureDB(t, dir)
+	defer db.Close()
+	for _, e := range entries {
+		reportedAt, _ := e["_recorded_at"].(string)
+		if _, err := db.Exec(
+			`INSERT INTO issues (project, reported_at, data) VALUES (?, ?, ?)`,
+			project, reportedAt, marshalFixture(t, e),
+		); err != nil {
+			t.Fatalf("seedIssues: %v", err)
+		}
 	}
 }
 
@@ -39,12 +171,8 @@ func TestReadProjects_ReturnsList(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	writeFixture(t, filepath.Join(dir, "alpha", "project.json"), map[string]any{"name": "alpha"})
-	writeFixture(t, filepath.Join(dir, "beta", "project.json"), map[string]any{"name": "beta"})
-	// dir with no project.json should be excluded
-	if err := os.MkdirAll(filepath.Join(dir, "empty-dir"), 0755); err != nil {
-		t.Fatal(err)
-	}
+	seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
+	seedProject(t, dir, "beta", map[string]any{"name": "beta"})
 
 	projects, err := ReadProjects()
 	if err != nil {
@@ -74,7 +202,7 @@ func TestReadProject_ReturnsProject(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	writeFixture(t, filepath.Join(dir, "myproject", "project.json"), map[string]any{
+	seedProject(t, dir, "myproject", map[string]any{
 		"name": "myproject",
 		"repo": map[string]any{"workspace": "tazgreenwood"},
 	})
@@ -85,6 +213,43 @@ func TestReadProject_ReturnsProject(t *testing.T) {
 	}
 	if proj.Name != "myproject" {
 		t.Errorf("want Name=myproject, got %q", proj.Name)
+	}
+}
+
+func TestReadProject_NameFallsBackToSQLKeyWhenMissingFromJSON(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "address-qual", map[string]any{
+		"repo": map[string]any{"workspace": "tazgreenwood"},
+	})
+
+	proj, err := ReadProject("address-qual")
+	if err != nil {
+		t.Fatalf("ReadProject() error: %v", err)
+	}
+	if proj.Name != "address-qual" {
+		t.Errorf("want Name=address-qual (from SQL key), got %q", proj.Name)
+	}
+}
+
+func TestReadProjects_NameFallsBackToSQLKeyWhenMissingFromJSON(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "mapi", map[string]any{
+		"repo": map[string]any{"workspace": "tazgreenwood"},
+	})
+
+	projects, err := ReadProjects()
+	if err != nil {
+		t.Fatalf("ReadProjects() error: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("want 1 project, got %d: %v", len(projects), projects)
+	}
+	if projects[0].Name != "mapi" {
+		t.Errorf("want Name=mapi (from SQL key), got %q", projects[0].Name)
 	}
 }
 
@@ -104,15 +269,14 @@ func TestReadPlans_ReturnsPlanMeta(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	plansDir := filepath.Join(dir, "myproject", "plans")
-	writeFixture(t, filepath.Join(plansDir, "DOTFILES-1.json"), map[string]any{
+	seedPlan(t, dir, "myproject", "DOTFILES-1", map[string]any{
 		"ticket":  "DOTFILES-1",
 		"summary": "First plan",
 		"plan_steps": []map[string]any{
 			{"step": 1, "status": "done"},
 		},
 	})
-	writeFixture(t, filepath.Join(plansDir, "DOTFILES-2.json"), map[string]any{
+	seedPlan(t, dir, "myproject", "DOTFILES-2", map[string]any{
 		"ticket":  "DOTFILES-2",
 		"summary": "Second plan",
 		"plan_steps": []map[string]any{
@@ -133,8 +297,7 @@ func TestReadPlans_StatusShippedWhenAllStepsDone(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	plansDir := filepath.Join(dir, "myproject", "plans")
-	writeFixture(t, filepath.Join(plansDir, "DOTFILES-1.json"), map[string]any{
+	seedPlan(t, dir, "myproject", "DOTFILES-1", map[string]any{
 		"ticket":  "DOTFILES-1",
 		"summary": "All done",
 		"plan_steps": []map[string]any{
@@ -159,8 +322,7 @@ func TestReadPlans_StatusActiveWhenStepPending(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	plansDir := filepath.Join(dir, "myproject", "plans")
-	writeFixture(t, filepath.Join(plansDir, "DOTFILES-3.json"), map[string]any{
+	seedPlan(t, dir, "myproject", "DOTFILES-3", map[string]any{
 		"ticket":  "DOTFILES-3",
 		"summary": "In progress",
 		"plan_steps": []map[string]any{
@@ -187,7 +349,7 @@ func TestReadPlan_ReturnsPlan(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	writeFixture(t, filepath.Join(dir, "myproject", "plans", "TICKET-1.json"), map[string]any{
+	seedPlan(t, dir, "myproject", "TICKET-1", map[string]any{
 		"ticket":  "TICKET-1",
 		"summary": "Test plan",
 		"plan_steps": []map[string]any{
@@ -207,6 +369,49 @@ func TestReadPlan_ReturnsPlan(t *testing.T) {
 	}
 }
 
+func TestReadPlan_TicketFallsBackToSQLKeyWhenMissingFromJSON(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedPlan(t, dir, "myproject", "TICKET-2", map[string]any{
+		"summary": "Test plan without ticket field",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "Do the thing", "status": "active"},
+		},
+	})
+
+	plan, err := ReadPlan("myproject", "TICKET-2")
+	if err != nil {
+		t.Fatalf("ReadPlan() error: %v", err)
+	}
+	if plan.Ticket != "TICKET-2" {
+		t.Errorf("want Ticket=TICKET-2 (from SQL key), got %q", plan.Ticket)
+	}
+}
+
+func TestReadPlans_TicketFallsBackToSQLKeyWhenMissingFromJSON(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedPlan(t, dir, "myproject", "TICKET-3", map[string]any{
+		"summary": "Test plan without ticket field",
+		"plan_steps": []map[string]any{
+			{"step": 1, "status": "active"},
+		},
+	})
+
+	plans, err := ReadPlans("myproject")
+	if err != nil {
+		t.Fatalf("ReadPlans() error: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("want 1 plan, got %d", len(plans))
+	}
+	if plans[0].Ticket != "TICKET-3" {
+		t.Errorf("want Ticket=TICKET-3 (from SQL key), got %q", plans[0].Ticket)
+	}
+}
+
 func TestReadPlan_MissingReturnsError(t *testing.T) {
 	_, cleanup := setupFixtureDir(t)
 	defer cleanup()
@@ -223,11 +428,10 @@ func TestReadAudit_ReturnsAllEntries(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	entries := []map[string]any{
+	seedAudit(t, dir, "myproject", []map[string]any{
 		{"ticket": "DOTFILES-1", "type": "feature", "summary": "Add thing", "date": "2026-05-01"},
 		{"ticket": "DOTFILES-2", "type": "bugfix", "summary": "Fix bug", "date": "2026-06-01"},
-	}
-	writeFixture(t, filepath.Join(dir, "myproject", "audit.json"), entries)
+	})
 
 	got, err := ReadAudit("myproject", "", "")
 	if err != nil {
@@ -242,12 +446,11 @@ func TestReadAudit_FiltersBySince(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	entries := []map[string]any{
+	seedAudit(t, dir, "myproject", []map[string]any{
 		{"ticket": "DOTFILES-1", "date": "2026-04-15"},
 		{"ticket": "DOTFILES-2", "date": "2026-05-01"},
 		{"ticket": "DOTFILES-3", "date": "2026-06-10"},
-	}
-	writeFixture(t, filepath.Join(dir, "myproject", "audit.json"), entries)
+	})
 
 	got, err := ReadAudit("myproject", "2026-05-01", "")
 	if err != nil {
@@ -262,12 +465,11 @@ func TestReadAudit_FiltersByUntil(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	entries := []map[string]any{
+	seedAudit(t, dir, "myproject", []map[string]any{
 		{"ticket": "DOTFILES-1", "date": "2026-04-15"},
 		{"ticket": "DOTFILES-2", "date": "2026-05-01"},
 		{"ticket": "DOTFILES-3", "date": "2026-06-10"},
-	}
-	writeFixture(t, filepath.Join(dir, "myproject", "audit.json"), entries)
+	})
 
 	got, err := ReadAudit("myproject", "", "2026-05-01")
 	if err != nil {
@@ -282,12 +484,11 @@ func TestReadAudit_FiltersBySinceAndUntil(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	entries := []map[string]any{
+	seedAudit(t, dir, "myproject", []map[string]any{
 		{"ticket": "DOTFILES-1", "date": "2026-04-15"},
 		{"ticket": "DOTFILES-2", "date": "2026-05-01"},
 		{"ticket": "DOTFILES-3", "date": "2026-06-10"},
-	}
-	writeFixture(t, filepath.Join(dir, "myproject", "audit.json"), entries)
+	})
 
 	got, err := ReadAudit("myproject", "2026-05-01", "2026-05-31")
 	if err != nil {
@@ -320,11 +521,10 @@ func TestReadDeployChecks_ReturnsAllEntries(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	entries := []map[string]any{
+	seedDeployChecks(t, dir, "myproject", []map[string]any{
 		{"status": "pass", "summary": "Deploy checked out", "date": "2026-05-01"},
 		{"status": "fail", "summary": "Deploy failed health check", "date": "2026-06-01"},
-	}
-	writeFixture(t, filepath.Join(dir, "myproject", "deploy_checks.json"), entries)
+	})
 
 	got, err := ReadDeployChecks("myproject", "", "")
 	if err != nil {
@@ -339,12 +539,11 @@ func TestReadDeployChecks_FiltersBySince(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	entries := []map[string]any{
+	seedDeployChecks(t, dir, "myproject", []map[string]any{
 		{"status": "pass", "date": "2026-04-15"},
 		{"status": "pass", "date": "2026-05-01"},
 		{"status": "fail", "date": "2026-06-10"},
-	}
-	writeFixture(t, filepath.Join(dir, "myproject", "deploy_checks.json"), entries)
+	})
 
 	got, err := ReadDeployChecks("myproject", "2026-05-01", "")
 	if err != nil {
@@ -359,12 +558,11 @@ func TestReadDeployChecks_FiltersByUntil(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	entries := []map[string]any{
+	seedDeployChecks(t, dir, "myproject", []map[string]any{
 		{"status": "pass", "date": "2026-04-15"},
 		{"status": "pass", "date": "2026-05-01"},
 		{"status": "fail", "date": "2026-06-10"},
-	}
-	writeFixture(t, filepath.Join(dir, "myproject", "deploy_checks.json"), entries)
+	})
 
 	got, err := ReadDeployChecks("myproject", "", "2026-05-01")
 	if err != nil {
@@ -379,12 +577,11 @@ func TestReadDeployChecks_FiltersBySinceAndUntil(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	entries := []map[string]any{
+	seedDeployChecks(t, dir, "myproject", []map[string]any{
 		{"status": "pass", "date": "2026-04-15"},
 		{"status": "pass", "date": "2026-05-01"},
 		{"status": "fail", "date": "2026-06-10"},
-	}
-	writeFixture(t, filepath.Join(dir, "myproject", "deploy_checks.json"), entries)
+	})
 
 	got, err := ReadDeployChecks("myproject", "2026-05-01", "2026-05-31")
 	if err != nil {
@@ -417,11 +614,10 @@ func TestReadIssues_ReturnsEntries(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	issues := []map[string]any{
+	seedIssues(t, dir, "myproject", []map[string]any{
 		{"tool": "registry_get_project", "error": "not found", "severity": "error", "_recorded_at": "2026-06-16T10:00:00Z"},
 		{"tool": "registry_set", "error": "write failed", "severity": "warning", "_recorded_at": "2026-06-16T11:00:00Z"},
-	}
-	writeFixture(t, filepath.Join(dir, "myproject", "issues.json"), issues)
+	})
 
 	got, err := ReadIssues("myproject", "")
 	if err != nil {
@@ -449,12 +645,11 @@ func TestReadIssues_FiltersBySeverity(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 
-	issues := []map[string]any{
-		{"tool": "registry_get_project", "error": "not found", "severity": "error"},
-		{"tool": "registry_set", "error": "write failed", "severity": "warning"},
-		{"tool": "registry_get_plan", "error": "missing plan", "severity": "error"},
-	}
-	writeFixture(t, filepath.Join(dir, "myproject", "issues.json"), issues)
+	seedIssues(t, dir, "myproject", []map[string]any{
+		{"tool": "registry_get_project", "error": "not found", "severity": "error", "_recorded_at": "2026-06-16T10:00:00Z"},
+		{"tool": "registry_set", "error": "write failed", "severity": "warning", "_recorded_at": "2026-06-16T11:00:00Z"},
+		{"tool": "registry_get_plan", "error": "missing plan", "severity": "error", "_recorded_at": "2026-06-16T12:00:00Z"},
+	})
 
 	got, err := ReadIssues("myproject", "error")
 	if err != nil {

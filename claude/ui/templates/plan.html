@@ -1,5 +1,5 @@
 {{define "content"}}
-<div class="flex items-center justify-between mb-6">
+<div class="flex items-center justify-between mb-6" data-project="{{(index .Breadcrumbs 1).Label}}">
   <h1 class="text-3xl font-bold">{{.Plan.Ticket}} &mdash; {{.Plan.Summary}}</h1>
   <a href="" class="text-sm text-blue-600 hover:underline">Refresh</a>
 </div>
@@ -46,54 +46,65 @@
 {{if .Plan.PlanSteps}}
 <section>
   <h2 class="text-xl font-semibold mb-4">Steps</h2>
-  <div class="space-y-3">
-    {{range .Plan.PlanSteps}}
-    <details class="border border-gray-200 rounded-lg overflow-hidden"{{if ne .Status "done"}} open{{end}}>
-      <summary class="flex items-center justify-between px-4 py-3 bg-gray-50 cursor-pointer select-none">
-        <span class="font-medium text-sm">Step {{.ID}}{{if .Title}} &mdash; {{.Title}}{{end}}</span>
-        {{if eq .Status "done"}}
-        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">done</span>
-        {{else if eq .Status "in_progress"}}
-        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">currently executing</span>
-        {{else}}
-        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">pending</span>
-        {{end}}
-      </summary>
-      <div class="px-4 py-4 text-sm text-gray-700 space-y-3">
-        {{if .Why}}
-        <div>
-          <span class="font-semibold">Why:</span>
-          <p class="mt-1">{{.Why}}</p>
-        </div>
-        {{end}}
-        {{if .How}}
-        <div>
-          <span class="font-semibold">How:</span>
-          <p class="mt-1">{{.How}}</p>
-        </div>
-        {{end}}
-        {{if .Files}}
-        <div>
-          <span class="font-semibold">Files:</span>
-          <div class="mt-1 flex flex-wrap gap-2">
-            {{range .Files}}<code class="bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded text-xs font-mono">{{.}}</code>{{end}}
+  <div class="grid grid-cols-4 gap-4">
+    {{range .Columns}}
+    <div class="flex flex-col gap-3">
+      <h3 class="text-sm font-semibold px-2 py-1 rounded{{if eq .Status "blocked"}} bg-red-50 text-red-800{{else}} bg-gray-50 text-gray-700{{end}}">{{.Header}}</h3>
+      {{if .Steps}}
+      {{range .Steps}}
+      <details class="border border-gray-200 rounded-lg overflow-hidden" data-step-id="{{.ID}}"{{if ne .Status "done"}} open{{end}}>
+        <summary class="flex items-center justify-between px-4 py-3 bg-gray-50 cursor-pointer select-none">
+          <span class="font-medium text-sm">Step {{.ID}}{{if .Title}} &mdash; {{.Title}}{{end}}</span>
+          {{if eq .Status "done"}}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">done</span>
+          {{else if eq .Status "in_progress"}}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">currently executing</span>
+          {{else if eq .Status "blocked"}}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">blocked</span>
+          {{else}}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">pending</span>
+          {{end}}
+        </summary>
+        <div class="px-4 py-4 text-sm text-gray-700 space-y-3">
+          {{if .Why}}
+          <div>
+            <span class="font-semibold">Why:</span>
+            <p class="mt-1">{{.Why}}</p>
           </div>
+          {{end}}
+          {{if .How}}
+          <div>
+            <span class="font-semibold">How:</span>
+            <p class="mt-1">{{.How}}</p>
+          </div>
+          {{end}}
+          {{if .Files}}
+          <div>
+            <span class="font-semibold">Files:</span>
+            <div class="mt-1 flex flex-wrap gap-2">
+              {{range .Files}}<code class="bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded text-xs font-mono">{{.}}</code>{{end}}
+            </div>
+          </div>
+          {{end}}
+          {{if .Verification}}
+          <div>
+            <span class="font-semibold">Verification:</span>
+            <p class="mt-1">{{.Verification}}</p>
+          </div>
+          {{end}}
+          {{if .Risk}}
+          <div>
+            <span class="font-semibold">Risk:</span>
+            <p class="mt-1">{{.Risk}}</p>
+          </div>
+          {{end}}
         </div>
-        {{end}}
-        {{if .Verification}}
-        <div>
-          <span class="font-semibold">Verification:</span>
-          <p class="mt-1">{{.Verification}}</p>
-        </div>
-        {{end}}
-        {{if .Risk}}
-        <div>
-          <span class="font-semibold">Risk:</span>
-          <p class="mt-1">{{.Risk}}</p>
-        </div>
-        {{end}}
-      </div>
-    </details>
+      </details>
+      {{end}}
+      {{else}}
+      <p class="text-sm text-gray-400 italic">No steps</p>
+      {{end}}
+    </div>
     {{end}}
   </div>
 </section>

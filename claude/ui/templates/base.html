@@ -16,8 +16,52 @@
       {{end}}
     </nav>
     {{end}}
-    {{template "content" .}}
+    <div id="content">{{template "content" .}}</div>
   </div>
+  <script>
+    (function () {
+      var contentEl = document.getElementById('content');
+      var projectEl = contentEl.querySelector('[data-project]');
+      if (!projectEl) return;
+      var project = projectEl.getAttribute('data-project');
+
+      function isFocusInsideContent() {
+        var active = document.activeElement;
+        return !!active && active !== document.body && contentEl.contains(active);
+      }
+
+      function swap() {
+        if (isFocusInsideContent()) {
+          setTimeout(swap, 500);
+          return;
+        }
+        var scrollY = window.scrollY;
+        var openStepIds = [];
+        contentEl.querySelectorAll('details[data-step-id]').forEach(function (d) {
+          if (d.open) openStepIds.push(d.getAttribute('data-step-id'));
+        });
+        fetch(location.href)
+          .then(function (res) { return res.text(); })
+          .then(function (html) {
+            var newDoc = new DOMParser().parseFromString(html, 'text/html');
+            var newContent = newDoc.getElementById('content');
+            if (!newContent) return;
+            contentEl.innerHTML = newContent.innerHTML;
+            openStepIds.forEach(function (id) {
+              var el = contentEl.querySelector('details[data-step-id="' + id + '"]');
+              if (el) el.open = true;
+            });
+            window.scrollTo(0, scrollY);
+          })
+          .catch(function () {});
+      }
+
+      var source = new EventSource('/projects/' + encodeURIComponent(project) + '/events');
+      source.addEventListener('message', function () {
+        swap();
+      });
+    })();
+  </script>
 </body>
 </html>
 {{end}}
