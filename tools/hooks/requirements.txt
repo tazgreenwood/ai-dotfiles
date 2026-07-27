@@ -1,2 +1,0 @@
-# headroom-ai requires Python >= 3.10
-headroom-ai>=0.32.1
