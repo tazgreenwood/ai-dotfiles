@@ -135,3 +135,43 @@ func TestValidatePlanSteps_DifferentParallelGroups_NoOverlapCheck(t *testing.T) 
 		t.Fatalf("want nil for async steps in different parallel_groups even with overlapping files, got %v", err)
 	}
 }
+
+// Real plan JSON decodes parallel_group as a number (float64 via
+// encoding/json into map[string]any), not a string like the other tests use.
+func TestValidatePlanSteps_NumericParallelGroup_GroupsCorrectly(t *testing.T) {
+	steps := []any{
+		map[string]any{
+			"title":          "step one",
+			"execution":      "async",
+			"parallel_group": float64(1),
+			"files":          []any{"foo.go"},
+		},
+		map[string]any{
+			"title":          "step two",
+			"execution":      "async",
+			"parallel_group": float64(1),
+			"files":          []any{"foo.go"},
+		},
+	}
+	if err := validatePlanSteps(steps); err == nil {
+		t.Fatal("want error for numeric parallel_group steps sharing a file, got nil")
+	}
+
+	disjointDifferentGroups := []any{
+		map[string]any{
+			"title":          "step one",
+			"execution":      "async",
+			"parallel_group": float64(1),
+			"files":          []any{"foo.go"},
+		},
+		map[string]any{
+			"title":          "step two",
+			"execution":      "async",
+			"parallel_group": float64(2),
+			"files":          []any{"foo.go"},
+		},
+	}
+	if err := validatePlanSteps(disjointDifferentGroups); err != nil {
+		t.Fatalf("want nil for numeric parallel_group steps in different groups even with overlapping files, got %v", err)
+	}
+}

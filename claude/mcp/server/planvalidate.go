@@ -19,7 +19,7 @@ func validatePlanSteps(steps []any) error {
 		if execution != "async" {
 			continue
 		}
-		group, _ := step["parallel_group"].(string)
+		group := fmt.Sprintf("%v", step["parallel_group"])
 		groups[group] = append(groups[group], step)
 	}
 
