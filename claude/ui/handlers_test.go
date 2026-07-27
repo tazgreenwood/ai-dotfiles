@@ -4,8 +4,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -18,26 +16,27 @@ func newTestServer(t *testing.T, dataDir string) *httptest.Server {
 	return httptest.NewServer(newRouter())
 }
 
-// setupProjectFixture writes a minimal project + plan + audit under dataDir.
+// setupProjectFixture seeds a minimal project + plan + audit + deploy check
+// into the registry.db under dataDir.
 func setupProjectFixture(t *testing.T, dataDir, projectName string) {
 	t.Helper()
 
-	writeFixture(t, filepath.Join(dataDir, projectName, "project.json"), map[string]any{
+	seedProject(t, dataDir, projectName, map[string]any{
 		"name": projectName,
 		"repo": map[string]any{"workspace": "tazgreenwood"},
 	})
 
-	writeFixture(t, filepath.Join(dataDir, projectName, "plans", "TICKET-1.json"), map[string]any{
+	seedPlan(t, dataDir, projectName, "TICKET-1", map[string]any{
 		"ticket":     "TICKET-1",
 		"summary":    "Test plan",
 		"plan_steps": []map[string]any{{"step": 1, "status": "done"}},
 	})
 
-	writeFixture(t, filepath.Join(dataDir, projectName, "audit.json"), []map[string]any{
+	seedAudit(t, dataDir, projectName, []map[string]any{
 		{"ticket": "TICKET-1", "type": "feature", "summary": "Add thing", "date": "2026-06-01"},
 	})
 
-	writeFixture(t, filepath.Join(dataDir, projectName, "deploy_checks.json"), []map[string]any{
+	seedDeployChecks(t, dataDir, projectName, []map[string]any{
 		{"app": "emily", "status": "pass", "summary": "All checks passed", "date": "2026-06-01"},
 	})
 }
@@ -217,7 +216,7 @@ func TestGetDeployChecks_ExistingReturns200(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 	setupProjectFixture(t, dir, "existing")
-	writeFixture(t, filepath.Join(dir, "existing", "deploy_checks.json"), []map[string]any{
+	seedDeployChecks(t, dir, "existing", []map[string]any{
 		{"status": "pass", "summary": "Deploy checked out", "date": "2026-06-01"},
 	})
 
@@ -358,7 +357,7 @@ func TestHandlers_SetNoStoreCacheControl(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
 	setupProjectFixture(t, dir, "existing")
-	writeFixture(t, filepath.Join(dir, "existing", "deploy_checks.json"), []map[string]any{
+	seedDeployChecks(t, dir, "existing", []map[string]any{
 		{"status": "pass", "date": "2026-06-01"},
 	})
 
@@ -396,11 +395,8 @@ func TestGetAudit_WithQueryParams_FiltersResults(t *testing.T) {
 		{"ticket": "DOTFILES-1", "type": "feature", "summary": "Old entry", "date": "2026-04-01"},
 		{"ticket": "DOTFILES-2", "type": "feature", "summary": "New entry", "date": "2026-06-01"},
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "existing"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	writeFixture(t, filepath.Join(dir, "existing", "project.json"), map[string]any{"name": "existing"})
-	writeFixture(t, filepath.Join(dir, "existing", "audit.json"), entries)
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedAudit(t, dir, "existing", entries)
 
 	ts := newTestServer(t, dir)
 	defer ts.Close()
