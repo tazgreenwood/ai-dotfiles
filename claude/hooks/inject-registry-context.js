@@ -100,20 +100,7 @@ if (categories.length > 0) {
   }
 }
 
-let contextBlock = lines.join('\n');
-
-// ── Compress via headroom (best-effort) ────────────────────────────────────────
-
-try {
-  const compressed = execFileSync('python3', [
-    path.join(__dirname, '..', '..', 'tools', 'hooks', 'headroom_compress.py'),
-  ], { input: contextBlock, encoding: 'utf8', timeout: 3000 });
-  if (compressed && compressed.trim().length > 0) {
-    contextBlock = compressed;
-  }
-} catch (e) {
-  // python3/headroom unavailable, timed out, or errored — keep original contextBlock
-}
+const contextBlock = lines.join('\n');
 
 // ── Write flag and emit ────────────────────────────────────────────────────────
 
