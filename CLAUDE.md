@@ -25,6 +25,7 @@ Codebase = user-facing skills + supporting MCP tools:
 - `confluence.md` — direct Confluence access (search, create, update pages)
 - `standup.md` — synth Yesterday/Today/Blockers from JIRA + Slack
 - `shipped.md` — work history report by month/quarter/year, optional narrative mode
+- `idea-validation.md` — agent-graph fan-out: idea-fleshing agent, then 4 parallel isolated research agents (competitor, market-trend, risk-assumption, technical-feasibility), synthesized into a self-contained HTML report
 
 **MCP Servers**:
 - **Registry Server** (`claude/mcp/server/`):
@@ -188,6 +189,7 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
 | confluence | `/confluence` + subcommand | ✓ Shipped | mcp__atlassian__* |
 | standup | `/standup` | ✓ Shipped | mcp__atlassian__*, mcp__slack__* (optional) |
 | shipped | `/shipped` + optional flags | ✓ Shipped | registry, mcp__atlassian__* (optional) |
+| idea-validation | `/idea-validation` | ✓ Shipped | WebSearch, WebFetch, general-purpose agent |
 
 ---
 
@@ -261,6 +263,14 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
   - mattn/go-sqlite3 (cgo driver): breaks pure-Go cross-compilation; `modernc.org/sqlite` (pure-Go) is portable, no build dependencies.
 - **Consequences**: Plans table now has autoincrement id + created_at (stamped once, never overwritten). `registry_get_audit()` and `registry_get_deploy_checks()` use indexed SQL WHERE clauses instead of loading all data into Go. Old JSON files under `data/{project}/*.json` are dead weight, kept alongside timestamped backup for safety during rollout, not yet deleted. Counter increments are now atomic transactions. Tools become O(1) on range queries instead of O(n).
 
+### [2026-08-05] — Graph-engineering fan-out spike on code-review
+- **Context**: `code-review` always ran a single `@reviewer` pass. Spiked a `--graph` opt-in mode that fans out to 4 isolated dimension-reviewer agents (bugs/correctness, security, scope/AC, style) plus a synthesis agent, to test whether isolated-context parallel review surfaces more/better findings than one general-purpose pass.
+- **Decision**: Keep `--graph` opt-in, not promoted to default. Default `code-review local` behavior unchanged (single-pass `@reviewer`). Fan-out costs 5x the agent calls of a single-pass review, so the quality tradeoff needs validating against a real diff before defaulting to it — deferred to a real-world comparison run by the user.
+- **Rejected alternatives**:
+  - Promote graph mode to default now: 5x cost per review without measured evidence it improves finding quality/coverage over single-pass.
+  - Drop graph mode entirely: no data yet to rule it out; keeping it opt-in preserves the option at zero cost to existing users.
+- **Consequences**: `code-review local --graph` available for on-demand deeper review; `code-review local` (no flag) unchanged. Re-evaluate promotion once a real comparison run (graph vs non-graph on the same diff) is on record.
+
 ---
 
 ## Domain Glossary
@@ -277,6 +287,7 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
 - **Hook**: Node.js script (in `claude/hooks/`) registered in settings.json, runs at defined event (e.g. UserPromptSubmit) to inject context or setup.
 - **Parallel group**: `int` identifying a contiguous block of async plan steps meant to run concurrently in `/build`; validated for non-overlapping files at plan-write time.
 - **Async step**: A plan step marked `execution:"async"`; runs concurrently with other steps in the same `parallel_group`, each in an isolated git worktree, merged back into the feature branch in step-id order.
+- **Agent-graph fan-out**: Pattern where a task is split across multiple independent, context-isolated subagents that run in parallel, each producing a partial result, then a dedicated synthesis step merges those outputs into one final artifact. Used in `code-review --graph` mode (4 dimension-reviewer agents + synthesis) and `idea-validation` (4 research agents + synthesis).
 
 ---
 
