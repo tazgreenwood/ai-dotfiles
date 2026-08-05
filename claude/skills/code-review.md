@@ -73,6 +73,10 @@ If not available locally, proceed without it.
 
 ## STEP 5: INVOKE @reviewer
 
+Accept an optional `--graph` flag on the skill invocation (e.g. `code-review local --graph`, `code-review 42 --graph`). Default (no flag) behavior is unchanged from below.
+
+### Default mode (no `--graph`)
+
 Pass:
 - Full diff output
 - PR title and description (PR mode) or branch name + recent commit messages (local mode), as the acceptance spec
@@ -80,6 +84,26 @@ Pass:
 - Instruction: "Review for correctness bugs, security issues, and scope. Do not praise. Return findings only."
 
 @reviewer returns APPROVED, APPROVED WITH WARNINGS, or REJECTED with a list of findings.
+
+### Graph mode (`--graph`)
+
+Spike: isolated-context multi-agent fan-out, to compare against the single-pass default above before committing to the pattern elsewhere.
+
+Fire 4 parallel `Agent` calls (subagent_type: `cavecrew-reviewer`), each scoped to exactly one review dimension. Each call is a fresh, isolated invocation — no agent sees another agent's output, and no agent's prompt references the existence of the other three. Each gets the same base context (full diff, PR title/description or branch name + commit messages, CLAUDE.md contents if available) plus a dimension-specific instruction:
+
+1. **Bugs/correctness**: "Review this diff for correctness bugs only — logic errors, off-by-one, null/nil handling, race conditions, broken control flow. Ignore security, scope, and style. Do not praise. Return findings only."
+2. **Security**: "Review this diff for security issues only — injection, auth/authz gaps, secret exposure, unsafe deserialization, unvalidated input. Ignore correctness, scope, and style. Do not praise. Return findings only."
+3. **Scope/AC**: "Review this diff for scope only — does it match the stated PR title/description or commit messages (the acceptance spec)? Flag anything out-of-scope, missing, or over-built. Ignore correctness, security, and style. Do not praise. Return findings only."
+4. **Style**: "Review this diff for style only — naming conventions, dead code, formatting, consistency with CLAUDE.md conventions and domain glossary. Ignore correctness, security, and scope. Do not praise. Return findings only."
+
+Once all 4 dimension agents return, invoke one more `Agent` call (subagent_type: `reviewer`) as the synthesis pass. Pass it:
+- The full diff
+- The PR title/description or branch name + commit messages
+- CLAUDE.md contents (if available)
+- All 4 dimension-reviewer outputs, labeled by dimension
+- Instruction: "You are given 4 independent dimension reviews (bugs/correctness, security, scope, style) of the same diff. Dedupe overlapping findings, merge related ones, and produce a single consolidated verdict. Do not praise. Return findings only."
+
+The synthesis agent returns APPROVED, APPROVED WITH WARNINGS, or REJECTED with the merged findings list — same contract as default mode. Use this as the STEP 5 output for the rest of the skill (STEP 6 onward proceed identically regardless of mode).
 
 ---
 
