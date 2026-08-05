@@ -25,6 +25,7 @@ Codebase = user-facing skills + supporting MCP tools:
 - `confluence.md` — direct Confluence access (search, create, update pages)
 - `standup.md` — synth Yesterday/Today/Blockers from JIRA + Slack
 - `shipped.md` — work history report by month/quarter/year, optional narrative mode
+- `idea-validation.md` — agent-graph fan-out: idea-fleshing agent, then 4 parallel isolated research agents (competitor, market-trend, risk-assumption, technical-feasibility), synthesized into a self-contained HTML report
 
 **MCP Servers**:
 - **Registry Server** (`claude/mcp/server/`):
@@ -188,6 +189,7 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
 | confluence | `/confluence` + subcommand | ✓ Shipped | mcp__atlassian__* |
 | standup | `/standup` | ✓ Shipped | mcp__atlassian__*, mcp__slack__* (optional) |
 | shipped | `/shipped` + optional flags | ✓ Shipped | registry, mcp__atlassian__* (optional) |
+| idea-validation | `/idea-validation` | ✓ Shipped | WebSearch, WebFetch, general-purpose agent |
 
 ---
 
@@ -285,6 +287,7 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
 - **Hook**: Node.js script (in `claude/hooks/`) registered in settings.json, runs at defined event (e.g. UserPromptSubmit) to inject context or setup.
 - **Parallel group**: `int` identifying a contiguous block of async plan steps meant to run concurrently in `/build`; validated for non-overlapping files at plan-write time.
 - **Async step**: A plan step marked `execution:"async"`; runs concurrently with other steps in the same `parallel_group`, each in an isolated git worktree, merged back into the feature branch in step-id order.
+- **Agent-graph fan-out**: Pattern where a task is split across multiple independent, context-isolated subagents that run in parallel, each producing a partial result, then a dedicated synthesis step merges those outputs into one final artifact. Used in `code-review --graph` mode (4 dimension-reviewer agents + synthesis) and `idea-validation` (4 research agents + synthesis).
 
 ---
 
