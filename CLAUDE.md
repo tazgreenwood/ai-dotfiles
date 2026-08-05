@@ -261,6 +261,14 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
   - mattn/go-sqlite3 (cgo driver): breaks pure-Go cross-compilation; `modernc.org/sqlite` (pure-Go) is portable, no build dependencies.
 - **Consequences**: Plans table now has autoincrement id + created_at (stamped once, never overwritten). `registry_get_audit()` and `registry_get_deploy_checks()` use indexed SQL WHERE clauses instead of loading all data into Go. Old JSON files under `data/{project}/*.json` are dead weight, kept alongside timestamped backup for safety during rollout, not yet deleted. Counter increments are now atomic transactions. Tools become O(1) on range queries instead of O(n).
 
+### [2026-08-05] — Graph-engineering fan-out spike on code-review
+- **Context**: `code-review` always ran a single `@reviewer` pass. Spiked a `--graph` opt-in mode that fans out to 4 isolated dimension-reviewer agents (bugs/correctness, security, scope/AC, style) plus a synthesis agent, to test whether isolated-context parallel review surfaces more/better findings than one general-purpose pass.
+- **Decision**: Keep `--graph` opt-in, not promoted to default. Default `code-review local` behavior unchanged (single-pass `@reviewer`). Fan-out costs 5x the agent calls of a single-pass review, so the quality tradeoff needs validating against a real diff before defaulting to it — deferred to a real-world comparison run by the user.
+- **Rejected alternatives**:
+  - Promote graph mode to default now: 5x cost per review without measured evidence it improves finding quality/coverage over single-pass.
+  - Drop graph mode entirely: no data yet to rule it out; keeping it opt-in preserves the option at zero cost to existing users.
+- **Consequences**: `code-review local --graph` available for on-demand deeper review; `code-review local` (no flag) unchanged. Re-evaluate promotion once a real comparison run (graph vs non-graph on the same diff) is on record.
+
 ---
 
 ## Domain Glossary
