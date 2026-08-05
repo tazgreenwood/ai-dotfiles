@@ -65,3 +65,70 @@ Pass: the STEP 2 output.
 Instruction: "Assess the rough build complexity of this idea given the stated problem statement and value proposition. Return: a rough complexity estimate (low/medium/high) and the reasoning behind it."
 
 Each of the four nodes above runs with zero visibility into the other three nodes' prompts or outputs.
+
+---
+
+## STEP 4: SYNTHESIS
+
+Invoke a single Agent call to synthesize the STEP 2 output and all four STEP 3 outputs into a market-gap report.
+
+Pass:
+- The STEP 2 output (problem statement, target user, value prop, hypotheses)
+- The STEP 3 `competitor-research` output
+- The STEP 3 `market-trend` output
+- The STEP 3 `risk-assumption` output
+- The STEP 3 `technical-feasibility` output
+
+Instruction: "Given the idea summary and the four independent research findings above, produce a market-gap report with exactly these five sections:
+1. **Market Gap Analysis** — where this idea sits relative to existing solutions (from competitor-research) and market signals (from market-trend); does a real gap exist
+2. **Recommendation** — build / skip / pivot, and why, weighing the research findings against the risks and assumptions (from risk-assumption)
+3. **MVP Scope** — if pursued, the smallest version worth building, informed by the build complexity assessment (from technical-feasibility)
+4. **Key Risks** — the risks and unproven assumptions that most threaten this idea (from risk-assumption)
+5. **Confidence Level** — low/medium/high confidence in the recommendation, and why
+
+Return only these five sections."
+
+This is the only agent call in the skill that sees more than one upstream output — it is the synthesis node, invoked after all STEP 3 nodes complete.
+
+---
+
+## STEP 5: RENDER AND OPEN HTML REPORT
+
+### Assemble the report data
+
+Gather:
+- **Idea summary** — the STEP 2 output (problem statement, target user, value prop, hypotheses)
+- **Market Gap Analysis**, **Recommendation**, **MVP Scope**, **Key Risks**, **Confidence Level** — the five sections from STEP 4
+
+### Render to a self-contained HTML file
+
+Write a single self-contained HTML file (inline `<style>`, no external assets), mirroring the section layout established by `claude/ui/templates/review.html`: a title, then one `<section>` per report part — Idea Summary, Market Gap Analysis, Recommendation, MVP Scope, Key Risks, Confidence Level.
+
+Write it to a temp path:
+```bash
+mktemp -t idea-validation-XXXX.html
+```
+
+Populate the file's sections with the assembled data (escape HTML-sensitive characters).
+
+### Open the report
+
+```bash
+open <path>
+```
+
+If `open` is unavailable (non-macOS), print the file path to the user instead.
+
+---
+
+## STEP 6: CONFIRM
+
+```
+IDEA VALIDATION COMPLETE
+Idea: [one-line restatement of the raw idea]
+Recommendation: [build / skip / pivot]
+Confidence: [low / medium / high]
+Report: [path to HTML file] (opened in browser)
+```
+
+No tickets or plans are auto-created from this report. The human decides the next step.
