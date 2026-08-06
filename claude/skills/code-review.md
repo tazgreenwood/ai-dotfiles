@@ -140,7 +140,7 @@ Attach the captured output (real or mock) to the corresponding finding(s) from S
 
 ---
 
-## STEP 7: GENERATE AND OPEN HTML REPORT
+## STEP 7: PRINT REPORT
 
 Applies to **both PR mode and local mode** — this is the final action of the skill. No inline Bitbucket comments are posted by this skill (that behavior belongs to `pr-respond.md`, not `code-review.md`).
 
@@ -154,21 +154,22 @@ Gather everything produced by earlier steps:
 - **Execution log** — the captured stdout/stderr or mock invocation output, from STEP 6
 - **Suggestions/findings** — the list of findings from STEP 5, each tagged with severity (`bug`, `security`, `style`, `question`) and which execution mode (real/mock) backs it, from STEP 6
 
-### Render to a self-contained HTML file
+### Default: print Markdown to chat
 
-Write a single self-contained HTML file (inline `<style>`, no external assets) using the section layout established by `claude/ui/templates/review.html` as the reference structure: Title, Summary, Why, Diff Overview, Execution Results (mode + log), Suggestions.
+Print the report directly in the response as Markdown: Title, Summary, Why, Diff Overview, Execution Results (mode + log), Suggestions. This is the default output; no file is written.
 
-Write it to a temp path:
+### On request: render a shareable HTML file
+
+Only if the user asks to save or share the report, render a single self-contained HTML file (inline `<style>`, no external assets) using the section layout established by `claude/ui/templates/review.html` as the reference structure.
+
+Write it to a temp path — note `mktemp -t` requires the `X`s to be the trailing characters of the template, so generate the random name first and append the extension:
 ```bash
-mktemp -t code-review-XXXX.html
+f="$(mktemp -t code-review).html"
 ```
 
-Populate the file's sections with the assembled data (escape HTML-sensitive characters in diff/log content).
-
-### Open the report
-
+Populate the file's sections with the assembled data (escape HTML-sensitive characters in diff/log content), then open it:
 ```bash
-open <path>
+open "$f"
 ```
 
 If `open` is unavailable (non-macOS), print the file path to the user instead.

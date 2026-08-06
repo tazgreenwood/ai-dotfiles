@@ -195,7 +195,7 @@ If errors existed before deploy but not after:
 
 ---
 
-### STEP 4a: Generate HTML report
+### STEP 4a: Print report
 
 Assemble the report data:
 - **Deploy check summary** — app, env, cluster, profile, timestamp
@@ -203,25 +203,23 @@ Assemble the report data:
 - **CloudWatch logs** — before/after deploy log comparison from STEP 3
 - **Overall result** — ✅ ALL CLEAR / ❌ ISSUES FOUND / ⏳ DEPLOYING / 🔧 pre-existing errors cleared, from STEP 4
 
-Write a single self-contained HTML file (inline `<style>`, no external assets) with sections: Title, Deploy Check Summary (app/env/cluster/profile/timestamp), ECS Services table, CloudWatch Logs (before/after), Result.
+By default, print the report directly in the response as Markdown: Title, Deploy Check Summary (app/env/cluster/profile/timestamp), ECS Services table, CloudWatch Logs (before/after), Result. No file is written.
 
-Write it to a temp path:
+Only if the user asks to save or share the report, render a single self-contained HTML file (inline `<style>`, no external assets) with the same sections. Write it to a temp path — note `mktemp -t` requires the `X`s to be the trailing characters of the template, so generate the random name first and append the extension:
 ```bash
-mktemp -t deploy-check-XXXX.html
+f="$(mktemp -t deploy-check).html"
 ```
 
-Escape HTML-sensitive characters in log content.
-
-Open the report:
+Escape HTML-sensitive characters in log content, then open it:
 ```bash
-open <path>
+open "$f"
 ```
 
 If `open` is unavailable (non-macOS), print the file path to the user instead.
 
 ### STEP 4b: Write to registry
 
-Map the overall result to `status` (`pass` for ✅ ALL CLEAR or 🔧 pre-existing errors cleared, `fail` for ❌ ISSUES FOUND, `pending` for ⏳ DEPLOYING) and write a one-line `summary` (e.g. "All clear — 3/3 services healthy" or "2 services unhealthy, errors found"). `date` is today's date in ISO 8601 (`YYYY-MM-DD`).
+Map the overall result to `status` (`pass` for ✅ ALL CLEAR or 🔧 pre-existing errors cleared, `fail` for ❌ ISSUES FOUND, `pending` for ⏳ DEPLOYING) and write a one-line `summary` (e.g. "All clear — 3/3 services healthy" or "2 services unhealthy, errors found"). `date` is today's date in ISO 8601 (`YYYY-MM-DD`). `report_path` is `null` unless STEP 4a rendered an HTML file.
 
 Call:
 ```

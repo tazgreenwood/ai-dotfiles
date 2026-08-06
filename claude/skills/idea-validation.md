@@ -92,7 +92,7 @@ This is the only agent call in the skill that sees more than one upstream output
 
 ---
 
-## STEP 5: RENDER AND OPEN HTML REPORT
+## STEP 5: PRINT REPORT
 
 ### Assemble the report data
 
@@ -100,21 +100,22 @@ Gather:
 - **Idea summary** — the STEP 2 output (problem statement, target user, value prop, hypotheses)
 - **Market Gap Analysis**, **Recommendation**, **MVP Scope**, **Key Risks**, **Confidence Level** — the five sections from STEP 4
 
-### Render to a self-contained HTML file
+### Default: print Markdown to chat
 
-Write a single self-contained HTML file (inline `<style>`, no external assets), mirroring the section layout established by `claude/ui/templates/review.html`: a title, then one `<section>` per report part — Idea Summary, Market Gap Analysis, Recommendation, MVP Scope, Key Risks, Confidence Level.
+Print the report directly in the response as Markdown — a heading, then one `##` section per report part: Idea Summary, Market Gap Analysis, Recommendation, MVP Scope, Key Risks, Confidence Level. This is the default output; no file is written.
 
-Write it to a temp path:
+### On request: render a shareable HTML file
+
+Only if the user asks to save or share the report (e.g. "save this", "give me a file"), render a single self-contained HTML file (inline `<style>`, no external assets), mirroring the section layout established by `claude/ui/templates/review.html`.
+
+Write it to a temp path — note `mktemp -t` requires the `X`s to be the trailing characters of the template, so generate the random name first and append the extension:
 ```bash
-mktemp -t idea-validation-XXXX.html
+f="$(mktemp -t idea-validation).html"
 ```
 
-Populate the file's sections with the assembled data (escape HTML-sensitive characters).
-
-### Open the report
-
+Populate the file's sections with the assembled data (escape HTML-sensitive characters), then open it:
 ```bash
-open <path>
+open "$f"
 ```
 
 If `open` is unavailable (non-macOS), print the file path to the user instead.
