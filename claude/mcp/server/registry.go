@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -471,6 +472,138 @@ func registryGetEvents(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"entries": entries, "total": total})
 }
 
+// ── Deterministic helpers offloaded from LLM prose ──────────────────────────────
+//
+// Branch naming, audit type inference, fake-ticket detection, and file-union
+// dedup were all previously "ask the LLM to compute this from prose rules"
+// steps in plan.md/ship.md. Pure functions, zero ambiguity — moved server-side
+// so they're never miscounted/misderived, and so skills spend fewer tokens
+// re-deriving them each run.
+
+var branchPrefixByType = map[string]string{
+	"story": "feat", "task": "feat", "feature": "feat",
+	"bug": "fix", "defect": "fix",
+	"research": "research",
+	"refactor": "chore", "maintenance": "chore",
+}
+
+func slugify(s string, maxLen int) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	lastHyphen := true // suppress leading hyphen
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastHyphen = false
+		case !lastHyphen:
+			b.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > maxLen {
+		out = strings.TrimRight(out[:maxLen], "-")
+	}
+	return out
+}
+
+func registryDeriveBranchName(args map[string]any) ToolResult {
+	ticket := str(args, "ticket")
+	if ticket == "" {
+		return toolErr("ticket required")
+	}
+	ticketType := strings.ToLower(str(args, "ticket_type"))
+	prefix, ok := branchPrefixByType[ticketType]
+	if !ok {
+		prefix = "chore"
+	}
+	branch := fmt.Sprintf("%s/%s", prefix, ticket)
+	if slug := slugify(str(args, "description"), 40); slug != "" {
+		branch += "-" + slug
+	}
+	return toolOK(map[string]any{"branch": branch, "prefix": prefix})
+}
+
+var auditTypeByPrefix = map[string]string{
+	"feat": "feature", "fix": "bugfix", "chore": "chore",
+	"refactor": "refactor", "docs": "docs", "test": "test",
+}
+
+func registryInferAuditType(args map[string]any) ToolResult {
+	branch := str(args, "branch")
+	prefix, _, _ := strings.Cut(branch, "/")
+	t, ok := auditTypeByPrefix[prefix]
+	if !ok {
+		t = "chore"
+	}
+	return toolOK(map[string]any{"type": t})
+}
+
+func registryIsFakeTicket(args map[string]any) ToolResult {
+	name := str(args, "name")
+	ticket := str(args, "ticket")
+	if name == "" || ticket == "" {
+		return toolErr("name and ticket required")
+	}
+	prefix := str(args, "prefix")
+	if prefix == "" {
+		segments := strings.Split(name, "-")
+		prefix = strings.ToUpper(segments[len(segments)-1])
+	}
+	tPrefix := prefix + "-"
+	if !strings.HasPrefix(ticket, tPrefix) {
+		return toolOK(map[string]any{"is_fake": false})
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(ticket, tPrefix))
+	if err != nil {
+		return toolOK(map[string]any{"is_fake": false})
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	data, err := s.GetProject(name)
+	if err != nil {
+		return toolOK(map[string]any{"is_fake": false})
+	}
+	var counter int
+	switch v := data["ticket_counter"].(type) {
+	case string:
+		counter, _ = strconv.Atoi(v)
+	case float64:
+		counter = int(v)
+	}
+	return toolOK(map[string]any{"is_fake": n <= counter && counter > 0})
+}
+
+func registryUnionFiles(args map[string]any) ToolResult {
+	raw, ok := args["file_groups"].([]any)
+	if !ok {
+		return toolErr("file_groups (array of arrays of strings) required")
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, group := range raw {
+		arr, ok := group.([]any)
+		if !ok {
+			continue
+		}
+		for _, f := range arr {
+			fs, ok := f.(string)
+			if !ok || seen[fs] {
+				continue
+			}
+			seen[fs] = true
+			out = append(out, fs)
+		}
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return toolOK(map[string]any{"files": out})
+}
+
 func allTools() []Tool {
 	return registryTools()
 }
@@ -651,6 +784,52 @@ func registryTools() []Tool {
 					"until": map[string]any{"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
 				},
 				"required": []string{"name"},
+			},
+		},
+		{
+			Name:        "registry_derive_branch_name",
+			Description: "Deterministically derive a branch name from ticket type and description (feat/fix/research/chore prefix + slugified description)",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ticket":      map[string]any{"type": "string", "description": "Ticket key, e.g. ONE-1234"},
+					"ticket_type": map[string]any{"type": "string", "description": "Story/Task/Feature/Bug/Defect/Research/Refactor/Maintenance (case-insensitive)"},
+					"description": map[string]any{"type": "string", "description": "Short description to slugify, appended to the branch name"},
+				},
+				"required": []string{"ticket"},
+			},
+		},
+		{
+			Name:        "registry_infer_audit_type",
+			Description: "Deterministically infer an audit entry's type (feature/bugfix/chore/refactor/docs/test) from a branch name's prefix",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"branch": map[string]any{"type": "string"}},
+				"required":   []string{"branch"},
+			},
+		},
+		{
+			Name:        "registry_is_fake_ticket",
+			Description: "Check whether a ticket key is a registry auto-generated fake ticket (vs a real JIRA key) by comparing against the project's ticket_counter",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":   map[string]any{"type": "string"},
+					"ticket": map[string]any{"type": "string"},
+					"prefix": map[string]any{"type": "string", "description": "Optional: override the auto-derived project prefix (default: last hyphen-segment of name, uppercased)"},
+				},
+				"required": []string{"name", "ticket"},
+			},
+		},
+		{
+			Name:        "registry_union_files",
+			Description: "Deduplicate and flatten multiple arrays of file paths into one union, preserving first-occurrence order",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"file_groups": map[string]any{"type": "array", "items": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}},
+				},
+				"required": []string{"file_groups"},
 			},
 		},
 		{

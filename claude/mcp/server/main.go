@@ -146,6 +146,14 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryWriteEvent(args)
 	case "registry_get_events":
 		return registryGetEvents(args)
+	case "registry_derive_branch_name":
+		return registryDeriveBranchName(args)
+	case "registry_infer_audit_type":
+		return registryInferAuditType(args)
+	case "registry_is_fake_ticket":
+		return registryIsFakeTicket(args)
+	case "registry_union_files":
+		return registryUnionFiles(args)
 	}
 	return toolErr("unknown tool: " + name)
 }

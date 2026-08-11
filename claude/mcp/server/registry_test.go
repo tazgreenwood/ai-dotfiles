@@ -888,3 +888,188 @@ func TestStore_DeployCheckRoundtrip(t *testing.T) {
 		t.Errorf("want status=pass, got %v", entries[0]["status"])
 	}
 }
+
+// ── registryDeriveBranchName ─────────────────────────────────────────────────────
+
+func TestRegistryDeriveBranchName_PrefixByType(t *testing.T) {
+	cases := []struct {
+		ticketType string
+		want       string
+	}{
+		{"Story", "feat"},
+		{"Task", "feat"},
+		{"Feature", "feat"},
+		{"Bug", "fix"},
+		{"Defect", "fix"},
+		{"Research", "research"},
+		{"Refactor", "chore"},
+		{"Maintenance", "chore"},
+		{"Unknown", "chore"},
+		{"", "chore"},
+	}
+	for _, c := range cases {
+		result := registryDeriveBranchName(map[string]any{"ticket": "ONE-1234", "ticket_type": c.ticketType})
+		if result.IsError {
+			t.Fatalf("unexpected error for type %q: %s", c.ticketType, result.Content[0].Text)
+		}
+		var resp map[string]any
+		json.Unmarshal([]byte(result.Content[0].Text), &resp)
+		if resp["prefix"] != c.want {
+			t.Errorf("type %q: want prefix %q, got %v", c.ticketType, c.want, resp["prefix"])
+		}
+	}
+}
+
+func TestRegistryDeriveBranchName_SlugifiesDescription(t *testing.T) {
+	result := registryDeriveBranchName(map[string]any{
+		"ticket":      "ONE-1234",
+		"ticket_type": "Bug",
+		"description": "Fix Null Pointer in User Service!!",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	want := "fix/ONE-1234-fix-null-pointer-in-user-service"
+	if resp["branch"] != want {
+		t.Errorf("want branch %q, got %v", want, resp["branch"])
+	}
+}
+
+func TestRegistryDeriveBranchName_NoDescriptionOmitsSlug(t *testing.T) {
+	result := registryDeriveBranchName(map[string]any{"ticket": "ONE-1234", "ticket_type": "Feature"})
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	if resp["branch"] != "feat/ONE-1234" {
+		t.Errorf("want branch feat/ONE-1234, got %v", resp["branch"])
+	}
+}
+
+func TestRegistryDeriveBranchName_MissingTicket(t *testing.T) {
+	result := registryDeriveBranchName(map[string]any{"ticket_type": "Bug"})
+	if !result.IsError {
+		t.Fatal("want error when ticket missing, got none")
+	}
+}
+
+// ── registryInferAuditType ───────────────────────────────────────────────────────
+
+func TestRegistryInferAuditType_ByPrefix(t *testing.T) {
+	cases := map[string]string{
+		"feat/ONE-1-thing":     "feature",
+		"fix/ONE-1-thing":      "bugfix",
+		"chore/ONE-1-thing":    "chore",
+		"refactor/ONE-1-thing": "refactor",
+		"docs/ONE-1-thing":     "docs",
+		"test/ONE-1-thing":     "test",
+		"weird/ONE-1-thing":    "chore",
+		"no-slash-branch":      "chore",
+	}
+	for branch, want := range cases {
+		result := registryInferAuditType(map[string]any{"branch": branch})
+		var resp map[string]any
+		json.Unmarshal([]byte(result.Content[0].Text), &resp)
+		if resp["type"] != want {
+			t.Errorf("branch %q: want type %q, got %v", branch, want, resp["type"])
+		}
+	}
+}
+
+// ── registryIsFakeTicket ──────────────────────────────────────────────────────────
+
+func TestRegistryIsFakeTicket_TrueWithinCounter(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	writeProjectData(t, "private-dotfiles", map[string]any{"name": "private-dotfiles", "ticket_counter": "29"})
+
+	result := registryIsFakeTicket(map[string]any{"name": "private-dotfiles", "ticket": "DOTFILES-15"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	if resp["is_fake"] != true {
+		t.Errorf("want is_fake=true, got %v", resp["is_fake"])
+	}
+}
+
+func TestRegistryIsFakeTicket_FalseForRealJiraKey(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	writeProjectData(t, "emily", map[string]any{"name": "emily"})
+
+	result := registryIsFakeTicket(map[string]any{"name": "emily", "ticket": "ONE-25305"})
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	if resp["is_fake"] != false {
+		t.Errorf("want is_fake=false, got %v", resp["is_fake"])
+	}
+}
+
+func TestRegistryIsFakeTicket_FalseWhenBeyondCounter(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	writeProjectData(t, "private-dotfiles", map[string]any{"name": "private-dotfiles", "ticket_counter": "5"})
+
+	result := registryIsFakeTicket(map[string]any{"name": "private-dotfiles", "ticket": "DOTFILES-99"})
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	if resp["is_fake"] != false {
+		t.Errorf("want is_fake=false (beyond counter), got %v", resp["is_fake"])
+	}
+}
+
+func TestRegistryIsFakeTicket_ExplicitPrefixOverride(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	writeProjectData(t, "custom-project", map[string]any{"name": "custom-project", "ticket_counter": "3"})
+
+	result := registryIsFakeTicket(map[string]any{"name": "custom-project", "ticket": "CUST-2", "prefix": "CUST"})
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	if resp["is_fake"] != true {
+		t.Errorf("want is_fake=true with explicit prefix, got %v", resp["is_fake"])
+	}
+}
+
+// ── registryUnionFiles ────────────────────────────────────────────────────────────
+
+func TestRegistryUnionFiles_DedupesPreservingOrder(t *testing.T) {
+	result := registryUnionFiles(map[string]any{
+		"file_groups": []any{
+			[]any{"a.go", "b.go"},
+			[]any{"b.go", "c.go"},
+			[]any{"a.go"},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp map[string]any
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+	files, ok := resp["files"].([]any)
+	if !ok {
+		t.Fatalf("want files array, got %T", resp["files"])
+	}
+	want := []string{"a.go", "b.go", "c.go"}
+	if len(files) != len(want) {
+		t.Fatalf("want %v, got %v", want, files)
+	}
+	for i, f := range files {
+		if f != want[i] {
+			t.Errorf("index %d: want %q, got %v", i, want[i], f)
+		}
+	}
+}
+
+func TestRegistryUnionFiles_MissingFileGroups(t *testing.T) {
+	result := registryUnionFiles(map[string]any{})
+	if !result.IsError {
+		t.Fatal("want error when file_groups missing, got none")
+	}
+}

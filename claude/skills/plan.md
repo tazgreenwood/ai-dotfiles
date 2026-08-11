@@ -236,11 +236,7 @@ When the user approves, persist the plan via registry MCP:
 
 **`parallel_group`** (int, only meaningful when `execution` is `"async"`): identifies which group of concurrently-run steps this step belongs to. `null`/omitted for `"sync"` steps.
 
-**Branch name**: derive from issue type and ticket key. This applies to both real JIRA keys (e.g. `ONE-XXXX`) and auto-generated fake ticket keys (e.g. `DOTFILES-3`) — the convention is identical:
-- Story / Task / Feature → `feat/ONE-XXXX-short-desc`
-- Bug / Defect → `fix/ONE-XXXX-short-desc`
-- Research → `research/ONE-XXXX-short-desc`
-- Refactor / Maintenance → `chore/ONE-XXXX-short-desc`
+**Branch name**: call `registry_derive_branch_name(ticket, ticket_type, description)` — deterministic prefix (feat/fix/research/chore) + slugified description. Applies identically to real JIRA keys and auto-generated fake ticket keys.
 
 **base_branch**: call `registry_get_project(project_name)` and read the `base_branch` field. Fall back to `staging` if not set or registry unavailable.
 

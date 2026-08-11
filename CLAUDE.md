@@ -184,6 +184,18 @@ Appends a structured interaction event to the project's event log. `type` exampl
 #### `registry_get_events(name: string, type?: string, since?: string, until?: string) -> {entries: [map[string]any], total: int}`
 Queries the event log, optionally filtered by `type` and date range (ISO 8601, inclusive, matched against `occurred_at`).
 
+#### `registry_derive_branch_name(ticket: string, ticket_type?: string, description?: string) -> {branch: string, prefix: string} | error`
+Deterministic branch-name derivation: `ticket_type` maps to a prefix (Story/Task/Feature→`feat`, Bug/Defect→`fix`, Research→`research`, Refactor/Maintenance→`chore`; unrecognized types default to `chore`), `description` is slugified (lowercased, non-alphanumeric collapsed to `-`, truncated to 40 chars) and appended.
+
+#### `registry_infer_audit_type(branch: string) -> {type: string}`
+Maps a branch's prefix (before the first `/`) to an audit `type`: `feat`→`feature`, `fix`→`bugfix`, `chore`→`chore`, `refactor`→`refactor`, `docs`→`docs`, `test`→`test`. Unrecognized prefixes default to `chore`.
+
+#### `registry_is_fake_ticket(name: string, ticket: string, prefix?: string) -> {is_fake: bool}`
+Checks whether `ticket` is a registry auto-generated fake ticket (vs. a real JIRA key) by comparing its numeric suffix against the project's `ticket_counter`. `prefix` defaults to the last hyphen-segment of `name`, uppercased (e.g. `private-dotfiles` → `DOTFILES`) — override when a project's ticket prefix doesn't follow that convention.
+
+#### `registry_union_files(file_groups: [[string]]) -> {files: [string]}`
+Flattens and deduplicates multiple file-path arrays into one union, preserving first-occurrence order.
+
 ---
 
 ## Skills Status
@@ -282,6 +294,15 @@ Queries the event log, optionally filtered by `type` and date range (ISO 8601, i
   - Rely on `Workflow`'s `isolation: 'worktree'` option for async step parallelism: unverified whether its semantics (base ref, auto-merge, cleanup timing) match the exact branch-off-feature-branch + sequential-index-order-merge requirement; hand-rolled git commands via agent calls match `build.md`'s existing, proven flow without the assumption.
   - Convert all of `/ship` to a Workflow script: most of it (documenter, handover, audit write, JIRA transition) is already a short linear sequence: no complexity to gain by scripting it, and the REJECTED branch genuinely needs a human in the loop.
 - **Consequences**: `/build`'s retry counts, run partitioning, and merge ordering can no longer be skipped or miscounted by an LLM improvising the loop — they're real JS control flow in `claude/workflows/build-workflow.js`. `/build` now runs as a background `Workflow` task rather than narrating step-by-step inline in the same chat turn (matches its existing "check back later" design intent; `/workflows` gives live progress if wanted). Bug/Defect plans now cite a confirmed root cause instead of the raw ticket symptom. PR reviews are queryable history instead of one-off HTML reports. Worktree-isolation semantics for async build steps should be empirically verified against a real (low-stakes) ticket before trusting it on client-repo work.
+- **Follow-up [2026-08-11]**: Live end-to-end test of `build-workflow.js` against a scratch `DOTFILES-29` ticket (sync path only) initially failed — `args` arrived at the script as a JSON-encoded string rather than the parsed object the `Workflow` tool's docs describe. Fixed by defensively `JSON.parse`-ing `args` at the top of all three workflow scripts. Re-run succeeded: developer → QA → commit all completed, `registry_update_step` marked the step done. Async/worktree path remains unverified — test before trusting on real multi-step async plans.
+
+### [2026-08-11] — Deterministic helpers offloaded from LLM prose to registry MCP tools
+- **Context**: Several steps in `plan.md`/`ship.md` asked the LLM to compute pure, deterministic string/logic operations from prose rules every run — branch-name derivation (issue-type → prefix + slug), audit `type` inference from branch prefix, fake-vs-real ticket detection (compare against `ticket_counter`), and `files_changed` union/dedup across plan steps. None of these need judgment; all are candidates for token savings and zero ambiguity, matching the pattern `validatePlanSteps` already established server-side for async-group file-overlap checks.
+- **Decision**: Added four new registry MCP tools — `registry_derive_branch_name`, `registry_infer_audit_type`, `registry_is_fake_ticket`, `registry_union_files` — as pure Go functions with unit tests. `plan.md` STEP 8 and `ship.md` STEPS 5–6 now call these instead of deriving the values from prose.
+- **Rejected alternatives**:
+  - Leave as LLM-computed prose: works today because the rules are simple, but every run re-spends tokens re-deriving values that have exactly one correct answer, and any future rule change means updating prose in multiple skill files instead of one Go function.
+  - Standalone script/binary invoked via Bash instead of an MCP tool: registry MCP is already the established home for this exact pattern (deterministic derivations needing project/ticket state); no new invocation mechanism needed.
+- **Consequences**: These four are pure functions — no side effects, easy to unit test, easy to extend. Other deterministic-logic candidates in the pipeline can follow the same pattern opportunistically; no need for another dedicated pass.
 
 ---
 
