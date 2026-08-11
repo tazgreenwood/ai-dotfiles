@@ -64,7 +64,7 @@ Return one of:
 
 phase('Review')
 
-const ctx = args
+const ctx = typeof args === 'string' ? JSON.parse(args) : args
 const findings = await parallel(
   DIMENSIONS.map(d => () =>
     agent(dimensionPrompt(ctx, d), { phase: 'Review', label: `review:${d.key}`, agentType: 'cavecrew-reviewer' })

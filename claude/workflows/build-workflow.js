@@ -190,7 +190,7 @@ function partitionRuns(steps) {
 
 phase('Execute')
 
-const ctx = args
+const ctx = typeof args === 'string' ? JSON.parse(args) : args
 const runs = partitionRuns(ctx.plan_data.plan_steps)
 const results = []
 

@@ -55,7 +55,7 @@ Return one of:
 
 phase('Security')
 
-const ctx = args
+const ctx = typeof args === 'string' ? JSON.parse(args) : args
 let security = 'SECURITY STATUS: GO'
 if (ctx.high_risk_diffs) {
   security = await agent(securityPrompt(ctx), { phase: 'Security', agentType: 'security' })
