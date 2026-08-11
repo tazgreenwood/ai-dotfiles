@@ -95,6 +95,26 @@ Skip if no reusable external resources were encountered.
 
 ---
 
+## STEP 6a: TICKET HANDOFF (if no ticket was provided)
+
+Only runs when the investigation started from a free-form question (STEP 6 doesn't apply).
+
+If the "Recommended next step" in STEP 4 calls for real follow-up work (not "no action needed"), ask:
+
+> This investigation surfaced [N] finding(s) that need follow-up. Create a ticket from this?
+
+**If yes:** hand off to `ticket.md`'s flow, pre-filled from the handoff document:
+- **Title**: the investigation's title/question
+- **Type**: `Bug` if findings describe broken behavior, `Task`/`Story` otherwise
+- **Description**: the "What we found" and "Recommended next step" sections, verbatim
+- **Acceptance criteria**: seed from the Recommended next step's `Action` field; let the user refine during `ticket.md`'s STEP 2 confirm
+
+Run `ticket.md`'s STEP 1.5 (duplicate check) before creating — an investigation may surface something already tracked.
+
+**If no or "no action needed":** skip this step entirely.
+
+---
+
 ## STEP 7: OUTPUT
 
 Deliver the handoff document. Then:
@@ -104,6 +124,7 @@ INVESTIGATE COMPLETE
 Ticket: ONE-XXXX (if applicable)
 Confidence: [High/Medium/Low]
 JIRA: [commented / transitioned / skipped]
+New ticket: [ONE-XXXX / not created]  ← only when STEP 6a ran
 ```
 
 If `@investigator` returned `INCONCLUSIVE`, include that in the TL;DR and recommend a follow-up investigation or ticket.
