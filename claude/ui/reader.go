@@ -114,6 +114,7 @@ type EventEntry struct {
 	Why           string   `json:"why,omitempty"`
 	DiffOverview  string   `json:"diff_overview,omitempty"`
 	ExecutionMode string   `json:"execution_mode,omitempty"`
+	ExecutionLog  string   `json:"execution_log,omitempty"`
 	Suggestions   []string `json:"suggestions,omitempty"`
 }
 
@@ -408,6 +409,28 @@ func ReadEvents(name, eventType, since, until string) ([]EventEntry, error) {
 		entries = []EventEntry{}
 	}
 	return entries, nil
+}
+
+func ReadEvent(name string, id int64) (EventEntry, error) {
+	db, err := openDB()
+	if err != nil {
+		return EventEntry{}, err
+	}
+	defer db.Close()
+
+	var occurredAt, raw string
+	if err := db.QueryRow(
+		`SELECT occurred_at, data FROM events WHERE project = ? AND id = ?`, name, id,
+	).Scan(&occurredAt, &raw); err != nil {
+		return EventEntry{}, err
+	}
+	var e EventEntry
+	if err := json.Unmarshal([]byte(raw), &e); err != nil {
+		return EventEntry{}, err
+	}
+	e.ID = id
+	e.OccurredAt = occurredAt
+	return e, nil
 }
 
 func ReadAudit(name, since, until string) ([]AuditEntry, error) {

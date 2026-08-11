@@ -13,6 +13,13 @@ const plansPerPage = 10
 //go:embed templates
 var templateFS embed.FS
 
+func dateOnly(ts string) string {
+	if len(ts) >= 10 {
+		return ts[:10]
+	}
+	return ts
+}
+
 type sidebarItem struct {
 	Name      string
 	PlanCount int
@@ -52,12 +59,7 @@ func render(w http.ResponseWriter, page string, data any) {
 		"add":             func(a, b int) int { return a + b },
 		"sub":             func(a, b int) int { return a - b },
 		"groupColorClass": groupColorClass,
-		"dateOnly": func(ts string) string {
-			if len(ts) >= 10 {
-				return ts[:10]
-			}
-			return ts
-		},
+		"dateOnly": dateOnly,
 	}).ParseFS(templateFS, "templates/base.html", "templates/"+page)
 	if err != nil {
 		http.Error(w, "template parse error: "+err.Error(), http.StatusInternalServerError)
@@ -318,6 +320,38 @@ func handleDeployChecks(w http.ResponseWriter, r *http.Request) {
 		Until:       until,
 	}
 	render(w, "deploy_checks.html", data)
+}
+
+func handleReviewDetail(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	name := r.PathValue("name")
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	entry, err := ReadEvent(name, id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	data := reviewData{
+		Breadcrumbs: []breadcrumb{
+			{Label: "Registry", URL: "/"},
+			{Label: name, URL: "/projects/" + name},
+			{Label: "Reviews", URL: "/projects/" + name + "/reviews"},
+			{Label: idStr},
+		},
+		Title:         "Review — " + dateOnly(entry.OccurredAt) + " — " + entry.Verdict,
+		Summary:       entry.Summary,
+		Why:           entry.Why,
+		DiffOverview:  entry.DiffOverview,
+		ExecutionMode: entry.ExecutionMode,
+		ExecutionLog:  entry.ExecutionLog,
+		Suggestions:   entry.Suggestions,
+	}
+	render(w, "review.html", data)
 }
 
 func handleReviewsList(w http.ResponseWriter, r *http.Request) {

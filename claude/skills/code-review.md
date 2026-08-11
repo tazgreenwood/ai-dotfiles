@@ -176,12 +176,13 @@ data: {
   why: [PR title+description or branch+commits, from STEP 2],
   diff_overview: [files changed, additions/deletions, from STEP 3],
   execution_mode: [real / mock, from STEP 6],
+  execution_log: [captured stdout/stderr or mock invocation output, from STEP 6],
   suggestions: [findings list from STEP 5, each tagged with severity]
 }
 ```
 `project_name` is detected the same way as `/plan` (parse from `git remote get-url origin`). If registry MCP is unavailable, skip this step silently — do not block the report on it.
 
-This makes the review viewable later at `/projects/{name}/reviews` in registry-ui.
+This makes the review viewable later at `/projects/{name}/reviews` in registry-ui, with a click-through detail page per review at `/projects/{name}/reviews/{id}`.
 
 ---
 

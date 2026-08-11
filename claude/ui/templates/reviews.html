@@ -17,7 +17,9 @@
     {{if .Entries}}
       {{range .Entries}}
       <tr class="border-b border-zinc-100 dark:border-zinc-800/60 hover:bg-zinc-50 dark:hover:bg-zinc-900/60">
-        <td class="py-2 pl-4 pr-4 text-zinc-700 dark:text-zinc-300 font-mono text-xs">{{dateOnly .OccurredAt}}</td>
+        <td class="py-2 pl-4 pr-4 text-zinc-700 dark:text-zinc-300 font-mono text-xs">
+          <a href="/projects/{{$.ProjectName}}/reviews/{{.ID}}" class="hover:underline">{{dateOnly .OccurredAt}}</a>
+        </td>
         <td class="py-2 pr-4">
           {{if eq .Verdict "APPROVED"}}
           <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-1 ring-inset ring-emerald-500/20">{{.Verdict}}</span>
@@ -27,7 +29,9 @@
           <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-500/10 text-amber-700 dark:text-amber-400 ring-1 ring-inset ring-amber-500/20">{{.Verdict}}</span>
           {{end}}
         </td>
-        <td class="py-2 pr-4 text-zinc-800 dark:text-zinc-200">{{.Summary}}</td>
+        <td class="py-2 pr-4 text-zinc-800 dark:text-zinc-200">
+          <a href="/projects/{{$.ProjectName}}/reviews/{{.ID}}" class="hover:underline">{{.Summary}}</a>
+        </td>
         <td class="py-2 pr-4 text-zinc-600 dark:text-zinc-400">{{.Why}}</td>
       </tr>
       {{end}}

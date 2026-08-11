@@ -145,9 +145,9 @@
   <ul class="space-y-2">
     {{range .RecentReviews}}
     <li class="flex items-baseline gap-3 text-sm">
-      <span class="text-zinc-400 dark:text-zinc-500 font-mono w-24 shrink-0">{{dateOnly .OccurredAt}}</span>
+      <a href="/projects/{{$.Project.Name}}/reviews/{{.ID}}" class="text-zinc-400 dark:text-zinc-500 font-mono w-24 shrink-0 hover:underline">{{dateOnly .OccurredAt}}</a>
       <span class="text-zinc-600 dark:text-zinc-300 font-mono shrink-0">{{.Verdict}}</span>
-      <span class="text-zinc-700 dark:text-zinc-300">{{.Summary}}</span>
+      <a href="/projects/{{$.Project.Name}}/reviews/{{.ID}}" class="text-zinc-700 dark:text-zinc-300 hover:underline">{{.Summary}}</a>
     </li>
     {{end}}
   </ul>
