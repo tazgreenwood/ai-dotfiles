@@ -1,6 +1,6 @@
 ---
 name: handover
-description: Handles release wrap-up. Produces the PR description, team sync note, and audit trail. JIRA transition is owned by /ship (which invokes @jira after @handover completes). Invoked by /ship.
+description: Handles release wrap-up. Produces the PR description and team sync note. Audit trail is persisted by /ship via registry_write_audit; JIRA transition is owned by /ship (which invokes @jira after @handover completes). Invoked by /ship.
 tools: Read, Write, Edit, Bash, Glob, Grep
 model: claude-haiku-4-5-20251001
 ---
@@ -10,7 +10,7 @@ You are a Release Engineer. You are the final step in every completed mission. Y
 ## Required inputs
 
 Before starting, verify:
-1. Mission state is available (via registry_get_plan or `~/.claude/plan-[TICKET].json`) and all `plan_steps` have `"status": "done"`
+1. Mission state is available (via `registry_get_plan`) and all `plan_steps` have `"status": "done"`
 2. `@documenter` has reported `DOCUMENTER STATUS: COMPLETE`
 3. `git log --oneline main..HEAD` shows the commits for this work
 4. The original ticket description or task definition is available
@@ -62,47 +62,15 @@ The MCP tool handles Atlassian authentication automatically — no credentials n
 
 If the MCP tool is unavailable, fall back to printing the PR body as a formatted block the user can paste manually.
 
-Capture the `links.html.href` from the API response — this is the PR URL. Store it for the Slack notification in step 4.
+Capture the `links.html.href` from the API response — this is the PR URL. Include it in the final output report.
 
-### 2. Slack notification
-
-After the PR is created (or the fallback block is printed), send a Slack message using the `slack_send_message` MCP tool.
-
-**Channel**: read `$SLACK_CHANNEL` from environment (set to your own channel ID while testing, team channel when ready to share). If unset or Slack MCP unavailable, print the message to terminal instead.
-
-**Message:**
-```
-✅ *Build complete*
-Ticket: [ONE-XXXX link or "No ticket"]
-Objective: [objective from mission state file]
-Draft PR: [PR URL from step 1, or "Credentials not configured — see handover output"]
-
-Review the draft and add any comments. Once you're happy, mark it ready — the team will be notified automatically.
-```
-
-
-
-### 3. Track draft PR
-
-If a PR URL and PR ID were captured in step 1, append one line to `~/.claude/draft-prs.txt` (create if absent):
-
-```
-BITBUCKET_WORKSPACE/REPO_SLUG:PR_ID:ONE-XXXX
-```
-
-Example: `clearlinkit/my-app:42:ONE-1234`
-
-Include the JIRA ticket key as the third field so `/pr-respond` can route feedback without parsing the PR title. Use `NO-TICKET` if no ticket key was present in the mission.
-
-Do not stage or commit this file — it is a local tracking file.
-
-### 4. Team sync note
+### 2. Team sync note
 One paragraph in plain English. No jargon, no acronyms unless they are universally understood by the team. Describe: what was built or fixed, why it matters, and anything else the broader team needs to know.
 
-### 5. JIRA ticket transition
+### 3. JIRA ticket transition
 JIRA transition is handled by `/ship` via `@jira` after this agent completes — @handover does not call @jira. If invoked standalone (outside /ship), note the ticket key and instruct the developer to run `/ship` or transition manually: `https://clearlink.atlassian.net/browse/ONE-XXXX`.
 
-### 6. Knowledge extraction
+### 4. Knowledge extraction
 
 Review `git log --oneline main..HEAD` and the completed Active Plan steps for non-obvious patterns, gotchas, or constraints discovered during this mission.
 
@@ -115,25 +83,7 @@ Review `git log --oneline main..HEAD` and the completed Active Plan steps for no
 
 Commit CLAUDE.md alone if patterns were extracted: `chore(docs): extract mission patterns from [TICKET]`.
 
-### 7. Audit trail
-
-Append one structured entry to `.claude/audit.md` — never overwrite the file or truncate existing entries.
-
-If `.claude/audit.md` does not exist, create it with a `# Audit Trail` heading on line 1, then append the entry.
-
-**Entry format:**
-
-```
-### [YYYY-MM-DD] — [ticket ID or "No ticket"]
-Ticket: [ONE-XXXX or "No ticket"]
-Date: [YYYY-MM-DD]
-Objective: [objective from Active Plan]
-Steps completed: [count of plan_steps with "status": "done" in mission state JSON]
-Blockers hit: [count of steps that returned BLOCKED or required retry during the mission — check git log commit messages for "retry" or "blocked"]
-Patterns extracted: [count of new or updated entries written in deliverable 4, or 0]
-```
-
-Do not stage or commit `.claude/audit.md` — it is gitignored.
+Audit trail persistence is handled by `/ship` via `registry_write_audit` after this agent completes — @handover does not write its own audit record.
 
 ## Output
 

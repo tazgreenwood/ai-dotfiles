@@ -87,23 +87,13 @@ Pass:
 
 ### Graph mode (`--graph`)
 
-Spike: isolated-context multi-agent fan-out, to compare against the single-pass default above before committing to the pattern elsewhere.
+Isolated-context multi-agent fan-out: 4 dimension reviewers in parallel, then one synthesis pass. Runs as a deterministic Workflow script, not improvised fan-out — the 4-way parallel dispatch and the single synthesis call are real control flow, not prose an LLM re-derives each run.
 
-Fire 4 parallel `Agent` calls (subagent_type: `cavecrew-reviewer`), each scoped to exactly one review dimension. Each call is a fresh, isolated invocation — no agent sees another agent's output, and no agent's prompt references the existence of the other three. Each gets the same base context (full diff, PR title/description or branch name + commit messages, CLAUDE.md contents if available) plus a dimension-specific instruction:
+Call the `Workflow` tool with:
+- `scriptPath`: `claude/workflows/code-review-workflow.js`
+- `args`: `{ diff, acceptance_spec, claude_md }` — `diff` from STEP 3, `acceptance_spec` is the PR title/description (PR mode) or branch name + recent commit messages (local mode), `claude_md` from STEP 4 (omit if unavailable)
 
-1. **Bugs/correctness**: "Review this diff for correctness bugs only — logic errors, off-by-one, null/nil handling, race conditions, broken control flow. Ignore security, scope, and style. Do not praise. Return findings only."
-2. **Security**: "Review this diff for security issues only — injection, auth/authz gaps, secret exposure, unsafe deserialization, unvalidated input. Ignore correctness, scope, and style. Do not praise. Return findings only."
-3. **Scope/AC**: "Review this diff for scope only — does it match the stated PR title/description or commit messages (the acceptance spec)? Flag anything out-of-scope, missing, or over-built. Ignore correctness, security, and style. Do not praise. Return findings only."
-4. **Style**: "Review this diff for style only — naming conventions, dead code, formatting, consistency with CLAUDE.md conventions and domain glossary. Ignore correctness, security, and scope. Do not praise. Return findings only."
-
-Once all 4 dimension agents return, invoke one more `Agent` call (subagent_type: `reviewer`) as the synthesis pass. Pass it:
-- The full diff
-- The PR title/description or branch name + commit messages
-- CLAUDE.md contents (if available)
-- All 4 dimension-reviewer outputs, labeled by dimension
-- Instruction: "You are given 4 independent dimension reviews (bugs/correctness, security, scope, style) of the same diff. Dedupe overlapping findings, merge related ones, and produce a single consolidated verdict. Do not praise. Return findings only."
-
-The synthesis agent returns APPROVED, APPROVED WITH WARNINGS, or REJECTED with the merged findings list — same contract as default mode. Use this as the STEP 5 output for the rest of the skill (STEP 6 onward proceed identically regardless of mode).
+The script returns `{ dimensions: [...], synthesis }` where `synthesis` is the merged verdict (APPROVED / APPROVED WITH WARNINGS / REJECTED) with deduped findings — same contract as default mode. Use `synthesis` as the STEP 5 output for the rest of the skill (STEP 6 onward proceed identically regardless of mode).
 
 ---
 
@@ -173,6 +163,25 @@ open "$f"
 ```
 
 If `open` is unavailable (non-macOS), print the file path to the user instead.
+
+---
+
+## STEP 7a: SAVE TO REGISTRY
+
+Call `registry_write_event(project_name, "pr_review", data)` with:
+```
+data: {
+  summary: [one-paragraph overview from STEP 7],
+  verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED],
+  why: [PR title+description or branch+commits, from STEP 2],
+  diff_overview: [files changed, additions/deletions, from STEP 3],
+  execution_mode: [real / mock, from STEP 6],
+  suggestions: [findings list from STEP 5, each tagged with severity]
+}
+```
+`project_name` is detected the same way as `/plan` (parse from `git remote get-url origin`). If registry MCP is unavailable, skip this step silently — do not block the report on it.
+
+This makes the review viewable later at `/projects/{name}/reviews` in registry-ui.
 
 ---
 

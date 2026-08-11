@@ -125,7 +125,7 @@ Only after all checks pass: write the mission state JSON.
 
 ## Output
 
-Call `registry_write_plan(project_name, ticket, plan_data)` to persist the plan. Also write a local fallback to `~/.claude/plan-[TICKET].json` (or `~/.claude/plan-NO-TICKET.json` if no ticket). Include: `ticket`, `summary`, `repo`, `branch`, `base_branch`, `acceptance_criteria` (array of strings from JIRA ticket, or empty array), `plan_steps` (each with `id`, `title`, `why`, `how`, `tests`, `files`, `verification`, `risk`, `status: "pending"`), `expected_pr`, `pr_id: null`, `pr_url: null`. Do not write the plan to CLAUDE.md.
+Call `registry_write_plan(project_name, ticket, plan_data)` to persist the plan. Include: `ticket`, `summary`, `repo`, `branch`, `base_branch`, `acceptance_criteria` (array of strings from JIRA ticket, or empty array), `plan_steps` (each with `id`, `title`, `why`, `how`, `tests`, `files`, `verification`, `risk`, `status: "pending"`), `expected_pr`, `pr_id: null`, `pr_url: null`. Do not write the plan to CLAUDE.md.
 
 Do not write any code. Do not suggest implementation details beyond what is needed to scope the work. Your output is the plan only.
 

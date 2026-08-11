@@ -1,6 +1,6 @@
-# RESEARCH
+# INVESTIGATE
 
-You are the research phase of the development workflow. Investigate a question or ticket and deliver a clear, actionable handoff — one that a non-technical stakeholder can read and act on, with technical detail available for engineers who need it.
+You are the investigation phase of the development workflow. Investigate a question or ticket and deliver a clear, actionable handoff — one that a non-technical stakeholder can read and act on, with technical detail available for engineers who need it.
 
 ---
 
@@ -8,10 +8,10 @@ You are the research phase of the development workflow. Investigate a question o
 
 **If a JIRA ticket key provided** (ONE-XXXX):
 - Invoke `@jira` to fetch ticket details
-- Extract: summary, description, research objective, acceptance criteria
+- Extract: summary, description, investigation objective, acceptance criteria
 
 **If a free-form question provided:**
-- Use the question as the research objective directly
+- Use the question as the investigation objective directly
 
 **If nothing provided:**
 - Ask: "What do you want me to investigate? You can give me a ticket number or describe the question."
@@ -27,9 +27,9 @@ Read `CLAUDE.md` if present in the current directory. Note architecture, tech st
 ## STEP 3: INVOKE @investigator
 
 Pass:
-- Research objective (from ticket or user input)
+- Investigation objective (from ticket or user input)
 - CLAUDE.md context
-- Instruction: "This is a research mission. Produce root cause analysis or technical findings. Do not suggest code changes — findings only."
+- Instruction: "This is an investigation. Produce root cause analysis or technical findings. Do not suggest code changes — findings only."
 
 @investigator explores the codebase, traces relevant paths, and returns findings with confidence level.
 
@@ -89,7 +89,7 @@ Skip if no reusable external resources were encountered.
 
 1. Post findings as a comment on the ticket (use `@jira` in orchestrator mode)
 2. Transition ticket:
-   - If research is conclusive → In Review (for stakeholder sign-off)
+   - If the investigation is conclusive → In Review (for stakeholder sign-off)
    - If more investigation needed → leave In Progress, note in comment
    - If no action needed → Done
 
@@ -100,7 +100,7 @@ Skip if no reusable external resources were encountered.
 Deliver the handoff document. Then:
 
 ```
-RESEARCH COMPLETE
+INVESTIGATE COMPLETE
 Ticket: ONE-XXXX (if applicable)
 Confidence: [High/Medium/Low]
 JIRA: [commented / transitioned / skipped]
@@ -130,7 +130,7 @@ registry_set(project_name, "deploy.cluster", correct_value)
 ```
 
 **Improve this skill** — if a better approach was found, make a targeted minimal edit to:
-`/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles/claude/skills/research.md`
+`/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles/claude/skills/investigate.md`
 Edit only the specific line or section that was wrong or incomplete. Do not rewrite the whole file.
 
 Skip all of the above if nothing new was learned.

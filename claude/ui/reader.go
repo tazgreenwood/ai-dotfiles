@@ -106,6 +106,17 @@ type DeployCheckEntry struct {
 	RecordedAt   string `json:"_recorded_at,omitempty"`
 }
 
+type EventEntry struct {
+	ID            int64    `json:"id,omitempty"`
+	OccurredAt    string   `json:"occurred_at,omitempty"`
+	Summary       string   `json:"summary,omitempty"`
+	Verdict       string   `json:"verdict,omitempty"`
+	Why           string   `json:"why,omitempty"`
+	DiffOverview  string   `json:"diff_overview,omitempty"`
+	ExecutionMode string   `json:"execution_mode,omitempty"`
+	Suggestions   []string `json:"suggestions,omitempty"`
+}
+
 func dataDir() string {
 	if d := os.Getenv("REGISTRY_DATA_DIR"); d != "" {
 		return d
@@ -342,6 +353,59 @@ func ReadDeployChecks(name, since, until string) ([]DeployCheckEntry, error) {
 	}
 	if entries == nil {
 		entries = []DeployCheckEntry{}
+	}
+	return entries, nil
+}
+
+func ReadEvents(name, eventType, since, until string) ([]EventEntry, error) {
+	db, err := openDB()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	query := `SELECT id, occurred_at, data FROM events WHERE project = ?`
+	args := []any{name}
+	if eventType != "" {
+		query += ` AND type = ?`
+		args = append(args, eventType)
+	}
+	if since != "" {
+		query += ` AND occurred_at >= ?`
+		args = append(args, since)
+	}
+	if until != "" {
+		query += ` AND occurred_at <= ?`
+		args = append(args, until)
+	}
+	query += ` ORDER BY occurred_at DESC`
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []EventEntry
+	for rows.Next() {
+		var id int64
+		var occurredAt, raw string
+		if err := rows.Scan(&id, &occurredAt, &raw); err != nil {
+			return nil, err
+		}
+		var e EventEntry
+		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			continue
+		}
+		e.ID = id
+		e.OccurredAt = occurredAt
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if entries == nil {
+		entries = []EventEntry{}
 	}
 	return entries, nil
 }

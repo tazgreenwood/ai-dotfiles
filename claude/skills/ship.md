@@ -24,43 +24,25 @@ Read `CLAUDE.md` — note Rules, Architecture, API Contracts.
 
 ---
 
-## STEP 2: INVOKE @security
+## STEP 2: RUN THE SHIP-REVIEW WORKFLOW
 
-Scan mission state for any steps where `"risk": "HIGH"` in plan step JSON.
+Scan mission state for any steps where `"risk": "HIGH"` in plan step JSON. If any exist, gather their diffs (`git show [commit-sha]` for each HIGH-risk step's commit) as `high_risk_diffs`; otherwise omit it.
 
-**If any HIGH-risk steps exist:**
-Invoke `@security` with:
-- The diff for those steps (`git show [commit-sha]` for each HIGH-risk step's commit)
-- CLAUDE.md Rules and API Contracts
-- The Expected PR section from mission state
+Call the `Workflow` tool with:
+- `scriptPath`: `claude/workflows/ship-review-workflow.js`
+- `args`: `{ high_risk_diffs, expected_pr, files_changed, acceptance_criteria, claude_md, diff }` — `files_changed` is the union of `plan_steps[].files` from mission state, `diff` is `git diff [base_branch]...HEAD` output, `claude_md` is the CLAUDE.md contents (Rules and API Contracts at minimum).
 
-If `@security` returns `SECURITY STATUS: BLOCK`: stop. Surface the findings to the user. Do not create the PR until resolved.
-If `@security` returns `SECURITY STATUS: GO WITH WARNINGS`: proceed, include warnings in the PR under `### Security Notes`.
+This runs `@security` (skipped automatically when `high_risk_diffs` is omitted — no HIGH-risk steps) then the full `reviewer` agent (not cavecrew-reviewer — PR reviews span many files and need prose rationale, not compressed findings) as one deterministic pass, returning `{ security, reviewer }`.
 
-**If no HIGH-risk steps exist:** `@security` context gate handles this — it returns `GO` immediately. Proceed.
+**If `security` is `SECURITY STATUS: BLOCK`**: stop. Surface the findings to the user. Do not create the PR until resolved.
+**If `security` is `SECURITY STATUS: GO WITH WARNINGS`**: proceed, include warnings in the PR under `### Security Notes`.
 
----
-
-## STEP 3: INVOKE @reviewer
-
-Use the full `reviewer` agent (subagent_type: reviewer) — not cavecrew-reviewer. PR reviews span many files and require prose rationale, not compressed findings.
-
-Pass:
-- All files changed (from mission state `plan_steps[].files` union)
-- The `expected_pr` field from mission state JSON as the acceptance spec
-- The `acceptance_criteria` array from mission state JSON (empty array if not present)
-- CLAUDE.md contents
-- `git diff [base_branch]...HEAD` output
-
-@reviewer checks for correctness bugs, security, scope, AC satisfaction.
-
-**If REJECTED**: surface the rejection to the user with full reviewer output. Ask whether to fix (re-run `/build` with the reviewer feedback) or ship anyway. Do not proceed without user decision.
-
-**If APPROVED WITH WARNINGS**: proceed but include warnings in the PR description under a `### Reviewer Notes` section.
+**If `reviewer` is `REVIEWER STATUS: REJECTED`**: surface the rejection to the user with full reviewer output. Ask whether to fix (re-run `/build` with the reviewer feedback) or ship anyway. Do not proceed without user decision.
+**If `reviewer` is `REVIEWER STATUS: APPROVED WITH WARNINGS`**: proceed but include warnings in the PR description under a `### Reviewer Notes` section.
 
 ---
 
-## STEP 4: INVOKE @documenter
+## STEP 3: INVOKE @documenter
 
 Pass the completed plan steps and changed files. @documenter syncs:
 - API Contracts in CLAUDE.md
@@ -70,9 +52,9 @@ Pass the completed plan steps and changed files. @documenter syncs:
 
 ---
 
-## STEP 5: INVOKE @handover
+## STEP 4: INVOKE @handover
 
-@handover creates the Bitbucket draft PR and sends Slack notification.
+@handover creates the Bitbucket draft PR.
 
 Pass:
 - Mission state (ticket, branch, base_branch, pr_description from Expected PR)
@@ -92,7 +74,7 @@ registry_set(project_name, "deploy.cluster", cluster_name)
 
 ---
 
-## STEP 6: WRITE AUDIT TRAIL
+## STEP 5: WRITE AUDIT TRAIL
 
 After @handover completes, build a rich audit entry and call `registry_write_audit(project_name, entry)`.
 
@@ -131,7 +113,7 @@ If registry MCP is unavailable, do not write a local file as a substitute. Repor
 
 ---
 
-## STEP 7: TRANSITION JIRA
+## STEP 6: TRANSITION JIRA
 
 After @handover completes, transition the JIRA ticket from In Progress to Review.
 
@@ -146,7 +128,7 @@ If Atlassian MCP is unavailable, print: "JIRA transition skipped — MCP not con
 
 ---
 
-## STEP 8: CONFIRM
+## STEP 7: CONFIRM
 
 Output:
 ```
@@ -155,7 +137,6 @@ Ticket: ONE-XXXX → Review
 PR: [pr_url]
 Security: [GO / GO WITH WARNINGS / skipped]
 Branch: [branch] → [base_branch]
-Slack: notified
 ```
 
 ## SELF-IMPROVEMENT

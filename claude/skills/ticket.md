@@ -29,6 +29,21 @@ Wait for the user's response.
 
 ---
 
+## STEP 1.5: CHECK FOR DUPLICATES
+
+Search existing issues via `mcp__atlassian__jira_search_issues` (JQL on `projectKey = ONE`, matching the title/keywords). If a likely duplicate is found, surface it to the user before proceeding:
+
+```
+Found a possible duplicate: [ONE-XXXX] "[title]" ([status])
+https://clearlink.atlassian.net/browse/ONE-XXXX
+
+Create a new ticket anyway, or add a comment to the existing one instead?
+```
+
+If the user confirms a new ticket is warranted, continue to STEP 2. If they pick the existing ticket, add a comment via `mcp__atlassian__jira_add_comment` and stop.
+
+---
+
 ## STEP 2: CONFIRM BEFORE CREATING
 
 Summarize what you understood in a brief structured block. Ask the user to confirm or correct:

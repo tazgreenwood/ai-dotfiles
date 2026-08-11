@@ -52,6 +52,12 @@ func render(w http.ResponseWriter, page string, data any) {
 		"add":             func(a, b int) int { return a + b },
 		"sub":             func(a, b int) int { return a - b },
 		"groupColorClass": groupColorClass,
+		"dateOnly": func(ts string) string {
+			if len(ts) >= 10 {
+				return ts[:10]
+			}
+			return ts
+		},
 	}).ParseFS(templateFS, "templates/base.html", "templates/"+page)
 	if err != nil {
 		http.Error(w, "template parse error: "+err.Error(), http.StatusInternalServerError)
@@ -102,6 +108,7 @@ type projectData struct {
 	Plans              []planSummary
 	RecentAudit        []AuditEntry
 	RecentDeployChecks []DeployCheckEntry
+	RecentReviews      []EventEntry
 	IssueCount         int
 	Stats              projectStats
 	Page               int
@@ -163,6 +170,12 @@ type reviewData struct {
 	ExecutionMode string
 	ExecutionLog  string
 	Suggestions   []string
+}
+
+type reviewsListData struct {
+	Breadcrumbs []breadcrumb
+	ProjectName string
+	Entries     []EventEntry
 }
 
 func handleIndex(w http.ResponseWriter, _ *http.Request) {
@@ -307,6 +320,30 @@ func handleDeployChecks(w http.ResponseWriter, r *http.Request) {
 	render(w, "deploy_checks.html", data)
 }
 
+func handleReviewsList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	name := r.PathValue("name")
+	if _, err := ReadProject(name); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	entries, err := ReadEvents(name, "pr_review", "", "")
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	data := reviewsListData{
+		Breadcrumbs: []breadcrumb{
+			{Label: "Registry", URL: "/"},
+			{Label: name, URL: "/projects/" + name},
+			{Label: "Reviews"},
+		},
+		ProjectName: name,
+		Entries:     entries,
+	}
+	render(w, "reviews.html", data)
+}
+
 func handleProject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	name := r.PathValue("name")
@@ -360,6 +397,11 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 		stats.LatestDeployState = latest.Status
 	}
 
+	recentReviews, _ := ReadEvents(name, "pr_review", "", "")
+	if len(recentReviews) > 5 {
+		recentReviews = recentReviews[:5]
+	}
+
 	issues, _ := ReadIssues(name, "")
 	stats.OpenIssues = len(issues)
 
@@ -390,6 +432,7 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 		Plans:              pagedPlans,
 		RecentAudit:        recent,
 		RecentDeployChecks: recentDeployChecks,
+		RecentReviews:      recentReviews,
 		IssueCount:         len(issues),
 		Stats:              stats,
 		Page:               page,

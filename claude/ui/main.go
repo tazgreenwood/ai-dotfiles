@@ -20,6 +20,8 @@ func newRouter() http.Handler {
 
 	mux.HandleFunc("GET /projects/{name}/issues", handleIssues)
 
+	mux.HandleFunc("GET /projects/{name}/reviews", handleReviewsList)
+
 	mux.HandleFunc("GET /projects/{name}/events", handleEvents)
 
 	return mux

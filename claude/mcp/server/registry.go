@@ -426,6 +426,51 @@ func registryGetDeployChecks(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"entries": entries, "total": total})
 }
 
+func registryWriteEvent(args map[string]any) ToolResult {
+	name := str(args, "name")
+	eventType := str(args, "type")
+	data, ok := args["data"].(map[string]any)
+	if name == "" || eventType == "" || !ok {
+		return toolErr("name, type, and data required")
+	}
+	var tags []string
+	if raw, ok := args["tags"].([]any); ok {
+		for _, t := range raw {
+			if ts, ok := t.(string); ok {
+				tags = append(tags, ts)
+			}
+		}
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	total, err := s.WriteEvent(name, eventType, data, tags)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "total_entries": total})
+}
+
+func registryGetEvents(args map[string]any) ToolResult {
+	name := str(args, "name")
+	if name == "" {
+		return toolErr("name required")
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	entries, total, err := s.GetEvents(name, str(args, "type"), str(args, "since"), str(args, "until"))
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	if entries == nil {
+		entries = []map[string]any{}
+	}
+	return toolOK(map[string]any{"entries": entries, "total": total})
+}
+
 func allTools() []Tool {
 	return registryTools()
 }
@@ -602,6 +647,34 @@ func registryTools() []Tool {
 				"type": "object",
 				"properties": map[string]any{
 					"name":  map[string]any{"type": "string"},
+					"since": map[string]any{"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
+					"until": map[string]any{"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
+				},
+				"required": []string{"name"},
+			},
+		},
+		{
+			Name:        "registry_write_event",
+			Description: "Append an interaction event to the project's event log (e.g. pr_review, investigation, idea_validation)",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+					"type": map[string]any{"type": "string", "description": "Event type, e.g. pr_review, investigation, idea_validation"},
+					"data": map[string]any{"type": "object", "description": "Event payload, shape depends on type"},
+					"tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional tags for filtering"},
+				},
+				"required": []string{"name", "type", "data"},
+			},
+		},
+		{
+			Name:        "registry_get_events",
+			Description: "Query the project's event log, optionally filtered by type and date range",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":  map[string]any{"type": "string"},
+					"type":  map[string]any{"type": "string", "description": "Optional: filter to one event type"},
 					"since": map[string]any{"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
 					"until": map[string]any{"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
 				},

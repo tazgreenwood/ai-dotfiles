@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -76,6 +77,15 @@ func (s *store) createSchema() error {
 			data TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_deploy_checks_project_recorded_at ON deploy_checks(project, recorded_at)`,
+		`CREATE TABLE IF NOT EXISTS events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			type TEXT NOT NULL,
+			occurred_at TEXT NOT NULL,
+			data TEXT NOT NULL,
+			tags TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_project_type_occurred ON events(project, type, occurred_at)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -399,6 +409,75 @@ func (s *store) GetDeployChecks(project, since, until string) ([]map[string]any,
 		var entry map[string]any
 		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
 			return nil, 0, err
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return entries, len(entries), nil
+}
+
+// ── events ───────────────────────────────────────────────────────────────────
+
+func (s *store) WriteEvent(project, eventType string, data map[string]any, tags []string) (int, error) {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return 0, err
+	}
+	occurredAt := time.Now().UTC().Format(time.RFC3339)
+	tagStr := strings.Join(tags, ",")
+	if _, err := s.db.Exec(
+		`INSERT INTO events (project, type, occurred_at, data, tags) VALUES (?, ?, ?, ?, ?)`,
+		project, eventType, occurredAt, string(b), tagStr,
+	); err != nil {
+		return 0, err
+	}
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE project = ?`, project).Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func (s *store) GetEvents(project, eventType, since, until string) ([]map[string]any, int, error) {
+	query := `SELECT id, occurred_at, data, tags FROM events WHERE project = ?`
+	args := []any{project}
+	if eventType != "" {
+		query += ` AND type = ?`
+		args = append(args, eventType)
+	}
+	if since != "" {
+		query += ` AND occurred_at >= ?`
+		args = append(args, since)
+	}
+	if until != "" {
+		query += ` AND occurred_at <= ?`
+		args = append(args, until)
+	}
+	query += ` ORDER BY occurred_at DESC`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var entries []map[string]any
+	for rows.Next() {
+		var id int64
+		var occurredAt, raw, tags string
+		if err := rows.Scan(&id, &occurredAt, &raw, &tags); err != nil {
+			return nil, 0, err
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			return nil, 0, err
+		}
+		entry["id"] = id
+		entry["occurred_at"] = occurredAt
+		if tags != "" {
+			entry["tags"] = strings.Split(tags, ",")
 		}
 		entries = append(entries, entry)
 	}

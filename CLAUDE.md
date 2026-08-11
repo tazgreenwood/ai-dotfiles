@@ -21,15 +21,16 @@ Codebase = user-facing skills + supporting MCP tools:
 **Skills** (prompt files in `claude/skills/`):
 - `plan.md` — auto-gen ticket keys via registry counter; make plans w/ acceptance criteria
 - `ship.md` — review, test, doc, make PR, write audit trail
-- `jira.md` — direct JIRA access (lookup, create, transition, comment)
-- `confluence.md` — direct Confluence access (search, create, update pages)
-- `standup.md` — synth Yesterday/Today/Blockers from JIRA + Slack
-- `shipped.md` — work history report by month/quarter/year, optional narrative mode
 - `idea-validation.md` — agent-graph fan-out: idea-fleshing agent, then 4 parallel isolated research agents (competitor, market-trend, risk-assumption, technical-feasibility), synthesized into a self-contained HTML report
+
+**Workflow scripts** (`claude/workflows/`):
+- `build-workflow.js` — deterministic run-partitioning (sync/async), developer/QA retry loop, git-worktree lifecycle, sequential merge-back. Invoked by `build.md`, which is now a thin dispatcher.
+- `code-review-workflow.js` — `--graph` mode's 4-dimension parallel fan-out + synthesis, as real control flow. Invoked by `code-review.md`.
+- `ship-review-workflow.js` — security gate (HIGH-risk steps only) + `@reviewer` pass for `/ship`, as one deterministic call. Invoked by `ship.md`.
 
 **MCP Servers**:
 - **Registry Server** (`claude/mcp/server/`):
-  - `registry.go` — MCP tool handlers for project metadata, plans, audit trail, issues, deploy checks
+  - `registry.go` — MCP tool handlers for project metadata, plans, audit trail, issues, deploy checks, event log
   - `store.go` — SQLite-backed persistence layer (single DB at `~/.config/registry/data/registry.db`, WAL mode)
   - `main.go` — JSON-RPC dispatcher, MCP setup
 - **Bitbucket Server** (`claude/mcp/bitbucket/`):
@@ -40,13 +41,13 @@ Codebase = user-facing skills + supporting MCP tools:
 - `inject-registry-context.js` — UserPromptSubmit hook; reads project metadata + resources from registry; emits as system-reminder; dedupes per session.
 
 **Key flows**:
-1. **Plan**: Auto-increment fake ticket counter in registry; store plan JSON in `registry_write_plan`
-2. **Build**: Load plan from registry, run steps w/ status tracking via `registry_update_step`, STOP w/ error if registry down. Async runs (contiguous `plan_steps` sharing a `parallel_group`) execute concurrently via git-worktree isolation — one worktree per step — merged back into the feature branch sequentially in step-id order via `git merge --no-ff`.
-3. **Ship**: Write rich audit entry via `registry_write_audit`; skip JIRA transition if ticket key auto-gen; STOP w/ error if registry down
-4. **Shipped**: Query audit entries via `registry_get_audit` w/ date range filter
-5. **Resource discovery**: Skills find external resources (dashboards, channels, repos, log groups) at runtime; save via `registry_set()` to resources subtree; hook injects on next session
+1. **Plan**: Auto-increment fake ticket counter in registry; store plan JSON in `registry_write_plan`. Bug/Defect tickets get a root-cause gate via `@investigator` before step design.
+2. **Build**: `build.md` loads the plan then runs `build-workflow.js` — deterministic run-partitioning, status tracking via `registry_update_step` (called from inside spawned subagents), STOP w/ error if registry down. Async runs (contiguous `plan_steps` sharing a `parallel_group`) execute concurrently via git-worktree isolation — one worktree per step — merged back into the feature branch sequentially in step-id order via `git merge --no-ff`.
+3. **Ship**: `ship.md` runs `ship-review-workflow.js` for the security+reviewer pass, then writes a rich audit entry via `registry_write_audit`; skip JIRA transition if ticket key auto-gen; STOP w/ error if registry down
+4. **Resource discovery**: Skills find external resources (dashboards, channels, repos, log groups) at runtime; save via `registry_set()` to resources subtree; hook injects on next session
+5. **Event log**: `code-review.md` (and future interaction-producing skills) persist structured events via `registry_write_event`; viewable at `/projects/{name}/reviews` in registry-ui
 
-**Registry hard dependency**: All phase skills (`/plan`, `/build`, `/ship`, `/init`) need registry MCP server up. Registry down → skills STOP immediately, clear error, no fallback to local files. Keeps single source of truth, no data drift.
+**Registry hard dependency**: All phase skills (`/plan`, `/build`, `/ship`) need registry MCP server up. Registry down → skills STOP immediately, clear error, no fallback to local files. Keeps single source of truth, no data drift.
 
 ---
 
@@ -177,6 +178,12 @@ Appends issue report entry to project's issue log in registry. Logs failures, bl
 
 Caller gives all fields; `_reported_at` (RFC3339) added auto.
 
+#### `registry_write_event(name: string, type: string, data: map[string]any, tags?: []string) -> {ok: bool, total_entries: int} | error`
+Appends a structured interaction event to the project's event log. `type` examples: `pr_review`, `investigation`, `idea_validation`. `data` shape depends on `type` — no fixed schema, unlike audit/issues.
+
+#### `registry_get_events(name: string, type?: string, since?: string, until?: string) -> {entries: [map[string]any], total: int}`
+Queries the event log, optionally filtered by `type` and date range (ISO 8601, inclusive, matched against `occurred_at`).
+
 ---
 
 ## Skills Status
@@ -185,10 +192,6 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
 |-------|-----------|--------|--------------|
 | plan | `/plan` or `/plan ONE-XXXX` | ✓ Shipped | registry, jira (optional) |
 | ship | `/ship` or `/ship ONE-XXXX` | ✓ Shipped | registry, bitbucket, jira, security, reviewer, documenter, handover |
-| jira | `/jira` + subcommand | ✓ Shipped | mcp__atlassian__* |
-| confluence | `/confluence` + subcommand | ✓ Shipped | mcp__atlassian__* |
-| standup | `/standup` | ✓ Shipped | mcp__atlassian__*, mcp__slack__* (optional) |
-| shipped | `/shipped` + optional flags | ✓ Shipped | registry, mcp__atlassian__* (optional) |
 | idea-validation | `/idea-validation` | ✓ Shipped | WebSearch, WebFetch, general-purpose agent |
 
 ---
@@ -234,7 +237,7 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
 - **Rejected alternatives**:
   - Dual-path w/ local fallback: data drift, audit trail inconsistency, silent fails on stale local data.
   - Offline mode w/ sync-on-reconnect: adds complexity, doesn't stop race conditions between offline edits + registry state.
-- **Consequences**: Skills need working registry MCP connection to run. Simplifies data model, ensures single source of truth. Operators must ensure registry server up before `/plan`, `/build`, `/ship`, `/init`. Error msgs clear ("Registry MCP is unavailable. Fix the MCP connection before running /build.").
+- **Consequences**: Skills need working registry MCP connection to run. Simplifies data model, ensures single source of truth. Operators must ensure registry server up before `/plan`, `/build`, `/ship`. Error msgs clear ("Registry MCP is unavailable. Fix the MCP connection before running /build.").
 
 ### [2026-07-22] — Agent model pinning: cheap models for lookups, expensive for reasoning
 - **Context**: Agents serve different purposes (data lookup vs complex reasoning) with different cost/capability tradeoffs. Need consistent strategy to avoid overpaying for simple operations while ensuring reasoning agents have sufficient model capacity.
@@ -271,6 +274,15 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
   - Drop graph mode entirely: no data yet to rule it out; keeping it opt-in preserves the option at zero cost to existing users.
 - **Consequences**: `code-review local --graph` available for on-demand deeper review; `code-review local` (no flag) unchanged. Re-evaluate promotion once a real comparison run (graph vs non-graph on the same diff) is on record.
 
+### [2026-08-11] — Deterministic Workflow scripts for /build's internals, code-review --graph, and ship's review pass
+- **Context**: Full read-through of `plan.md`/`build.md`/`ship.md` plus all 6 supporting agents found: (1) TDD-first and execute-don't-assume verification were already implemented as bespoke prose, no porting needed; (2) `/plan`, `/build`, `/ship` are deliberately three separate commands/sessions (human approval gate in `/plan`, explicit context reset before `/ship`) — collapsing them would remove real checkpoints; (3) `build.md`'s run-partitioning (sync/async), retry counting, git-worktree lifecycle, and merge-ordering was the highest-complexity prose in the whole pipeline, re-derived by the LLM every run instead of executed as code; (4) no step anywhere invoked `@investigator` before designing a bugfix, so tickets could get "fixed" without confirming the actual root cause.
+- **Decision**: Kept `/plan`, `/build`, `/ship` as three separate commands — only rebuilt the parts with zero required human interaction as real Workflow scripts. `build.md` is now a thin dispatcher calling `build-workflow.js` (real control flow for partitioning/retries/worktrees/merge order — worktrees hand-rolled via explicit git commands in spawned agents, not the `Workflow` tool's built-in `isolation: 'worktree'` option, since that option's exact semantics weren't verified against the branch-off-feature-branch + sequential-merge-back requirement this pipeline needs). `code-review.md`'s `--graph` mode now calls `code-review-workflow.js` (4-dimension parallel fan-out + synthesis as real code). `ship.md`'s security-gate + reviewer pass now calls `ship-review-workflow.js`; the REJECTED human-decision branch and remaining ship steps stay in `ship.md` itself since a background script can't pause for that decision. Added a root-cause gate to `plan.md` STEP 3a: Bug/Defect tickets invoke `@investigator` before step design, and the Planning Critic (STEP 5b) checks the fix step's `Why:` cites the confirmed root cause. Also added the registry event log (`registry_write_event`/`registry_get_events`, `events` table) so `code-review.md` persists reviews, viewable at `/projects/{name}/reviews` in registry-ui.
+- **Rejected alternatives**:
+  - Collapse `/plan`/`/build`/`/ship` into one command: removes the human approval checkpoint before execution and the deliberate context reset; real audit history shows meaningful time gaps between build-done and shipped that this would eliminate.
+  - Rely on `Workflow`'s `isolation: 'worktree'` option for async step parallelism: unverified whether its semantics (base ref, auto-merge, cleanup timing) match the exact branch-off-feature-branch + sequential-index-order-merge requirement; hand-rolled git commands via agent calls match `build.md`'s existing, proven flow without the assumption.
+  - Convert all of `/ship` to a Workflow script: most of it (documenter, handover, audit write, JIRA transition) is already a short linear sequence: no complexity to gain by scripting it, and the REJECTED branch genuinely needs a human in the loop.
+- **Consequences**: `/build`'s retry counts, run partitioning, and merge ordering can no longer be skipped or miscounted by an LLM improvising the loop — they're real JS control flow in `claude/workflows/build-workflow.js`. `/build` now runs as a background `Workflow` task rather than narrating step-by-step inline in the same chat turn (matches its existing "check back later" design intent; `/workflows` gives live progress if wanted). Bug/Defect plans now cite a confirmed root cause instead of the raw ticket symptom. PR reviews are queryable history instead of one-off HTML reports. Worktree-isolation semantics for async build steps should be empirically verified against a real (low-stakes) ticket before trusting it on client-repo work.
+
 ---
 
 ## Domain Glossary
@@ -279,15 +291,18 @@ Caller gives all fields; `_reported_at` (RFC3339) added auto.
 - **Fake ticket**: Auto-gen key for projects w/o JIRA integration. Uses registry counter.
 - **Plan**: Mission state object w/ acceptance criteria, step breakdown, status. Stored as JSON in registry.
 - **Audit entry**: Metadata about shipped work (ticket, type, impact, PR URL, files changed, story points, labels, date).
-- **Registry**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db` w/ project metadata, plans, audit trails, issues, deploy checks. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`, `/init`) hard-dependent on registry uptime (no local fallback).
+- **Registry**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db` w/ project metadata, plans, audit trails, issues, deploy checks. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`) hard-dependent on registry uptime (no local fallback).
 - **Resource cache**: External integrations (Slack channels, Grafana dashboards, Bitbucket repos, AWS log groups, etc.) stored under `project.resources` in registry. Organized by category (grafana, slack, aws, bitbucket, confluence, jira, scripts).
 - **Registry context**: System-reminder block emitted by `inject-registry-context` hook on session start; holds project metadata + all cached resources; used by skills to skip redundant API calls.
 - **Skill**: User-invocable markdown prompt file routing commands to agents. All skills include SELF-IMPROVEMENT section for discovering + caching resources.
-- **Agent**: Background orchestration logic (e.g. `@jira`, `@confluence`, `@standup`) invoked by skills.
+- **Agent**: Background orchestration logic (e.g. `@jira`, `@confluence`) invoked by skills.
 - **Hook**: Node.js script (in `claude/hooks/`) registered in settings.json, runs at defined event (e.g. UserPromptSubmit) to inject context or setup.
 - **Parallel group**: `int` identifying a contiguous block of async plan steps meant to run concurrently in `/build`; validated for non-overlapping files at plan-write time.
 - **Async step**: A plan step marked `execution:"async"`; runs concurrently with other steps in the same `parallel_group`, each in an isolated git worktree, merged back into the feature branch in step-id order.
 - **Agent-graph fan-out**: Pattern where a task is split across multiple independent, context-isolated subagents that run in parallel, each producing a partial result, then a dedicated synthesis step merges those outputs into one final artifact. Used in `code-review --graph` mode (4 dimension-reviewer agents + synthesis) and `idea-validation` (4 research agents + synthesis).
+- **Workflow script**: A checked-in JS file under `claude/workflows/` run via the `Workflow` tool — real control flow (loops, retries, `parallel()`/`pipeline()`) instead of markdown prose an LLM re-derives each run. Used for `/build`'s internals (`build-workflow.js`), `code-review --graph` (`code-review-workflow.js`), and `/ship`'s security+reviewer pass (`ship-review-workflow.js`).
+- **Event log**: `events` table in the registry, written via `registry_write_event(project, type, data, tags?)`. Generic across interaction types (`pr_review`, future `investigation`/`idea_validation`) rather than one bespoke table per type. Viewable at `/projects/{name}/reviews` in registry-ui (currently `pr_review` only).
+- **Root-cause gate**: `/plan` STEP 3a — for Bug/Defect tickets, invokes `@investigator` before step design so the fix step's `Why:` cites the confirmed root cause instead of the raw ticket symptom.
 
 ---
 

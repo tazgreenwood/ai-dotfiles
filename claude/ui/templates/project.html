@@ -116,7 +116,7 @@
   {{end}}
 </section>
 
-<section>
+<section class="mb-10">
   <div class="flex items-center justify-between mb-4">
     <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Recent Deploy Checks</h2>
     <a href="/projects/{{.Project.Name}}/deploy-checks" class="text-sm text-zinc-500 dark:text-zinc-400 hover:underline">View all &rarr;</a>
@@ -133,6 +133,26 @@
   </ul>
   {{else}}
   <p class="text-zinc-500 dark:text-zinc-400">No deploy checks yet</p>
+  {{end}}
+</section>
+
+<section>
+  <div class="flex items-center justify-between mb-4">
+    <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Recent Reviews</h2>
+    <a href="/projects/{{.Project.Name}}/reviews" class="text-sm text-zinc-500 dark:text-zinc-400 hover:underline">View all &rarr;</a>
+  </div>
+  {{if .RecentReviews}}
+  <ul class="space-y-2">
+    {{range .RecentReviews}}
+    <li class="flex items-baseline gap-3 text-sm">
+      <span class="text-zinc-400 dark:text-zinc-500 font-mono w-24 shrink-0">{{dateOnly .OccurredAt}}</span>
+      <span class="text-zinc-600 dark:text-zinc-300 font-mono shrink-0">{{.Verdict}}</span>
+      <span class="text-zinc-700 dark:text-zinc-300">{{.Summary}}</span>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="text-zinc-500 dark:text-zinc-400">No reviews yet</p>
   {{end}}
 </section>
 {{end}}

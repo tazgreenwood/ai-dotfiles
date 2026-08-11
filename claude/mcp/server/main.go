@@ -142,6 +142,10 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryGetResources(args)
 	case "registry_report_issue":
 		return registryReportIssue(args)
+	case "registry_write_event":
+		return registryWriteEvent(args)
+	case "registry_get_events":
+		return registryGetEvents(args)
 	}
 	return toolErr("unknown tool: " + name)
 }

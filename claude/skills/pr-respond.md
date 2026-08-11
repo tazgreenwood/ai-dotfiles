@@ -80,27 +80,13 @@ Done — [one sentence describing what changed].
 
 ---
 
-## STEP 6: NOTIFY
-
-Send Slack message to `$SLACK_CHANNEL`:
-```
-💬 PR comments addressed — [ticket or branch]
-[N] comments resolved.
-Review again when ready: [pr_url]
-```
-
-Use `slack_send_message` MCP. If unavailable or `$SLACK_CHANNEL` unset, print to terminal.
-
----
-
-## STEP 7: CONFIRM
+## STEP 6: CONFIRM
 
 Output:
 ```
 PR RESPOND COMPLETE
 PR: [pr_url]
 Comments addressed: [N]
-Slack: notified
 ```
 
 Note: do not push to remote. Pushing happens as part of PR management — not this skill.

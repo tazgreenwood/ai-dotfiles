@@ -51,6 +51,21 @@ If either `## Architecture` or `## Tech Stack` in CLAUDE.md is missing or has no
 
 ---
 
+## STEP 3a: ROOT-CAUSE GATE (Bug/Defect tickets only)
+
+If the ticket type is **Bug** or **Defect**, invoke `@investigator` before designing any fix:
+- Pass the ticket summary/description (or the free-form question) as the investigation objective
+- Instruction: "This is a bug investigation. Produce root cause analysis with evidence. Do not suggest code changes — findings only."
+
+`@investigator` returns findings with a confidence level, or `INCONCLUSIVE`.
+
+- **Conclusive**: carry the confirmed root cause into STEP 5 — the fix step's `Why:` field must cite it, not the raw symptom from the ticket description.
+- **INCONCLUSIVE**: surface this to the user as a clarifying question in STEP 4 ("Root cause unclear — proceed with a best-guess fix, or investigate further before planning?") instead of silently guessing at a fix.
+
+Skip this gate entirely for non-Bug/Defect ticket types.
+
+---
+
 ## STEP 4: CLARIFYING QUESTIONS
 
 Review the ticket/description against the current codebase. Identify genuine gaps — things that the ticket, CLAUDE.md, and the code don't answer.
@@ -126,6 +141,7 @@ Before showing the plan to the user, self-review it against these checks:
 4. **Missing verification**: Does every step have a concrete, checkable **Verification** line?
 5. **Risk coverage**: Are all HIGH-risk steps flagged? Any step touching auth, payments, migrations, security config, or external API contracts?
 6. **SOLID check**: Does the design respect Single Responsibility and Dependency Inversion? Note violations inline.
+7. **Root cause (Bug/Defect only)**: If STEP 3a ran, does the fix step's `Why:` cite the confirmed root cause rather than the raw symptom? If not, fix it.
 
 For each check that fails, fix the plan before proceeding. Do not surface this critic output to the user — just apply the fixes silently.
 
@@ -240,7 +256,6 @@ After `registry_write_plan` succeeds, tell the user:
 Plan written. Mission state saved to registry ([project]/[TICKET]).
 
 Next: open a new chat and run /build to execute the plan.
-The build will run automatically and Slack you when done.
 ```
 
 ## SELF-IMPROVEMENT
