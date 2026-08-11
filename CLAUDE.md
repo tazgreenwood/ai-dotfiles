@@ -242,6 +242,7 @@ Flattens and deduplicates multiple file-path arrays into one union, preserving f
   - Pre-compute + cache resources in env vars: doesn't evolve w/ discoveries; needs manual sync.
   - Store in gitignored config files: fragile, per-machine, hard to reconcile.
 - **Consequences**: Skills = stateless discovery engines. Registry = source of truth for external integrations. Hook dedupes per session (flag file), skips re-parse each prompt. New resources from one skill instant-available to others, no restart.
+- **Broken [2026-07-23 to 2026-08-11, found + fixed 2026-08-11]**: DOTFILES-23's SQLite migration moved storage from `data/{project}/project.json` to a single `registry.db`, but this hook was never updated — it kept reading the dead JSON path, silently caught the ENOENT, and injected nothing for every session in that window. Fixed to query `registry.db` directly via the `sqlite3` CLI. Checked actual context-block size across all real projects post-fix: 137–2154 bytes (`emily` largest) — nowhere near a token-budget concern today, but worth re-checking if any project's `resources` tree grows substantially.
 
 ### [2026-07-14] — Registry is a hard dependency; no local fallback
 - **Context**: Early skill impls fell back to local JSON files in `~/.claude/` when registry MCP down — dual sources of truth, data drift. Bugs from stale local data used over authoritative registry state.

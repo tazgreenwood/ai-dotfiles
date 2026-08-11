@@ -50,17 +50,31 @@ if (!projectName) {
   process.exit(0);
 }
 
-// ── Read project.json ──────────────────────────────────────────────────────────
+// ── Read project data from registry.db ─────────────────────────────────────────
+//
+// DOTFILES-23 migrated storage from data/{project}/project.json to a single
+// SQLite DB (registry.db). This hook read the old per-project JSON path
+// unchanged after that migration — every session silently found no file,
+// caught the error, and injected nothing. Fixed to query registry.db directly.
 
 const registryDir = process.env.REGISTRY_DATA_DIR ||
   path.join(os.homedir(), '.config', 'registry', 'data');
-const projectFile = path.join(registryDir, projectName, 'project.json');
+const dbPath = path.join(registryDir, 'registry.db');
 
 let project;
 try {
-  project = JSON.parse(fs.readFileSync(projectFile, 'utf8'));
+  const escaped = projectName.replace(/'/g, "''");
+  const raw = execFileSync(
+    'sqlite3',
+    ['-json', dbPath, `SELECT data FROM projects WHERE name = '${escaped}'`],
+    { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' }
+  ).trim();
+  if (!raw) throw new Error('no rows');
+  const rows = JSON.parse(raw);
+  if (!rows.length) throw new Error('no rows');
+  project = JSON.parse(rows[0].data);
 } catch (e) {
-  // No registry entry for this project — silent exit
+  // No registry entry for this project, or sqlite3 unavailable — silent exit
   process.stdout.write('OK');
   process.exit(0);
 }
