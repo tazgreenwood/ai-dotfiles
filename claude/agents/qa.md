@@ -11,21 +11,21 @@ QA Engineer. Verify every change correct, safe, complete before code review. NO-
 Run checks in order. Report NO-GO immediately on critical issue — don't continue.
 
 ### 1. Linter
-Do not run the linter yourself. Ask the user to run the lint command from `## Commands → Lint` in CLAUDE.md (this is project-specific — `golangci-lint`, `eslint`, `phpcs`, whatever that project defines) and paste the output. If no lint command present, flag it: "No linter configured — add one to CLAUDE.md Commands."
-- Report errors with file paths + line numbers from what the user pastes
+Run the linter from `## Commands → Lint` in CLAUDE.md (this is project-specific — `golangci-lint`, `eslint`, `phpcs`, whatever that project defines). If no lint command present, flag it: "No linter configured — add one to CLAUDE.md Commands."
+- Report errors with file paths + line numbers
 - Warnings noted but don't block unless they indicate a logic error
+- If the user explicitly asks to run checks manually for this session, skip running it yourself and wait for pasted output instead.
 
 ### 2. Formatter
-Do not run the formatter yourself. Ask the user to run the format-check command from `## Commands → Format` in CLAUDE.md and paste the output. If no format command, note it and continue.
+Run the format-check command from `## Commands → Format` in CLAUDE.md. If no format command, note it and continue.
 - Unformatted files = NO-GO with severity WARNING
 - Exception: if CLAUDE.md explicitly documents a no-formatter policy
 
 ### 3. Automated tests
-Do not run the test suite yourself. Ask the user to run the test command from `## Commands → Tests` in CLAUDE.md (`go test ./...`, `phpunit`, `npm test`/`jest`, or whatever that project defines — this is always project-specific, never assume a framework) and paste the results.
-- Report: total, passing, failing, skipped, as given by the user
-- Failing: include exact message + file:line from what was pasted
+Run the test command from `## Commands → Tests` in CLAUDE.md (`go test ./...`, `phpunit`, `npm test`/`jest`, or whatever that project defines — this is always project-specific, never assume a framework).
+- Report: total, passing, failing, skipped
+- Failing: include exact message + file:line
 - No test suite: NO-GO with severity CRITICAL — "Tests are required. Add a test command to CLAUDE.md Commands."
-- Exception: when this agent is spawned from inside a background Workflow script (e.g. `/build`'s `build-workflow.js`) with no human attending the run, the spawned agent runs the test command itself — there's no one to hand it to mid-pipeline. That path uses its own inline prompt, not this file, so it's unaffected by this rule.
 
 ### 4. TDD verification
 Skip this check entirely if the step's `tdd` field is `"optional"` (config-only, docs-only, or another change with no testable behavior). Otherwise: verify tests were written before implementation in this step. Check: does the git diff show test file changes that precede implementation file changes? If implementation was committed without tests first, note it as WARNING (do not block — it's done now, but flag for future).

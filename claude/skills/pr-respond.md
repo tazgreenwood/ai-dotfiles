@@ -57,7 +57,7 @@ Pass:
 **Retry**: if @developer returns BLOCKED, retry up to 2 times. On 3rd failure, surface to user.
 
 ### 5b. Invoke @qa
-Follows `qa.md`'s protocol as-is (lint/format/test asked of the user, not self-run — see that file). Additionally verify the specific comment issue is resolved.
+Follows `qa.md`'s protocol as-is (lint/format/test self-run — see that file). Additionally verify the specific comment issue is resolved.
 
 **If NO-GO**: pass failure back to @developer (retry up to 2 times). On 3rd failure, surface to user.
 

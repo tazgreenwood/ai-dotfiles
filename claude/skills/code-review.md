@@ -73,9 +73,19 @@ If not available locally, proceed without it.
 
 ## STEP 5: INVOKE @reviewer
 
-Accept an optional `--graph` flag on the skill invocation (e.g. `code-review local --graph`, `code-review 42 --graph`). Default (no flag) behavior is unchanged from below.
+Graph mode is the default (promoted from opt-in per the [2026-08-18] decision — see `registry_get_events("private-dotfiles", "decision")`). Accept an optional `--single` flag to opt into the old single-pass mode instead (e.g. `code-review local --single`, `code-review 42 --single`) when you want a faster, cheaper pass instead of full multi-dimension review.
 
-### Default mode (no `--graph`)
+### Graph mode (default)
+
+Isolated-context multi-agent fan-out: 4 dimension reviewers in parallel, then one synthesis pass. Runs as a deterministic Workflow script, not improvised fan-out — the 4-way parallel dispatch and the single synthesis call are real control flow, not prose an LLM re-derives each run.
+
+Call the `Workflow` tool with:
+- `scriptPath`: `claude/workflows/code-review-workflow.js`
+- `args`: `{ diff, acceptance_spec, claude_md }` — `diff` from STEP 3, `acceptance_spec` is the PR title/description (PR mode) or branch name + recent commit messages (local mode), `claude_md` from STEP 4 (omit if unavailable)
+
+The script returns `{ dimensions: [...], synthesis }` where `synthesis` is the merged verdict (APPROVED / APPROVED WITH WARNINGS / REJECTED) with deduped findings — same contract as single-pass mode. Use `synthesis` as the STEP 5 output for the rest of the skill (STEP 6 onward proceed identically regardless of mode).
+
+### Single-pass mode (`--single`)
 
 Pass:
 - Full diff output
@@ -84,16 +94,6 @@ Pass:
 - Instruction: "Review for correctness bugs, security issues, and scope. Do not praise. Return findings only."
 
 @reviewer returns APPROVED, APPROVED WITH WARNINGS, or REJECTED with a list of findings.
-
-### Graph mode (`--graph`)
-
-Isolated-context multi-agent fan-out: 4 dimension reviewers in parallel, then one synthesis pass. Runs as a deterministic Workflow script, not improvised fan-out — the 4-way parallel dispatch and the single synthesis call are real control flow, not prose an LLM re-derives each run.
-
-Call the `Workflow` tool with:
-- `scriptPath`: `claude/workflows/code-review-workflow.js`
-- `args`: `{ diff, acceptance_spec, claude_md }` — `diff` from STEP 3, `acceptance_spec` is the PR title/description (PR mode) or branch name + recent commit messages (local mode), `claude_md` from STEP 4 (omit if unavailable)
-
-The script returns `{ dimensions: [...], synthesis }` where `synthesis` is the merged verdict (APPROVED / APPROVED WITH WARNINGS / REJECTED) with deduped findings — same contract as default mode. Use `synthesis` as the STEP 5 output for the rest of the skill (STEP 6 onward proceed identically regardless of mode).
 
 ---
 
@@ -109,11 +109,11 @@ Read the target repo's own `CLAUDE.md` (the repo under review, not private-dotfi
 
 ### Attempt real execution first
 
-Do not run the test command yourself. Ask the user to run it, scoped to the changed files where possible (e.g. `go test ./path/to/changed/pkg/...`, `npm test -- <changed_test_files>`, `pytest <changed_test_files>`), and paste the output.
+Run the discovered test command, scoped to the changed files where possible (e.g. `go test ./path/to/changed/pkg/...`, `npm test -- <changed_test_files>`, `pytest <changed_test_files>`).
 
-Record the pasted stdout/stderr (pass/fail counts, error messages, stack traces).
+Capture the real stdout/stderr output (pass/fail counts, error messages, stack traces).
 
-If the test command ran (regardless of pass/fail) and its output covers the changed code, use this as the proof of behavior. Skip mock execution.
+If the test command succeeds in running (regardless of pass/fail) and its output covers the changed code, use this as the proof of behavior. Skip mock execution.
 
 ### Fall back to synthesized mock execution
 

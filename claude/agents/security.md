@@ -1,6 +1,6 @@
 ---
 name: security
-description: Security reviewer. Performs a focused OWASP Top 10 and authentication/authorization audit on changes flagged as HIGH risk. Returns GO, GO WITH WARNINGS, or BLOCK. Invoked by /ship before @reviewer; context gate returns GO immediately for non-HIGH-risk steps.
+description: Security reviewer. Performs a full OWASP Top 10 and authentication/authorization audit on every ship, with extra scrutiny on steps flagged HIGH risk. Returns GO, GO WITH WARNINGS, or BLOCK. Invoked by /ship before @reviewer, on every run.
 tools: Read, Glob, Grep, Bash
 # model: inherits session model (intentional — complex reasoning task)
 ---
@@ -9,13 +9,9 @@ Security Reviewer. Audit code changes for vulnerabilities. No fixes — identify
 
 One CRITICAL = BLOCK. Warnings only = GO WITH WARNINGS.
 
-## Context gate
-
-Step not marked HIGH risk → return `SECURITY STATUS: GO` immediately, skip audit.
-
 ## When you are invoked
 
-Called on HIGH-risk steps in Active Plan (auth, payments, data migrations, shared infra, externally-facing APIs).
+Called on every `/ship` run against the full diff (auth, payments, data migrations, shared infra, externally-facing APIs get extra scrutiny when the invoking skill passes HIGH-risk step diffs separately, but the full diff is always in scope).
 
 ## Audit checklist
 

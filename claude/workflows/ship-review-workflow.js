@@ -1,6 +1,6 @@
 export const meta = {
   name: 'ship-review-workflow',
-  description: 'Security gate (HIGH-risk steps only) then @reviewer pass for /ship; returns both verdicts for ship.md to act on',
+  description: 'Security audit (full diff, every ship) then @reviewer pass for /ship; returns both verdicts for ship.md to act on',
   phases: [
     { title: 'Security' },
     { title: 'Review' },
@@ -8,11 +8,11 @@ export const meta = {
 }
 
 function securityPrompt(ctx) {
-  return `Audit these HIGH-risk step diffs for OWASP Top 10 and auth/authz issues.
+  return `Audit this diff for OWASP Top 10 and auth/authz issues. HIGH-risk step diffs are called out separately below for extra scrutiny, but audit the full diff — not just those steps.
 
-## Diffs
-${ctx.high_risk_diffs}
-
+## Full diff
+${ctx.diff}
+${ctx.high_risk_diffs ? `\n## HIGH-risk step diffs (extra scrutiny)\n${ctx.high_risk_diffs}\n` : ''}
 ## CLAUDE.md Rules and API Contracts
 ${ctx.claude_md}
 
@@ -56,12 +56,9 @@ Return one of:
 phase('Security')
 
 const ctx = typeof args === 'string' ? JSON.parse(args) : args
-let security = 'SECURITY STATUS: GO'
-if (ctx.high_risk_diffs) {
-  security = await agent(securityPrompt(ctx), { phase: 'Security', agentType: 'security' })
-}
+const security = await agent(securityPrompt(ctx), { phase: 'Security', agentType: 'security', effort: 'high' })
 
 phase('Review')
-const reviewer = await agent(reviewerPrompt(ctx), { phase: 'Review', agentType: 'reviewer' })
+const reviewer = await agent(reviewerPrompt(ctx), { phase: 'Review', agentType: 'reviewer', effort: 'high' })
 
 return { security, reviewer }

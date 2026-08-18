@@ -67,7 +67,7 @@ phase('Review')
 const ctx = typeof args === 'string' ? JSON.parse(args) : args
 const findings = await parallel(
   DIMENSIONS.map(d => () =>
-    agent(dimensionPrompt(ctx, d), { phase: 'Review', label: `review:${d.key}`, agentType: 'cavecrew-reviewer' })
+    agent(dimensionPrompt(ctx, d), { phase: 'Review', label: `review:${d.key}`, agentType: 'cavecrew-reviewer', effort: 'high' })
       .then(output => ({ key: d.key, output }))
   )
 )
@@ -77,6 +77,7 @@ const synthesis = await agent(synthesisPrompt(ctx, findings.filter(Boolean)), {
   phase: 'Synthesize',
   label: 'synthesis',
   agentType: 'reviewer',
+  effort: 'high',
 })
 
 return { dimensions: findings, synthesis }

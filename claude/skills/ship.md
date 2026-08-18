@@ -26,13 +26,13 @@ Read `CLAUDE.md` — note Rules, Architecture, API Contracts.
 
 ## STEP 2: RUN THE SHIP-REVIEW WORKFLOW
 
-Scan mission state for any steps where `"risk": "HIGH"` in plan step JSON. If any exist, gather their diffs (`git show [commit-sha]` for each HIGH-risk step's commit) as `high_risk_diffs`; otherwise omit it.
+Scan mission state for any steps where `"risk": "HIGH"` in plan step JSON. If any exist, gather their diffs (`git show [commit-sha]` for each HIGH-risk step's commit) as `high_risk_diffs` for extra scrutiny; otherwise omit it — `@security` always audits the full diff regardless.
 
 Call the `Workflow` tool with:
 - `scriptPath`: `claude/workflows/ship-review-workflow.js`
 - `args`: `{ high_risk_diffs, expected_pr, files_changed, acceptance_criteria, claude_md, diff }` — `files_changed` is the union of `plan_steps[].files` from mission state, `diff` is `git diff [base_branch]...HEAD` output, `claude_md` is the CLAUDE.md contents (Rules and API Contracts at minimum).
 
-This runs `@security` (skipped automatically when `high_risk_diffs` is omitted — no HIGH-risk steps) then the full `reviewer` agent (not cavecrew-reviewer — PR reviews span many files and need prose rationale, not compressed findings) as one deterministic pass, returning `{ security, reviewer }`.
+This runs `@security` on the full diff on every ship (per the [2026-08-18] widened-gate decision — no longer skipped for non-HIGH-risk work) then the full `reviewer` agent (not cavecrew-reviewer — PR reviews span many files and need prose rationale, not compressed findings) as one deterministic pass, returning `{ security, reviewer }`.
 
 **If `security` is `SECURITY STATUS: BLOCK`**: stop. Surface the findings to the user. Do not create the PR until resolved.
 **If `security` is `SECURITY STATUS: GO WITH WARNINGS`**: proceed, include warnings in the PR under `### Security Notes`.
