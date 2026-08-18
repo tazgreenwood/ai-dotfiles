@@ -56,6 +56,15 @@ EOF
   fi
 fi
 
+# ── Claude Workflows ──────────────────────────────────────────────────────────
+echo "Linking Claude workflows..."
+mkdir -p "$CLAUDE_DIR/workflows"
+for workflow_file in "$DOTFILES/claude/workflows"/*.js; do
+  [ -f "$workflow_file" ] || continue
+  ln -sf "$workflow_file" "$CLAUDE_DIR/workflows/$(basename "$workflow_file")"
+  echo "  ✓ $(basename "$workflow_file")"
+done
+
 # ── Registry MCP Server ────────────────────────────────────────────────────────
 SERVER_DIR="$DOTFILES/claude/mcp/server"
 BINARY="$SERVER_DIR/registry"

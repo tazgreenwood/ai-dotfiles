@@ -76,7 +76,7 @@ If any step is HIGH risk, note it explicitly in the plan.
 
 ### 3. Step design
 
-**TDD first**: the first plan step must always be "Write failing tests that define the expected behavior of [feature/fix]". This applies to features, bug fixes, and refactors. Exception: pure documentation or config-only changes with no testable behavior. If CLAUDE.md has no test command under `## Commands`, note this and flag it for the user.
+**TDD — conditional, not blanket**: mark each step's `tdd` field `"required"` or `"optional"`. `"required"` (default) covers features, bug fixes, refactors — anything with testable behavior; its first such step must be "Write failing tests that define the expected behavior of [feature/fix]". `"optional"` covers pure documentation, config-only changes, or anything with no testable behavior — skip the test-writing step. If CLAUDE.md has no test command under `## Commands` and any step is `"required"`, note this and flag it for the user.
 
 **SOLID principles check**: before finalizing steps, verify the proposed approach:
 - Single Responsibility: each component/function has one reason to change
@@ -97,6 +97,8 @@ Flag violations inline in the plan. Do not block — note and adjust.
   - **Tests** — if the project has a test runner (per the `## Commands → Tests` field in CLAUDE.md), each step's `How:` field must include a **Tests:** sub-field specifying what failing tests to write before implementation begins. Omit this sub-field if CLAUDE.md has no test command.
   - **Files** — exact file paths to create or modify
   - **Verification** — how the developer confirms the step is done correctly
+- **`owner`** (`"ai"` | `"human"`, default `"ai"`): mark `"human"` when the step is a mechanical, unambiguous, single-file-or-config change the user can do faster than watching an agent narrate it (rename, version bump, config toggle, boilerplate copy-paste). `/build` pauses before a `human`-owned step instead of spawning `@developer`/`@qa` for it.
+- **`model`** (`"inherit"` | `"haiku"`, default `"inherit"`): mark `"haiku"` only when the step is small, atomic, and fully specified by its `how` field — no design judgment left for build time. If a `haiku` step fails QA twice, split it smaller rather than bumping the model.
 
 **Expected PR section (required)**: every plan must end with this section. @developer uses it as the acceptance spec. Include it in the mission state JSON alongside the plan steps.
 
@@ -125,7 +127,7 @@ Only after all checks pass: write the mission state JSON.
 
 ## Output
 
-Call `registry_write_plan(project_name, ticket, plan_data)` to persist the plan. Include: `ticket`, `summary`, `repo`, `branch`, `base_branch`, `acceptance_criteria` (array of strings from JIRA ticket, or empty array), `plan_steps` (each with `id`, `title`, `why`, `how`, `tests`, `files`, `verification`, `risk`, `status: "pending"`), `expected_pr`, `pr_id: null`, `pr_url: null`. Do not write the plan to CLAUDE.md.
+Call `registry_write_plan(project_name, ticket, plan_data)` to persist the plan. Include: `ticket`, `summary`, `repo`, `branch`, `base_branch`, `acceptance_criteria` (array of strings from JIRA ticket, or empty array), `plan_steps` (each with `id`, `title`, `why`, `how`, `tests`, `files`, `verification`, `risk`, `status: "pending"`, `owner`, `tdd`, `model`), `expected_pr`, `pr_id: null`, `pr_url: null`. Do not write the plan to CLAUDE.md.
 
 Do not write any code. Do not suggest implementation details beyond what is needed to scope the work. Your output is the plan only.
 

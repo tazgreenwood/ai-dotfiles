@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -106,16 +107,21 @@ type DeployCheckEntry struct {
 	RecordedAt   string `json:"_recorded_at,omitempty"`
 }
 
+type Suggestion struct {
+	Finding  string `json:"finding"`
+	Severity string `json:"severity"`
+}
+
 type EventEntry struct {
-	ID            int64    `json:"id,omitempty"`
-	OccurredAt    string   `json:"occurred_at,omitempty"`
-	Summary       string   `json:"summary,omitempty"`
-	Verdict       string   `json:"verdict,omitempty"`
-	Why           string   `json:"why,omitempty"`
-	DiffOverview  string   `json:"diff_overview,omitempty"`
-	ExecutionMode string   `json:"execution_mode,omitempty"`
-	ExecutionLog  string   `json:"execution_log,omitempty"`
-	Suggestions   []string `json:"suggestions,omitempty"`
+	ID            int64        `json:"id,omitempty"`
+	OccurredAt    string       `json:"occurred_at,omitempty"`
+	Summary       string       `json:"summary,omitempty"`
+	Verdict       string       `json:"verdict,omitempty"`
+	Why           string       `json:"why,omitempty"`
+	DiffOverview  string       `json:"diff_overview,omitempty"`
+	ExecutionMode string       `json:"execution_mode,omitempty"`
+	ExecutionLog  string       `json:"execution_log,omitempty"`
+	Suggestions   []Suggestion `json:"suggestions,omitempty"`
 }
 
 func dataDir() string {
@@ -396,6 +402,7 @@ func ReadEvents(name, eventType, since, until string) ([]EventEntry, error) {
 		}
 		var e EventEntry
 		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			log.Printf("ReadEvents: skipping event id=%d: %v", id, err)
 			continue
 		}
 		e.ID = id

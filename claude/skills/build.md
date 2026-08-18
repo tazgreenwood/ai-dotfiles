@@ -14,7 +14,7 @@ Find the active mission:
 3. If no ticket provided, call `registry_list_plans(project_name)` and pick the plan with at least one step not `"done"`. If registry is unavailable, STOP and report the same error — do not fall back to a local file.
 4. If no mission state found, report: "No approved plan found. Run /plan first."
 
-Read `CLAUDE.md` — capture its full contents (developer/QA subagents need Rules and Commands, but pass the whole file, not a summary).
+Read `CLAUDE.md`. Extract only the `## Rules`, `## Commands`, and `## Domain Glossary` sections verbatim (not summarized) — these are the only sections `build-workflow.js`'s dev/QA prompts actually use, and this text gets re-embedded in every developer/QA agent call across every step and retry, so skipping Architecture/Decisions/API Contracts here is a real per-call token saving, not just a read-time one. If a step's `how` references an interface documented under `## API Contracts`, include that specific contract entry too — otherwise omit the section entirely.
 
 ---
 
@@ -48,7 +48,7 @@ Report to the user that the build is running in the background; they can watch l
 
 ## STEP 4: REPORT RESULT
 
-When the workflow completes, it returns `{ status: 'complete' | 'blocked', results, ... }`.
+When the workflow completes, it returns `{ status: 'complete' | 'blocked' | 'awaiting_human', results, ... }`.
 
 **If `status: 'complete'`:**
 ```
@@ -67,6 +67,18 @@ Fix the issue, then run /build ONE-XXXX to resume.
 ```
 (Steps already marked `"done"` before the block stay done — resuming re-partitions only the remaining `"pending"` steps.)
 
+**If `status: 'awaiting_human'`:**
+```
+BUILD PAUSED at step [awaitingHumanAt]: [step title] — owner: human
+Why: [step's why]
+How: [step's how]
+Files: [step's files]
+Verification: [step's verification]
+
+Do this step yourself, then run /build ONE-XXXX to continue.
+```
+The step is not marked `"done"` automatically — call `registry_update_step` yourself when finished (or just re-run `/build`, which will re-check it next time and still show it as pending if you forgot).
+
 **If the workflow reports a merge conflict** (`mergeConflictAt` present): report the conflicting step's branch name and instruct the user to resolve it manually — the script does not auto-resolve.
 
 ---
@@ -82,13 +94,4 @@ Fix the issue, then run /build ONE-XXXX to resume.
 
 ## SELF-IMPROVEMENT
 
-At the end of each run, reflect on what you learned. If anything is worth saving, act on it before returning to the user.
-
-**Save reusable commands/lookups** — any command or lookup derived this run that could be reused instead of re-derived next time:
-```
-registry_set(project_name, "resources.scripts.{name}", {command: "...", description: "...", learned_at: "<RFC3339 timestamp>"})
-```
-
-**Improve this skill or the workflow script** — if a better approach was found, make a targeted minimal edit to `claude/skills/build.md` or `claude/workflows/build-workflow.js`. Edit only the specific line or section that was wrong or incomplete.
-
-Skip if nothing new was learned.
+End of run: save any new reusable command/lookup via `registry_set(project_name, "resources.scripts.{name}", {command: "...", description: "...", learned_at: "<RFC3339 timestamp>"})`, and make a targeted edit to `claude/skills/build.md` or `claude/workflows/build-workflow.js` if a better approach was found. Skip if nothing new was learned.

@@ -53,7 +53,9 @@ If either `## Architecture` or `## Tech Stack` in CLAUDE.md is missing or has no
 
 ## STEP 3a: ROOT-CAUSE GATE (Bug/Defect tickets only)
 
-If the ticket type is **Bug** or **Defect**, invoke `@investigator` before designing any fix:
+Skip this gate for an obvious bug — one where the ticket description already pinpoints the exact file/line/cause (e.g. a named typo, an off-by-one in a specific function, a config value that's clearly wrong) and a quick read of that code confirms it. Note inline: `Skipping root-cause gate: obvious fix, cause confirmed by inspection.` Use `@investigator` for everything else — symptom-only reports, anything needing log/trace evidence, or bugs where the named cause doesn't hold up on a quick read.
+
+When the gate is not skipped, invoke `@investigator` before designing any fix:
 - Pass the ticket summary/description (or the free-form question) as the investigation objective
 - Instruction: "This is a bug investigation. Produce root cause analysis with evidence. Do not suggest code changes — findings only."
 
@@ -70,7 +72,9 @@ Skip this gate entirely for non-Bug/Defect ticket types.
 
 Review the ticket/description against the current codebase. Identify genuine gaps — things that the ticket, CLAUDE.md, and the code don't answer.
 
-Ask only what you actually need. Combine related questions into natural conversation — not a numbered list. If the ticket has complete AC, you may need zero questions. If the task is ambiguous, ask what's necessary, then proceed.
+Ask only what you actually need. If the ticket has complete AC, you may need zero questions. If the task is ambiguous, ask what's necessary, then proceed.
+
+If there are 3 or more questions, don't ask them in chat one-by-one. Write them as a numbered list to `.claude/tmp/{ticket}-questions.md`, tell the user the file path, and wait for them to fill in answers inline and confirm. This avoids burning a full context reload per back-and-forth turn. For 1–2 questions, ask directly in chat — a file round-trip isn't worth it.
 
 Examples of good questions:
 - "The ticket says update the API — should this be backwards-compatible, or can we break existing callers?"
@@ -86,11 +90,11 @@ Wait for the user's answers before proceeding.
 
 Design the execution plan. Follow these constraints:
 
-### TDD first
-The first plan step must always be: **"Write failing tests that define the expected behavior."**
-- This applies to features, bug fixes, and refactors.
-- Exception: pure documentation or config-only changes with no testable behavior.
-- If CLAUDE.md has no test command under `## Commands`, note this and ask the user to add one before you proceed.
+### TDD — conditional, not blanket
+Mark each step's `tdd` field `"required"` or `"optional"`.
+- `"required"` (default): features, bug fixes, refactors, anything with testable behavior. The first such step must be: **"Write failing tests that define the expected behavior."**
+- `"optional"`: pure documentation, config-only changes, renames/rewires with no behavior change, or other steps with nothing testable. Skip the test-writing step.
+- If CLAUDE.md has no test command under `## Commands` and any step is `tdd: "required"`, note this and ask the user to add one before you proceed.
 
 ### SOLID principles check
 Before finalizing step design, check the proposed approach against SOLID principles:
@@ -113,6 +117,8 @@ Flag any violations inline in the plan. Don't block — note it and adjust the d
   - **Verification**: how developer confirms step is done
   - **Risk**: HIGH if step touches auth, payments, data migrations, security config, or external API contracts; LOW otherwise
 - Mark a step `execution: "async"` only when it touches a disjoint file set from every other step in its `parallel_group` and has no ordering dependency on them. Default `execution` to `"sync"` otherwise. Steps sharing a `parallel_group` must be contiguous in `plan_steps`.
+- Mark a step `owner: "human"` when it's a mechanical, unambiguous, single-file-or-config change the user can do faster than watching an agent narrate it (rename, version bump, config toggle, boilerplate copy-paste) — same bar as a "surgical 1-2 file edit." Default `owner` to `"ai"`. `/build` pauses before a `human`-owned step instead of spawning `@developer`/`@qa` for it.
+- Mark a step `model: "haiku"` when it's small, atomic, and fully specified by this plan (no design judgment left to make at build time) — the cheap model should be able to execute it correctly from the step's `how` alone. Default `model` to `"inherit"` (session model) for anything requiring reasoning, unfamiliar code, or judgment calls. If a `haiku` step fails QA twice, that's a signal the step wasn't broken down small enough — split it further, don't just bump the model.
 
 Flag any HIGH-risk steps with `⚠️ HIGH RISK` in the step title. These steps will receive a dedicated security audit in `/ship`.
 
@@ -135,7 +141,7 @@ Scan each plan step for UI or UX changes: new screens, changed navigation, form 
 
 Before showing the plan to the user, self-review it against these checks:
 
-1. **TDD**: Is step 1 a test-writing step? If not, insert one.
+1. **TDD**: For every step with `tdd: "required"`, is a failing-test step present before its implementation? If not, insert one. Verify no step wrongly marked `"optional"` when it has testable behavior.
 2. **Scope creep**: Does any step touch files not needed for the objective? Remove the extras.
 3. **Step size**: Is any step more than ~30 min or 4 files? Split it.
 4. **Missing verification**: Does every step have a concrete, checkable **Verification** line?
@@ -203,7 +209,10 @@ When the user approves, persist the plan via registry MCP:
       "risk": "LOW",
       "status": "pending",
       "execution": "sync",
-      "parallel_group": null
+      "parallel_group": null,
+      "owner": "ai",
+      "tdd": "required",
+      "model": "inherit"
     },
     {
       "id": 2,
@@ -216,7 +225,10 @@ When the user approves, persist the plan via registry MCP:
       "risk": "LOW",
       "status": "pending",
       "execution": "sync",
-      "parallel_group": null
+      "parallel_group": null,
+      "owner": "ai",
+      "tdd": "required",
+      "model": "inherit"
     }
   ],
   "expected_pr": {
@@ -235,6 +247,12 @@ When the user approves, persist the plan via registry MCP:
 **`execution`** (`"sync"` | `"async"`, default `"sync"`): whether this step runs in the standard sequential single-checkout flow, or concurrently in an isolated worktree alongside other steps in the same `parallel_group`.
 
 **`parallel_group`** (int, only meaningful when `execution` is `"async"`): identifies which group of concurrently-run steps this step belongs to. `null`/omitted for `"sync"` steps.
+
+**`owner`** (`"ai"` | `"human"`, default `"ai"`): `"human"` marks a mechanical step the user does themselves. `/build` pauses before it instead of spawning `@developer`/`@qa`.
+
+**`tdd`** (`"required"` | `"optional"`, default `"required"`): `"optional"` skips the failing-test-first step for config/docs/no-behavior-change steps.
+
+**`model`** (`"inherit"` | `"haiku"`, default `"inherit"`): `"haiku"` routes the step's `@developer`/`@qa` agent calls to the cheap model — only for steps small and unambiguous enough that the plan's `how` fully specifies the work.
 
 **Branch name**: call `registry_derive_branch_name(ticket, ticket_type, description)` — deterministic prefix (feat/fix/research/chore) + slugified description. Applies identically to real JIRA keys and auto-generated fake ticket keys.
 
@@ -256,27 +274,4 @@ Next: open a new chat and run /build to execute the plan.
 
 ## SELF-IMPROVEMENT
 
-At the end of each run, reflect on what you learned. If anything is worth saving, act on it before returning to the user.
-
-**Save resource discoveries** — any URL, channel ID, repo slug, log group, cluster name, or other reusable external resource found during this run:
-```
-registry_set(project_name, "resources.{category}.{key}", value)
-```
-Categories: `grafana`, `slack`, `aws`, `bitbucket`, `confluence`, `jira`, `scripts`.
-Example: `registry_set("emily", "resources.grafana.api_dashboard", "http://grafana/d/abc123")`
-
-**Save reusable commands/lookups** — any command or lookup derived this run that could be reused instead of re-derived next time:
-```
-registry_set(project_name, "resources.scripts.{name}", {command: "...", description: "...", learned_at: "<RFC3339 timestamp>"})
-```
-
-**Fix wrong project metadata** — if deploy.cluster, repo.base, or any other registry field was incorrect:
-```
-registry_set(project_name, "deploy.cluster", correct_value)
-```
-
-**Improve this skill** — if a better approach was found, make a targeted minimal edit to:
-`/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles/claude/skills/plan.md`
-Edit only the specific line or section that was wrong or incomplete. Do not rewrite the whole file.
-
-Skip all of the above if nothing new was learned.
+End of run: save any new resource/command via `registry_set(project_name, "resources.{category}.{key}", value)` (categories: grafana/slack/aws/bitbucket/confluence/jira/scripts), fix wrong project metadata the same way (e.g. `registry_set(project_name, "deploy.cluster", correct_value)`), and make a targeted edit to `claude/skills/plan.md` if a better approach was found. Skip if nothing new was learned.

@@ -110,6 +110,9 @@ Writes/updates plan file. Used by `/plan` to persist mission state.
 **Plan step schema additions**: Each entry in `plan_steps[]` may carry:
 - `execution`: `"sync"|"async"` (default `"sync"`) — `"async"` marks the step eligible for concurrent execution during `/build`.
 - `parallel_group`: `int` — only meaningful when `execution` is `"async"`; identifies which contiguous block of async steps run concurrently together.
+- `owner`: `"ai"|"human"` (default `"ai"`) — `"human"` marks a mechanical, unambiguous step the user does themselves; `/build` pauses before it (`status: "awaiting_human"`) instead of spawning `@developer`/`@qa`.
+- `tdd`: `"required"|"optional"` (default `"required"`) — `"optional"` skips the failing-test-first step for config/docs/no-behavior-change steps.
+- `model`: `"inherit"|"haiku"` (default `"inherit"`) — `"haiku"` routes that step's `@developer`/`@qa` agent calls to the cheap model; only for steps small/unambiguous enough that the plan's `how` fully specifies the work.
 
 `registry_write_plan` validates async groups at write time (`validatePlanSteps`): rejects (returns an error, does not persist) any plan where async steps sharing a `parallel_group` have overlapping files, or where a step's files are missing/unknown.
 
@@ -210,100 +213,7 @@ Flattens and deduplicates multiple file-path arrays into one union, preserving f
 
 ## Decisions
 
-### [2026-06-09] — Auto-generated ticket counter via registry
-- **Context**: Skills need to work w/o external JIRA tickets (personal projects). Counter must persist + auto-increment.
-- **Decision**: Store `ticket_counter` in `registry_get_project(project_name)` under dot-path. Increment in-memory during plan phase, call `registry_set()` to persist.
-- **Rejected alternatives**:
-  - Separate counter file: more fragile, doesn't fit registry pattern.
-  - Always require JIRA ticket: breaks offline workflows for personal repos.
-- **Consequences**: Fake ticket keys (e.g. `DOTFILES-1`) never transition in JIRA; `ship.md` detects + skips JIRA transition if key matches auto-gen pattern.
-
-### [2026-06-09] — Audit trail in registry, not separate tool
-- **Context**: Need to track shipped work for monthly/quarterly reporting (perf reviews, reconciliation).
-- **Decision**: Store audit entries in `data/{project}/audit.json` via `registry_write_audit()`. Query via `registry_get_audit()` w/ date range filter.
-- **Rejected alternatives**:
-  - Separate audit database: adds ops complexity, out of sync w/ plans.
-  - Git log parsing: fragile, misses metadata (story points, labels, impact).
-- **Consequences**: Each shipped plan writes exactly one audit entry. Skills query w/ lexicographic date compare (works — ISO 8601 sortable).
-
-### [2026-06-09] — Skills are pure routing, not execution
-- **Context**: Skills need to be composable, user-invocable, kept in sync w/ arch changes.
-- **Decision**: Skills (markdown prompt files) act as routers: parse user input, invoke `@agent` (e.g. `@jira`, `@confluence`), return output direct. No logic duplication.
-- **Rejected alternatives**:
-  - Skills hold business logic: duplicates agents, harder to maintain.
-  - Single monolithic skill: poor UX, hard to find subcommands.
-- **Consequences**: Each skill ~30–50 lines MD. Agents (@jira, @confluence, @standup, etc.) hold actual business logic, update independently.
-
-### [2026-06-22] — Hook-based resource injection, not per-skill queries
-- **Context**: Skills need access to discovered external resources (Slack channels, Grafana dashboards, Bitbucket repos, log groups). Resources discovered at runtime, saved to registry, but need availability w/o extra API calls next run.
-- **Decision**: `inject-registry-context.js` as UserPromptSubmit hook emits project metadata + all resources as system-reminder each session start. Skills check injected context first (zero cost), fall back to env vars, then interactive prompts. Skills discovering new resources save via `registry_set()`.
-- **Rejected alternatives**:
-  - Each skill calls `registry_get_resources()` on startup: adds API latency, couples to registry uptime; breaks offline workflows.
-  - Pre-compute + cache resources in env vars: doesn't evolve w/ discoveries; needs manual sync.
-  - Store in gitignored config files: fragile, per-machine, hard to reconcile.
-- **Consequences**: Skills = stateless discovery engines. Registry = source of truth for external integrations. Hook dedupes per session (flag file), skips re-parse each prompt. New resources from one skill instant-available to others, no restart.
-- **Broken [2026-07-23 to 2026-08-11, found + fixed 2026-08-11]**: DOTFILES-23's SQLite migration moved storage from `data/{project}/project.json` to a single `registry.db`, but this hook was never updated — it kept reading the dead JSON path, silently caught the ENOENT, and injected nothing for every session in that window. Fixed to query `registry.db` directly via the `sqlite3` CLI. Checked actual context-block size across all real projects post-fix: 137–2154 bytes (`emily` largest) — nowhere near a token-budget concern today, but worth re-checking if any project's `resources` tree grows substantially.
-
-### [2026-07-14] — Registry is a hard dependency; no local fallback
-- **Context**: Early skill impls fell back to local JSON files in `~/.claude/` when registry MCP down — dual sources of truth, data drift. Bugs from stale local data used over authoritative registry state.
-- **Decision**: Registry MCP (`registry_write_plan`, `registry_get_plan`, `registry_list_plans`, `registry_update_step`, `registry_write_audit`) now mandatory hard dependency for `/plan`, `/build`, `/ship`. Skills depending on mission state/audit trail STOP immediately w/ clear error if registry MCP down. No fallback to local files.
-- **Rejected alternatives**:
-  - Dual-path w/ local fallback: data drift, audit trail inconsistency, silent fails on stale local data.
-  - Offline mode w/ sync-on-reconnect: adds complexity, doesn't stop race conditions between offline edits + registry state.
-- **Consequences**: Skills need working registry MCP connection to run. Simplifies data model, ensures single source of truth. Operators must ensure registry server up before `/plan`, `/build`, `/ship`. Error msgs clear ("Registry MCP is unavailable. Fix the MCP connection before running /build.").
-
-### [2026-07-22] — Agent model pinning: cheap models for lookups, expensive for reasoning
-- **Context**: Agents serve different purposes (data lookup vs complex reasoning) with different cost/capability tradeoffs. Need consistent strategy to avoid overpaying for simple operations while ensuring reasoning agents have sufficient model capacity.
-- **Decision**: Pin read-only/lookup agents (investigator, jira, confluence) to `claude-haiku-4-5-20251001` (cheap model). Explicitly document complex-reasoning agents (developer, planner, reviewer, security) as inheriting session model with frontmatter comment `# model: inherits session model (intentional — complex reasoning task)`.
-- **Rejected alternatives**:
-  - All agents same model: wastes budget on cheap read-only operations; expensive models on simple lookups.
-  - All agents cheap model: breaks complex planning/review/security reasoning; false economy — cheap models fail on reasoning tasks.
-- **Consequences**: Cost-efficient inference across agent fleet. Lookup operations run fast/cheap. Complex reasoning tasks inherit session model (typically Sonnet/Opus tier). New agents added going forward should be categorized + pinned accordingly (lookup → haiku, reasoning → inherit).
-
-### [2026-07-23] — Best-effort context compression with graceful fallback, no local state
-- **Context**: Registry context block injected at session start can grow large, risking token limit breaches. Need automatic compression, but can't add brittle mandatory dependencies or state management overhead.
-- **Decision**: `inject-registry-context.js` wraps context in try/catch, calls `headroom_compress.py` subprocess (Python + headroom-ai) w/ 3s timeout. On success with non-empty output, use compressed block. On any failure (ImportError, timeout, headroom error), silently revert to original uncompressed block. No exception propagates; session always continues.
-- **Rejected alternatives**:
-  - Dual-path with cached compressed + raw files: adds state sync complexity, data drift, no reliability gain.
-  - Mandatory compression: breaks if python3/headroom unavailable; unacceptable for CLI tool.
-  - Skip compression: context unbounded, eventual token limit hit.
-  - Async compression in background: complexity, timing unpredictability.
-- **Consequences**: ~0–3s worst-case latency added to session start (subprocess spawn + compression timeout). Graceful degradation: tool always works. Headroom dependency is optional (try/catch fallback). Cost: one subprocess invocation per session.
-- **Superseded [2026-07-27, DOTFILES-24]**: Headroom compression reverted — removed from `inject-registry-context.js`. Extra complexity (subprocess spawn, timeout handling, optional Python dependency) wasn't worth the marginal benefit. User can run headroom independently outside this repo if desired.
-
-### [2026-07-23] — Registry storage: SQLite over Postgres/Docker
-- **Context**: JSON-per-project storage had load-all-then-filter-in-Go date-range queries for `registry_get_audit()` and `registry_get_deploy_checks()`, adding O(n) latency. Write races (TOCTOU) on concurrent plan updates. Needed indexed date-range queries, transactional writes, and atomic counter increments without adding ops burden or cloud dependencies.
-- **Decision**: Single embedded SQLite DB (WAL mode) at `~/.config/registry/data/registry.db`, using pure-Go `modernc.org/sqlite` driver (no cgo, no Postgres server, no Docker Compose, no cloud deployment). All 13 MCP tool signatures unchanged — transparent swap, backward-compatible. Migration: one-shot `cmd/migrate/main.go` tool backs up old JSON tree to `~/.config/registry/data.bak-{timestamp}`, then verifies zero-diff parity across all real projects before cleanup.
-- **Rejected alternatives**:
-  - Postgres + Docker Compose: adds ops overhead, requires running a separate service, unacceptable for single-operator personal tool.
-  - mattn/go-sqlite3 (cgo driver): breaks pure-Go cross-compilation; `modernc.org/sqlite` (pure-Go) is portable, no build dependencies.
-- **Consequences**: Plans table now has autoincrement id + created_at (stamped once, never overwritten). `registry_get_audit()` and `registry_get_deploy_checks()` use indexed SQL WHERE clauses instead of loading all data into Go. Old JSON files under `data/{project}/*.json` are dead weight, kept alongside timestamped backup for safety during rollout, not yet deleted. Counter increments are now atomic transactions. Tools become O(1) on range queries instead of O(n).
-
-### [2026-08-05] — Graph-engineering fan-out spike on code-review
-- **Context**: `code-review` always ran a single `@reviewer` pass. Spiked a `--graph` opt-in mode that fans out to 4 isolated dimension-reviewer agents (bugs/correctness, security, scope/AC, style) plus a synthesis agent, to test whether isolated-context parallel review surfaces more/better findings than one general-purpose pass.
-- **Decision**: Keep `--graph` opt-in, not promoted to default. Default `code-review local` behavior unchanged (single-pass `@reviewer`). Fan-out costs 5x the agent calls of a single-pass review, so the quality tradeoff needs validating against a real diff before defaulting to it — deferred to a real-world comparison run by the user.
-- **Rejected alternatives**:
-  - Promote graph mode to default now: 5x cost per review without measured evidence it improves finding quality/coverage over single-pass.
-  - Drop graph mode entirely: no data yet to rule it out; keeping it opt-in preserves the option at zero cost to existing users.
-- **Consequences**: `code-review local --graph` available for on-demand deeper review; `code-review local` (no flag) unchanged. Re-evaluate promotion once a real comparison run (graph vs non-graph on the same diff) is on record.
-
-### [2026-08-11] — Deterministic Workflow scripts for /build's internals, code-review --graph, and ship's review pass
-- **Context**: Full read-through of `plan.md`/`build.md`/`ship.md` plus all 6 supporting agents found: (1) TDD-first and execute-don't-assume verification were already implemented as bespoke prose, no porting needed; (2) `/plan`, `/build`, `/ship` are deliberately three separate commands/sessions (human approval gate in `/plan`, explicit context reset before `/ship`) — collapsing them would remove real checkpoints; (3) `build.md`'s run-partitioning (sync/async), retry counting, git-worktree lifecycle, and merge-ordering was the highest-complexity prose in the whole pipeline, re-derived by the LLM every run instead of executed as code; (4) no step anywhere invoked `@investigator` before designing a bugfix, so tickets could get "fixed" without confirming the actual root cause.
-- **Decision**: Kept `/plan`, `/build`, `/ship` as three separate commands — only rebuilt the parts with zero required human interaction as real Workflow scripts. `build.md` is now a thin dispatcher calling `build-workflow.js` (real control flow for partitioning/retries/worktrees/merge order — worktrees hand-rolled via explicit git commands in spawned agents, not the `Workflow` tool's built-in `isolation: 'worktree'` option, since that option's exact semantics weren't verified against the branch-off-feature-branch + sequential-merge-back requirement this pipeline needs). `code-review.md`'s `--graph` mode now calls `code-review-workflow.js` (4-dimension parallel fan-out + synthesis as real code). `ship.md`'s security-gate + reviewer pass now calls `ship-review-workflow.js`; the REJECTED human-decision branch and remaining ship steps stay in `ship.md` itself since a background script can't pause for that decision. Added a root-cause gate to `plan.md` STEP 3a: Bug/Defect tickets invoke `@investigator` before step design, and the Planning Critic (STEP 5b) checks the fix step's `Why:` cites the confirmed root cause. Also added the registry event log (`registry_write_event`/`registry_get_events`, `events` table) so `code-review.md` persists reviews, viewable at `/projects/{name}/reviews` in registry-ui.
-- **Rejected alternatives**:
-  - Collapse `/plan`/`/build`/`/ship` into one command: removes the human approval checkpoint before execution and the deliberate context reset; real audit history shows meaningful time gaps between build-done and shipped that this would eliminate.
-  - Rely on `Workflow`'s `isolation: 'worktree'` option for async step parallelism: unverified whether its semantics (base ref, auto-merge, cleanup timing) match the exact branch-off-feature-branch + sequential-index-order-merge requirement; hand-rolled git commands via agent calls match `build.md`'s existing, proven flow without the assumption.
-  - Convert all of `/ship` to a Workflow script: most of it (documenter, handover, audit write, JIRA transition) is already a short linear sequence: no complexity to gain by scripting it, and the REJECTED branch genuinely needs a human in the loop.
-- **Consequences**: `/build`'s retry counts, run partitioning, and merge ordering can no longer be skipped or miscounted by an LLM improvising the loop — they're real JS control flow in `claude/workflows/build-workflow.js`. `/build` now runs as a background `Workflow` task rather than narrating step-by-step inline in the same chat turn (matches its existing "check back later" design intent; `/workflows` gives live progress if wanted). Bug/Defect plans now cite a confirmed root cause instead of the raw ticket symptom. PR reviews are queryable history instead of one-off HTML reports. Worktree-isolation semantics for async build steps should be empirically verified against a real (low-stakes) ticket before trusting it on client-repo work.
-- **Follow-up [2026-08-11]**: Live end-to-end test of `build-workflow.js` against a scratch `DOTFILES-29` ticket (sync path only) initially failed — `args` arrived at the script as a JSON-encoded string rather than the parsed object the `Workflow` tool's docs describe. Fixed by defensively `JSON.parse`-ing `args` at the top of all three workflow scripts. Re-run succeeded: developer → QA → commit all completed, `registry_update_step` marked the step done. Async/worktree path remains unverified — test before trusting on real multi-step async plans.
-
-### [2026-08-11] — Deterministic helpers offloaded from LLM prose to registry MCP tools
-- **Context**: Several steps in `plan.md`/`ship.md` asked the LLM to compute pure, deterministic string/logic operations from prose rules every run — branch-name derivation (issue-type → prefix + slug), audit `type` inference from branch prefix, fake-vs-real ticket detection (compare against `ticket_counter`), and `files_changed` union/dedup across plan steps. None of these need judgment; all are candidates for token savings and zero ambiguity, matching the pattern `validatePlanSteps` already established server-side for async-group file-overlap checks.
-- **Decision**: Added four new registry MCP tools — `registry_derive_branch_name`, `registry_infer_audit_type`, `registry_is_fake_ticket`, `registry_union_files` — as pure Go functions with unit tests. `plan.md` STEP 8 and `ship.md` STEPS 5–6 now call these instead of deriving the values from prose.
-- **Rejected alternatives**:
-  - Leave as LLM-computed prose: works today because the rules are simple, but every run re-spends tokens re-deriving values that have exactly one correct answer, and any future rule change means updating prose in multiple skill files instead of one Go function.
-  - Standalone script/binary invoked via Bash instead of an MCP tool: registry MCP is already the established home for this exact pattern (deterministic derivations needing project/ticket state); no new invocation mechanism needed.
-- **Consequences**: These four are pure functions — no side effects, easy to unit test, easy to extend. Other deterministic-logic candidates in the pipeline can follow the same pattern opportunistically; no need for another dedicated pass.
+Full architecture-decision history lives in the registry event log, not here — query via `registry_get_events("private-dotfiles", "decision")`. Migrated from this file on 2026-08-18 (11 entries, 2026-06-09 through 2026-08-18) to stop loading the whole growing log into every session. `@documenter` writes new decisions there going forward (see `documenter.md` section 3); it no longer appends full entries to this file.
 
 ---
 
@@ -324,7 +234,8 @@ Flattens and deduplicates multiple file-path arrays into one union, preserving f
 - **Agent-graph fan-out**: Pattern where a task is split across multiple independent, context-isolated subagents that run in parallel, each producing a partial result, then a dedicated synthesis step merges those outputs into one final artifact. Used in `code-review --graph` mode (4 dimension-reviewer agents + synthesis) and `idea-validation` (4 research agents + synthesis).
 - **Workflow script**: A checked-in JS file under `claude/workflows/` run via the `Workflow` tool — real control flow (loops, retries, `parallel()`/`pipeline()`) instead of markdown prose an LLM re-derives each run. Used for `/build`'s internals (`build-workflow.js`), `code-review --graph` (`code-review-workflow.js`), and `/ship`'s security+reviewer pass (`ship-review-workflow.js`).
 - **Event log**: `events` table in the registry, written via `registry_write_event(project, type, data, tags?)`. Generic across interaction types (`pr_review`, future `investigation`/`idea_validation`) rather than one bespoke table per type. Viewable at `/projects/{name}/reviews` in registry-ui (currently `pr_review` only).
-- **Root-cause gate**: `/plan` STEP 3a — for Bug/Defect tickets, invokes `@investigator` before step design so the fix step's `Why:` cites the confirmed root cause instead of the raw ticket symptom.
+- **Root-cause gate**: `/plan` STEP 3a — for Bug/Defect tickets, invokes `@investigator` before step design so the fix step's `Why:` cites the confirmed root cause instead of the raw ticket symptom. Skipped for obvious bugs (ticket already pinpoints the exact cause and a quick read confirms it) — see [2026-08-18] decision.
+- **Human-owned step**: A plan step marked `owner:"human"`; `/build` pauses (`status: "awaiting_human"`) before it instead of spawning `@developer`/`@qa`, since the work is mechanical enough the user does it faster themselves.
 
 ---
 

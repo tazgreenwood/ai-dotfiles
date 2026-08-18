@@ -57,12 +57,7 @@ Pass:
 **Retry**: if @developer returns BLOCKED, retry up to 2 times. On 3rd failure, surface to user.
 
 ### 5b. Invoke @qa
-Run in order:
-1. Linter (from `## Commands → Lint` in CLAUDE.md)
-2. Formatter check (from `## Commands → Format`)
-3. Test suite (from `## Commands → Tests`)
-4. Logic audit on changed files
-5. Verify the specific comment issue is resolved
+Follows `qa.md`'s protocol as-is (lint/format/test asked of the user, not self-run — see that file). Additionally verify the specific comment issue is resolved.
 
 **If NO-GO**: pass failure back to @developer (retry up to 2 times). On 3rd failure, surface to user.
 
@@ -93,27 +88,4 @@ Note: do not push to remote. Pushing happens as part of PR management — not th
 
 ## SELF-IMPROVEMENT
 
-At the end of each run, reflect on what you learned. If anything is worth saving, act on it before returning to the user.
-
-**Save resource discoveries** — any URL, channel ID, repo slug, log group, cluster name, or other reusable external resource found during this run:
-```
-registry_set(project_name, "resources.{category}.{key}", value)
-```
-Categories: `grafana`, `slack`, `aws`, `bitbucket`, `confluence`, `jira`, `scripts`.
-Example: `registry_set("emily", "resources.grafana.api_dashboard", "http://grafana/d/abc123")`
-
-**Save reusable commands/lookups** — any command or lookup derived this run that could be reused instead of re-derived next time:
-```
-registry_set(project_name, "resources.scripts.{name}", {command: "...", description: "...", learned_at: "<RFC3339 timestamp>"})
-```
-
-**Fix wrong project metadata** — if deploy.cluster, repo.base, or any other registry field was incorrect:
-```
-registry_set(project_name, "deploy.cluster", correct_value)
-```
-
-**Improve this skill** — if a better approach was found, make a targeted minimal edit to:
-`/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles/claude/skills/pr-respond.md`
-Edit only the specific line or section that was wrong or incomplete. Do not rewrite the whole file.
-
-Skip all of the above if nothing new was learned.
+End of run: save any new resource/command via `registry_set(project_name, "resources.{category}.{key}", value)` (categories: grafana/slack/aws/bitbucket/confluence/jira/scripts), fix wrong project metadata the same way (e.g. `registry_set(project_name, "deploy.cluster", correct_value)`), and make a targeted edit to `claude/skills/pr-respond.md` if a better approach was found. Skip if nothing new was learned.

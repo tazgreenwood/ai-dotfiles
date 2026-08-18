@@ -171,7 +171,7 @@ type reviewData struct {
 	DiffOverview  string
 	ExecutionMode string
 	ExecutionLog  string
-	Suggestions   []string
+	Suggestions   []Suggestion
 }
 
 type reviewsListData struct {
@@ -354,6 +354,7 @@ func handleReviewDetail(w http.ResponseWriter, r *http.Request) {
 	render(w, "review.html", data)
 }
 
+// handleReviewsList renders the list of code reviews for a project, querying the registry event log for pr_review entries.
 func handleReviewsList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	name := r.PathValue("name")

@@ -131,27 +131,4 @@ If `@investigator` returned `INCONCLUSIVE`, include that in the TL;DR and recomm
 
 ## SELF-IMPROVEMENT
 
-At the end of each run, reflect on what you learned. If anything is worth saving, act on it before returning to the user.
-
-**Save resource discoveries** — any URL, channel ID, repo slug, log group, cluster name, or other reusable external resource found during this run:
-```
-registry_set(project_name, "resources.{category}.{key}", value)
-```
-Categories: `grafana`, `slack`, `aws`, `bitbucket`, `confluence`, `jira`, `scripts`.
-Example: `registry_set("emily", "resources.grafana.api_dashboard", "http://grafana/d/abc123")`
-
-**Save reusable commands/lookups** — any command or lookup derived this run that could be reused instead of re-derived next time:
-```
-registry_set(project_name, "resources.scripts.{name}", {command: "...", description: "...", learned_at: "<RFC3339 timestamp>"})
-```
-
-**Fix wrong project metadata** — if deploy.cluster, repo.base, or any other registry field was incorrect:
-```
-registry_set(project_name, "deploy.cluster", correct_value)
-```
-
-**Improve this skill** — if a better approach was found, make a targeted minimal edit to:
-`/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles/claude/skills/investigate.md`
-Edit only the specific line or section that was wrong or incomplete. Do not rewrite the whole file.
-
-Skip all of the above if nothing new was learned.
+End of run: save any new resource/command via `registry_set(project_name, "resources.{category}.{key}", value)` (categories: grafana/slack/aws/bitbucket/confluence/jira/scripts), fix wrong project metadata the same way (e.g. `registry_set(project_name, "deploy.cluster", correct_value)`), and make a targeted edit to `claude/skills/investigate.md` if a better approach was found. Skip if nothing new was learned.

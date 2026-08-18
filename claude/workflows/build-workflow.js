@@ -9,6 +9,54 @@ export const meta = {
 
 const MAX_ATTEMPTS = 3
 
+const DEV_SCHEMA = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['done', 'blocked'] },
+    summary: { type: 'string', description: 'One-line summary of what was done, or the specific blocking reason' },
+  },
+  required: ['status', 'summary'],
+}
+
+const QA_SCHEMA = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['go', 'no_go'] },
+    summary: { type: 'string', description: 'Brief summary + ACs covered, or the specific failure reason and what must be fixed' },
+  },
+  required: ['status', 'summary'],
+}
+
+const COMMIT_SCHEMA = {
+  type: 'object',
+  properties: { status: { type: 'string', enum: ['done'] } },
+  required: ['status'],
+}
+
+const BLOCK_SCHEMA = {
+  type: 'object',
+  properties: { status: { type: 'string', enum: ['recorded'] } },
+  required: ['status'],
+}
+
+const WORKTREE_SETUP_SCHEMA = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['ready', 'failed'] },
+    reason: { type: 'string', description: 'Present only when status is failed' },
+  },
+  required: ['status'],
+}
+
+const WORKTREE_MERGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['done', 'conflict'] },
+    description: { type: 'string', description: 'Present only when status is conflict' },
+  },
+  required: ['status'],
+}
+
 function acList(criteria) {
   return (criteria || []).map(c => `- ${c}`).join('\n') || '(none)'
 }
@@ -41,9 +89,7 @@ ${attempt > 1 ? `\n## Retry context (attempt ${attempt})\nPrevious attempt faile
 2. Write failing tests first if the Tests field is present.
 3. Implement the step exactly as described.
 4. Run linter, formatter, and test suite per CLAUDE.md Commands.
-5. Return one of:
-   - DEVELOPER STATUS: DONE — [one-line summary of what was done]
-   - DEVELOPER STATUS: BLOCKED — [specific reason]`
+5. Report status "done" with a one-line summary, or "blocked" with the specific reason.`
 }
 
 function qaPrompt(ctx, step, index, cwd) {
@@ -77,9 +123,7 @@ Run in order:
 4. Logic audit: does the implementation match the step's How and Verification?
 5. AC check: which acceptance criteria does this step satisfy?
 
-Return one of:
-- QA STATUS: GO — [brief summary, ACs covered]
-- QA STATUS: NO-GO — [specific failure reason, what must be fixed]`
+Report status "go" with a brief summary and ACs covered, or "no_go" with the specific failure reason and what must be fixed.`
 }
 
 function commitPrompt(ctx, step, index, cwd) {
@@ -95,7 +139,7 @@ Pick TYPE from feat/fix/refactor/test/docs/chore matching the step content. One-
 
 Then call registry_update_step("${ctx.project_name}", "${ctx.ticket}", ${index}, "done").
 
-Return COMMIT STATUS: DONE when finished.`
+Report status "done" when finished.`
 }
 
 function blockPrompt(ctx, index, reason) {
@@ -103,7 +147,7 @@ function blockPrompt(ctx, index, reason) {
 
 Reason this step is blocked: ${reason}
 
-Return BLOCK STATUS: RECORDED when done.`
+Report status "recorded" when done.`
 }
 
 function worktreeSetupPrompt(branch, stepBranch, worktreePath) {
@@ -111,7 +155,7 @@ function worktreeSetupPrompt(branch, stepBranch, worktreePath) {
 
 git worktree add ${worktreePath} -b ${stepBranch} ${branch}
 
-Return WORKTREE STATUS: READY when done, or WORKTREE STATUS: FAILED — [reason] if it errors.`
+Report status "ready" when done, or "failed" with a reason if it errors.`
 }
 
 function worktreeMergePrompt(branch, stepBranch, worktreePath, ctx, index) {
@@ -120,40 +164,52 @@ function worktreeMergePrompt(branch, stepBranch, worktreePath, ctx, index) {
 git checkout ${branch}
 git merge --no-ff ${stepBranch}
 
-If the merge succeeds: run "git worktree remove ${worktreePath}", then call registry_update_step("${ctx.project_name}", "${ctx.ticket}", ${index}, "done"). Return MERGE STATUS: DONE.
+If the merge succeeds: run "git worktree remove ${worktreePath}", then call registry_update_step("${ctx.project_name}", "${ctx.ticket}", ${index}, "done"). Report status "done".
 
-If the merge conflicts: run "git merge --abort" and do not attempt to resolve conflicts. Return MERGE STATUS: CONFLICT — [brief description].`
+If the merge conflicts: run "git merge --abort" and do not attempt to resolve conflicts. Report status "conflict" with a brief description.`
+}
+
+function awaitingHumanPrompt(ctx, step, index) {
+  return `AWAITING HUMAN — step ${index}: ${step.title}
+
+Why: ${step.why}
+How: ${step.how}
+Files: ${JSON.stringify(step.files)}
+Verification: ${step.verification}
+
+This step is owner:"human" — do it yourself, then call registry_update_step("${ctx.project_name}", "${ctx.ticket}", ${index}, "done") and re-run /build to continue.`
 }
 
 async function runStep(ctx, step, index, cwd) {
+  const modelOpt = step.model === 'haiku' ? { model: 'haiku' } : {}
   let attempt = 0
   let failureReason = ''
   while (attempt < MAX_ATTEMPTS) {
     attempt++
-    const dev = await agent(devPrompt(ctx, step, index, attempt, failureReason, cwd), { phase: 'Execute', label: `dev:${index} attempt ${attempt}` })
-    if (/BLOCKED/.test(dev)) {
-      failureReason = dev
+    const dev = await agent(devPrompt(ctx, step, index, attempt, failureReason, cwd), { phase: 'Execute', label: `dev:${index} attempt ${attempt}`, schema: DEV_SCHEMA, ...modelOpt })
+    if (!dev || dev.status === 'blocked') {
+      failureReason = dev ? dev.summary : 'developer agent failed'
       continue
     }
-    const qa = await agent(qaPrompt(ctx, step, index, cwd), { phase: 'Execute', label: `qa:${index} attempt ${attempt}` })
-    if (/NO-GO/.test(qa)) {
-      failureReason = qa
+    const qa = await agent(qaPrompt(ctx, step, index, cwd), { phase: 'Execute', label: `qa:${index} attempt ${attempt}`, schema: QA_SCHEMA, ...modelOpt })
+    if (!qa || qa.status === 'no_go') {
+      failureReason = qa ? qa.summary : 'qa agent failed'
       continue
     }
     if (!cwd) {
       // sync steps commit immediately; async steps commit inside their worktree
       // after QA GO too, but merge-back (not this commit) is what marks "done"
       // in the registry — see worktreeMergePrompt.
-      await agent(commitPrompt(ctx, step, index, cwd), { phase: 'Execute', label: `commit:${index}` })
+      await agent(commitPrompt(ctx, step, index, cwd), { phase: 'Execute', label: `commit:${index}`, schema: COMMIT_SCHEMA })
     } else {
       await agent(commitPrompt(ctx, step, index, cwd).replace(
         `Then call registry_update_step("${ctx.project_name}", "${ctx.ticket}", ${index}, "done").\n\n`,
         ''
-      ), { phase: 'Execute', label: `commit:${index}` })
+      ), { phase: 'Execute', label: `commit:${index}`, schema: COMMIT_SCHEMA })
     }
     return { index, status: 'done' }
   }
-  await agent(blockPrompt(ctx, index, failureReason), { phase: 'Execute', label: `block:${index}` })
+  await agent(blockPrompt(ctx, index, failureReason), { phase: 'Execute', label: `block:${index}`, schema: BLOCK_SCHEMA })
   return { index, status: 'blocked', reason: failureReason }
 }
 
@@ -197,12 +253,22 @@ const results = []
 for (const run of runs) {
   if (run.type === 'sync') {
     const { step, index } = run.items[0]
+    if (step.owner === 'human') {
+      log(awaitingHumanPrompt(ctx, step, index))
+      return { status: 'awaiting_human', results, awaitingHumanAt: index }
+    }
     const r = await runStep(ctx, step, index, null)
     results.push(r)
     if (r.status === 'blocked') {
       return { status: 'blocked', results }
     }
     continue
+  }
+
+  if (run.items.some(x => x.step.owner === 'human')) {
+    const { step, index } = run.items.find(x => x.step.owner === 'human')
+    log(awaitingHumanPrompt(ctx, step, index))
+    return { status: 'awaiting_human', results, awaitingHumanAt: index }
   }
 
   // Async run — hand-rolled git worktrees per step, not agent()'s isolation:'worktree'
@@ -220,9 +286,13 @@ for (const run of runs) {
     path: `~/.worktrees/${(ctx.plan_data.repo || '').split('/').pop() || ctx.project_name}/${ctx.plan_data.branch}-step-${index}`,
   }))
 
-  await parallel(worktrees.map(w => () =>
-    agent(worktreeSetupPrompt(ctx.plan_data.branch, w.branch, w.path), { phase: 'Execute', label: `worktree-setup:${w.index}` })
+  const setupResults = await parallel(worktrees.map(w => () =>
+    agent(worktreeSetupPrompt(ctx.plan_data.branch, w.branch, w.path), { phase: 'Execute', label: `worktree-setup:${w.index}`, schema: WORKTREE_SETUP_SCHEMA })
   ))
+  const failedSetup = worktrees.filter((_, i) => !setupResults[i] || setupResults[i].status === 'failed')
+  if (failedSetup.length) {
+    return { status: 'blocked', results, reason: `worktree setup failed for step(s) ${failedSetup.map(w => w.index).join(', ')}` }
+  }
 
   const stepResults = await parallel(worktrees.map(w => () =>
     runStep(ctx, w.step, w.index, w.path)
@@ -238,10 +308,11 @@ for (const run of runs) {
   for (const w of ordered) {
     const mergeResult = await agent(
       worktreeMergePrompt(ctx.plan_data.branch, w.branch, w.path, ctx, w.index),
-      { phase: 'Merge', label: `merge:${w.index}` }
+      { phase: 'Merge', label: `merge:${w.index}`, schema: WORKTREE_MERGE_SCHEMA }
     )
-    if (/CONFLICT/.test(mergeResult)) {
-      await agent(blockPrompt(ctx, w.index, mergeResult), { phase: 'Merge', label: `block-merge:${w.index}` })
+    if (!mergeResult || mergeResult.status === 'conflict') {
+      const reason = mergeResult ? mergeResult.description : 'merge agent failed'
+      await agent(blockPrompt(ctx, w.index, reason), { phase: 'Merge', label: `block-merge:${w.index}`, schema: BLOCK_SCHEMA })
       return { status: 'blocked', results, mergeConflictAt: w.index }
     }
   }

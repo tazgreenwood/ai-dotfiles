@@ -324,7 +324,10 @@ func TestRenderReview_ContainsExpectedSections(t *testing.T) {
 		DiffOverview:  "3 files changed, 42 insertions, 5 deletions",
 		ExecutionMode: "mock",
 		ExecutionLog:  "ran synthesized inputs through changed functions: all passed",
-		Suggestions:   []string{"Add error handling for nil input", "Extract helper for repeated logic"},
+		Suggestions: []Suggestion{
+			{Finding: "Add error handling for nil input", Severity: "bug"},
+			{Finding: "Extract helper for repeated logic", Severity: "style"},
+		},
 	}
 
 	rec := httptest.NewRecorder()

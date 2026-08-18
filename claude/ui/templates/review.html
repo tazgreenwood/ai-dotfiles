@@ -38,7 +38,7 @@
   <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">Suggestions</h2>
   <ul class="list-disc list-inside space-y-1 text-sm text-zinc-700 dark:text-zinc-300">
     {{range .Suggestions}}
-    <li>{{.}}</li>
+    <li><span class="text-xs uppercase text-zinc-400 dark:text-zinc-500">[{{.Severity}}]</span> {{.Finding}}</li>
     {{end}}
   </ul>
 </section>

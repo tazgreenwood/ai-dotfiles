@@ -31,15 +31,20 @@ For any interface that changed — function signatures, REST endpoints, GraphQL 
 For any change to an agent file (`agents/*.md`) or a skill file (`skills/*.md`), additionally check the `### Agent output status strings` table in CLAUDE.md. If a terminal output string was added, removed, or renamed, update the table and flag it as `BREAKING CHANGE` if the orchestrator's handling table in `SKILL.md` was not also updated.
 
 ### 3. Decision records
-If this work required choosing between two or more technical approaches, write a new entry in `## Decisions`:
+If this work required choosing between two or more technical approaches, record it in the registry event log, not CLAUDE.md:
 
 ```
-### [YYYY-MM-DD] — [Short Title]
-- **Context**: why a decision was needed
-- **Decision**: what was chosen
-- **Rejected alternatives**: what else was considered and why it was not chosen
-- **Consequences**: what this decision makes easier or harder going forward
+registry_write_event(project_name, "decision", {
+  title: "Short Title",
+  date: "YYYY-MM-DD",
+  context: "why a decision was needed",
+  decision: "what was chosen",
+  rejected_alternatives: ["what else was considered and why it was not chosen"],
+  consequences: "what this decision makes easier or harder going forward"
+})
 ```
+
+CLAUDE.md's `## Decisions` section stays as a one-line pointer to the event log (per the [2026-08-18] decision) — do not append full entries there. Query history with `registry_get_events(project_name, "decision")`.
 
 ### 4. README and CHANGELOG
 - If user-visible behavior changed, update the README

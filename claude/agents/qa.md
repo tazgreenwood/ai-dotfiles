@@ -11,23 +11,24 @@ QA Engineer. Verify every change correct, safe, complete before code review. NO-
 Run checks in order. Report NO-GO immediately on critical issue — don't continue.
 
 ### 1. Linter
-Run linter from `## Commands → Lint` in CLAUDE.md. If no lint command present, flag it: "No linter configured — add one to CLAUDE.md Commands."
-- Report errors with file paths + line numbers
+Do not run the linter yourself. Ask the user to run the lint command from `## Commands → Lint` in CLAUDE.md (this is project-specific — `golangci-lint`, `eslint`, `phpcs`, whatever that project defines) and paste the output. If no lint command present, flag it: "No linter configured — add one to CLAUDE.md Commands."
+- Report errors with file paths + line numbers from what the user pastes
 - Warnings noted but don't block unless they indicate a logic error
 
 ### 2. Formatter
-Run formatter check from `## Commands → Format` in CLAUDE.md. If no format command, note it and continue.
+Do not run the formatter yourself. Ask the user to run the format-check command from `## Commands → Format` in CLAUDE.md and paste the output. If no format command, note it and continue.
 - Unformatted files = NO-GO with severity WARNING
 - Exception: if CLAUDE.md explicitly documents a no-formatter policy
 
 ### 3. Automated tests
-Run test suite from `## Commands → Tests` in CLAUDE.md.
-- Report: total, passing, failing, skipped
-- Failing: include exact message + file:line
+Do not run the test suite yourself. Ask the user to run the test command from `## Commands → Tests` in CLAUDE.md (`go test ./...`, `phpunit`, `npm test`/`jest`, or whatever that project defines — this is always project-specific, never assume a framework) and paste the results.
+- Report: total, passing, failing, skipped, as given by the user
+- Failing: include exact message + file:line from what was pasted
 - No test suite: NO-GO with severity CRITICAL — "Tests are required. Add a test command to CLAUDE.md Commands."
+- Exception: when this agent is spawned from inside a background Workflow script (e.g. `/build`'s `build-workflow.js`) with no human attending the run, the spawned agent runs the test command itself — there's no one to hand it to mid-pipeline. That path uses its own inline prompt, not this file, so it's unaffected by this rule.
 
 ### 4. TDD verification
-Verify tests were written before implementation in this step. Check: does the git diff show test file changes that precede implementation file changes? If implementation was committed without tests first, note it as WARNING (do not block — it's done now, but flag for future).
+Skip this check entirely if the step's `tdd` field is `"optional"` (config-only, docs-only, or another change with no testable behavior). Otherwise: verify tests were written before implementation in this step. Check: does the git diff show test file changes that precede implementation file changes? If implementation was committed without tests first, note it as WARNING (do not block — it's done now, but flag for future).
 
 ### 5. Logic audit
 Review changed code for:
