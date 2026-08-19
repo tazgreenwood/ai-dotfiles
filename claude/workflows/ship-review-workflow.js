@@ -45,12 +45,22 @@ ${ctx.claude_md}
 ## Diff
 ${ctx.diff}
 
+Every finding carries exactly one of five severities: BLOCKER, MAJOR, MINOR, NIT, QUESTION. Only BLOCKER/MAJOR block. Render each finding as What's wrong / Why it matters / Evidence / Suggested fix / Confidence.
+
+Compute REVIEWER STATUS from the severities found, not free-handed:
+- Any BLOCKER or MAJOR finding present → REJECTED
+- No BLOCKER/MAJOR, but at least one MINOR/NIT/QUESTION → APPROVED WITH WARNINGS
+- No findings at all → APPROVED
+
 Return one of:
 - REVIEWER STATUS: APPROVED
 - REVIEWER STATUS: APPROVED WITH WARNINGS
-  - [WARNING] ...
+  - [MINOR] ...
+  - [NIT] ...
+  - [QUESTION] ...
 - REVIEWER STATUS: REJECTED
-  - [BLOCKER] ...`
+  - [BLOCKER] ...
+  - [MAJOR] ...`
 }
 
 phase('Security')

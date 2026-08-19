@@ -38,7 +38,7 @@ This runs `@security` on the full diff on every ship (per the [2026-08-18] widen
 **If `security` is `SECURITY STATUS: GO WITH WARNINGS`**: proceed, include warnings in the PR under `### Security Notes`.
 
 **If `reviewer` is `REVIEWER STATUS: REJECTED`**: surface the rejection to the user with full reviewer output. Ask whether to fix (re-run `/build` with the reviewer feedback) or ship anyway. Do not proceed without user decision.
-**If `reviewer` is `REVIEWER STATUS: APPROVED WITH WARNINGS`**: proceed but include warnings in the PR description under a `### Reviewer Notes` section.
+**If `reviewer` is `REVIEWER STATUS: APPROVED WITH WARNINGS`**: proceed but include warnings in the PR description under a `### Reviewer Notes` section. MINOR and NIT findings are recorded there too and never block a ship — only BLOCKER/MAJOR can produce REJECTED.
 
 ---
 
