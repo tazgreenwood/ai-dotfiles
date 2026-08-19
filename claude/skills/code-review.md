@@ -80,7 +80,7 @@ Graph mode is the default (promoted from opt-in per the [2026-08-18] decision �
 Isolated-context multi-agent fan-out: 4 dimension reviewers in parallel, then one synthesis pass. Runs as a deterministic Workflow script, not improvised fan-out — the 4-way parallel dispatch and the single synthesis call are real control flow, not prose an LLM re-derives each run.
 
 Call the `Workflow` tool with:
-- `scriptPath`: `claude/workflows/code-review-workflow.js`
+- `scriptPath`: `~/.claude/workflows/code-review-workflow.js` (absolute — resolves regardless of invoking cwd, unlike a repo-relative path)
 - `args`: `{ diff, acceptance_spec, claude_md, project_name }` — `diff` from STEP 3, `acceptance_spec` is the PR title/description (PR mode) or branch name + recent commit messages (local mode), `claude_md` from STEP 4 (omit if unavailable), `project_name` detected the same way as STEP 7a (parse from `git remote get-url origin`; omit if it can't be determined)
 
 `project_name` drives the workflow's own learnings loop: before reviewing, it fetches past `review_learning` events for the project (via `registry_get_events`) and feeds them to the dimension/synthesis agents as extra context; after synthesis, it asks an agent to decide whether this run surfaced a new generalizable pattern worth persisting, and if so writes it back via `registry_write_event(project_name, "review_learning", {pattern, signal, action})`. Both steps are skipped silently if `project_name` is omitted or the registry is unavailable.

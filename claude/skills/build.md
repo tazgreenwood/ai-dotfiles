@@ -35,7 +35,7 @@ git checkout -b [branch]
 ## STEP 3: RUN THE BUILD WORKFLOW
 
 Call the `Workflow` tool with:
-- `scriptPath`: `claude/workflows/build-workflow.js`
+- `scriptPath`: `~/.claude/workflows/build-workflow.js` (absolute — resolves regardless of invoking cwd, unlike a repo-relative path)
 - `args`: `{ project_name, ticket, summary, acceptance_criteria, expected_pr, claude_md, plan_data }`
 
 Where `plan_data` is the full mission state object (same shape `/plan` wrote), `claude_md` is the CLAUDE.md contents read in STEP 1, and the rest are pulled from the same mission state for convenience.

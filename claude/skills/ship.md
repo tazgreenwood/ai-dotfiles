@@ -29,7 +29,7 @@ Read `CLAUDE.md` — note Rules, Architecture, API Contracts.
 Scan mission state for any steps where `"risk": "HIGH"` in plan step JSON. If any exist, gather their diffs (`git show [commit-sha]` for each HIGH-risk step's commit) as `high_risk_diffs` for extra scrutiny; otherwise omit it — `@security` always audits the full diff regardless.
 
 Call the `Workflow` tool with:
-- `scriptPath`: `claude/workflows/ship-review-workflow.js`
+- `scriptPath`: `~/.claude/workflows/ship-review-workflow.js` (absolute — resolves regardless of invoking cwd, unlike a repo-relative path)
 - `args`: `{ high_risk_diffs, expected_pr, files_changed, acceptance_criteria, claude_md, diff }` — `files_changed` is the union of `plan_steps[].files` from mission state, `diff` is `git diff [base_branch]...HEAD` output, `claude_md` is the CLAUDE.md contents (Rules and API Contracts at minimum).
 
 This runs `@security` on the full diff on every ship (per the [2026-08-18] widened-gate decision — no longer skipped for non-HIGH-risk work) then the full `reviewer` agent (not cavecrew-reviewer — PR reviews span many files and need prose rationale, not compressed findings) as one deterministic pass, returning `{ security, reviewer }`.

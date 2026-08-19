@@ -95,6 +95,43 @@ if [ -f "$BINARY" ]; then
   fi
 fi
 
+# ── Claude Desktop MCP servers ──────────────────────────────────────────────────
+# Claude Desktop reads its own config, separate from ~/.claude.json (CLI-only).
+# Mirror the registry + bitbucket servers already configured for the CLI so both
+# surfaces see the same tools.
+DESKTOP_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+CLI_CONFIG="$HOME/.claude.json"
+
+if [ "$(uname)" = "Darwin" ] && [ -f "$DESKTOP_CONFIG" ] && [ -f "$CLI_CONFIG" ] && command -v node &>/dev/null; then
+  echo "Registering MCP servers with Claude Desktop..."
+  node - "$DESKTOP_CONFIG" "$CLI_CONFIG" <<'EOF'
+const fs = require('fs');
+const [, , desktopPath, cliPath] = process.argv;
+const desktop = JSON.parse(fs.readFileSync(desktopPath, 'utf8'));
+const cli = JSON.parse(fs.readFileSync(cliPath, 'utf8'));
+if (!desktop.mcpServers) desktop.mcpServers = {};
+let changed = false;
+for (const name of ['registry', 'bitbucket']) {
+  const entry = cli.mcpServers && cli.mcpServers[name];
+  if (!entry) {
+    console.log(`  ⚠ ${name} not found in ~/.claude.json — skipping`);
+    continue;
+  }
+  if (desktop.mcpServers[name]) {
+    console.log(`  ✓ ${name} already registered in Claude Desktop`);
+    continue;
+  }
+  desktop.mcpServers[name] = entry;
+  changed = true;
+  console.log(`  ✓ ${name} added to Claude Desktop config`);
+}
+if (changed) {
+  fs.writeFileSync(desktopPath, JSON.stringify(desktop, null, 2) + '\n');
+  console.log('  ⚠ Restart Claude Desktop to pick up the new MCP servers');
+}
+EOF
+fi
+
 # ── Registry UI ────────────────────────────────────────────────────────────────
 UI_DIR="$DOTFILES/claude/ui"
 UI_BINARY="/usr/local/bin/registry-ui"
