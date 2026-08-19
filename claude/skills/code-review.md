@@ -83,7 +83,12 @@ Call the `Workflow` tool with:
 - `scriptPath`: `claude/workflows/code-review-workflow.js`
 - `args`: `{ diff, acceptance_spec, claude_md }` — `diff` from STEP 3, `acceptance_spec` is the PR title/description (PR mode) or branch name + recent commit messages (local mode), `claude_md` from STEP 4 (omit if unavailable)
 
-The script returns `{ dimensions: [...], synthesis }` where `synthesis` is the merged verdict (APPROVED / APPROVED WITH WARNINGS / REJECTED) with deduped findings — same contract as single-pass mode. Use `synthesis` as the STEP 5 output for the rest of the skill (STEP 6 onward proceed identically regardless of mode).
+The script returns `{ dimensions: [...], findings: [...], verdict }`:
+- `dimensions` — the 4 dimension keys reviewed (`bugs`, `security`, `scope`, `style`)
+- `findings` — the deduped, post-refuter-verification findings array, each shaped per `review-dimension.md`'s finding shape (`severity`, `title`, `file`, `line`, `whats_wrong`, `why_it_matters`, `evidence`, `suggested_fix`, `confidence`, `demoted_from` when a BLOCKER/MAJOR was demoted by the adversarial refuter)
+- `verdict` — APPROVED / APPROVED WITH WARNINGS / REJECTED, computed in code from the severity mapping (BLOCKER/MAJOR present → REJECTED; only MINOR/NIT/QUESTION present → APPROVED WITH WARNINGS; no findings → APPROVED) — never free-handed by an LLM
+
+Use `findings` and `verdict` as the STEP 5 output for the rest of the skill (STEP 6 onward proceed identically regardless of mode).
 
 ### Single-pass mode (`--single`)
 
@@ -137,16 +142,28 @@ Applies to **both PR mode and local mode** — this is the final action of the s
 ### Assemble the report data
 
 Gather everything produced by earlier steps:
-- **Summary** — one-paragraph overview of the change and the verdict (APPROVED / APPROVED WITH WARNINGS / REJECTED)
+- **Bottom line** — one sentence: the verdict, plus the single most important thing to tell a coworker about this change. Written last, after the findings are grouped, so it actually reflects what's in them.
+- **Verdict** — APPROVED / APPROVED WITH WARNINGS / REJECTED, from STEP 5 (graph mode: computed in code by the workflow; single-pass mode: returned by `@reviewer`)
 - **Why** — PR title + description (PR mode) or branch name + recent commit messages (local mode), from STEP 2
 - **Diff overview** — files changed, additions/deletions, from STEP 3
 - **Execution mode** — `real` or `mock`, from STEP 6
 - **Execution log** — the captured stdout/stderr or mock invocation output, from STEP 6
-- **Suggestions/findings** — the list of findings from STEP 5, each tagged with severity (`bug`, `security`, `style`, `question`) and which execution mode (real/mock) backs it, from STEP 6
+- **Findings, grouped by severity** — the `findings` array from STEP 5 (graph mode) or the findings list from `@reviewer` (single-pass mode), partitioned into BLOCKER, MAJOR, MINOR, NIT, QUESTION buckets (in that order), each finding rendered per `review-dimension.md`'s finding shape:
+  ```
+  ### [SEVERITY] <title> — `file:line`
+  **What's wrong:** ...
+  **Why it matters:** ...
+  **Evidence:** ...
+  **Suggested fix:** ... (omit for QUESTION)
+  **Confidence:** high | medium | low
+  ```
+  A finding carrying `demoted_from` notes it: `(demoted from MAJOR — survived the refuter pass at reduced severity)`.
 
 ### Default: print Markdown to chat
 
-Print the report directly in the response as Markdown: Title, Summary, Why, Diff Overview, Execution Results (mode + log), Suggestions. This is the default output; no file is written.
+Print the report directly in the response as Markdown, in this order: Title, **Bottom line**, Verdict, Why, Diff Overview, Execution Results (mode + log), then Findings grouped by severity — a `## BLOCKER` section, then `## MAJOR`, `## MINOR`, `## NIT`, `## QUESTION`, omitting any section with zero findings. This is the default output; no file is written.
+
+**MINOR and NIT findings are informational, never merge blockers.** Quote the anti-perfectionism rule from `review-dimension.md` verbatim when presenting these sections: "MINOR and NIT never escalate. If you are tempted to mark polish as MAJOR, mark it MINOR. Perfection is the enemy of progress." Never phrase a MINOR or NIT finding as something that must be fixed before merge — only BLOCKER and MAJOR findings block; the computed verdict already reflects this (STEP 5), so the report's language must not contradict it.
 
 ### On request: render a shareable HTML file
 
@@ -177,7 +194,7 @@ data: {
   diff_overview: [files changed, additions/deletions, from STEP 3],
   execution_mode: [real / mock, from STEP 6],
   execution_log: [captured stdout/stderr or mock invocation output, from STEP 6],
-  suggestions: [findings list from STEP 5, each tagged with severity]
+  suggestions: [structured findings array from STEP 5 — pass the objects as-is, one per finding: { severity, title, file, line, whats_wrong, why_it_matters, evidence, suggested_fix, confidence, demoted_from } — not a prose summary]
 }
 ```
 `project_name` is detected the same way as `/plan` (parse from `git remote get-url origin`). If registry MCP is unavailable, skip this step silently — do not block the report on it.
@@ -194,6 +211,7 @@ CODE REVIEW COMPLETE
 PR: [pr_url]
 Author: [author]
 Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
+Findings: [N] blocker, [N] major, [N] minor, [N] nit, [N] question
 Report: [path to HTML file] (opened in browser)
 ```
 
@@ -202,9 +220,12 @@ Report: [path to HTML file] (opened in browser)
 CODE REVIEW COMPLETE
 Branch: [branch_name] → [base_branch]
 Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
+Findings: [N] blocker, [N] major, [N] minor, [N] nit, [N] question
 Execution: [real test run / synthesized mock — see report]
 Report: [path to HTML file] (opened in browser)
 ```
+
+The severity tally counts the STEP 5 `findings` array (or `@reviewer`'s findings list in single-pass mode) by severity — e.g. `Findings: 0 blocker, 2 major, 3 minor, 1 nit`.
 
 ## SELF-IMPROVEMENT
 
