@@ -140,6 +140,22 @@ function computeVerdict(findings) {
   return 'APPROVED'
 }
 
+// Guards against the synthesis pass silently dropping a BLOCKER/MAJOR while
+// deduping/merging: any pre-synthesis blocking finding with no same-file
+// blocking counterpart in the merged output is appended back verbatim, so
+// what's displayed/tallied can never show fewer blocking findings than what
+// actually produced the verdict. Also covers `synthesis.findings` coming
+// back empty (`[]` is truthy, so `[] || findings` would otherwise not fall
+// back to the pre-synthesis list).
+function reconcileFindings(preSynthesis, postSynthesis) {
+  if (!postSynthesis || postSynthesis.length === 0) return preSynthesis
+  const isBlocking = f => BLOCKING_SEVERITIES.includes(f.severity)
+  const missing = preSynthesis
+    .filter(isBlocking)
+    .filter(pre => !postSynthesis.some(post => isBlocking(post) && post.file === pre.file))
+  return missing.length > 0 ? [...postSynthesis, ...missing] : postSynthesis
+}
+
 const ctx = typeof args === 'string' ? JSON.parse(args) : args
 
 const findings = await pipeline([
@@ -196,7 +212,7 @@ const synthesis = await agent(synthesisPrompt(ctx, findings), {
   schema: SYNTHESIS_SCHEMA,
   effort: 'high',
 })
-const finalFindings = (synthesis && synthesis.findings) || findings
+const finalFindings = reconcileFindings(findings, synthesis && synthesis.findings)
 
 // Verdict is computed from the pre-synthesis findings, not the LLM-merged
 // output — synthesis only dedupes for display. This stops a confirmed

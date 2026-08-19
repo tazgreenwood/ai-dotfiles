@@ -46,7 +46,9 @@
       </div>
       {{if .WhatsWrong}}<p>{{.WhatsWrong}}</p>{{end}}
       {{if .WhyItMatters}}<p class="text-zinc-500 dark:text-zinc-400">{{.WhyItMatters}}</p>{{end}}
+      {{if .Evidence}}<p><span class="font-medium">Evidence:</span> {{.Evidence}}</p>{{end}}
       {{if .SuggestedFix}}<p><span class="font-medium">Fix:</span> {{.SuggestedFix}}</p>{{end}}
+      {{if .Confidence}}<p class="text-xs text-zinc-400 dark:text-zinc-500">Confidence: {{.Confidence}}</p>{{end}}
     </li>
     {{end}}
   </ul>

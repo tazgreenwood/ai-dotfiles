@@ -325,8 +325,18 @@ func TestRenderReview_ContainsExpectedSections(t *testing.T) {
 		ExecutionMode: "mock",
 		ExecutionLog:  "ran synthesized inputs through changed functions: all passed",
 		Suggestions: []Suggestion{
-			{Severity: "MAJOR", Title: "Missing nil check", WhatsWrong: "Add error handling for nil input"},
+			{
+				Severity:     "MAJOR",
+				Title:        "Missing nil check",
+				File:         "pkg/handler.go",
+				Line:         "42",
+				WhatsWrong:   "Add error handling for nil input",
+				Evidence:     "handler.go:42 dereferences req without a nil check",
+				SuggestedFix: "Add a nil guard before dereferencing req",
+				Confidence:   "high",
+			},
 			{Severity: "NIT", Title: "Duplicated logic", WhatsWrong: "Extract helper for repeated logic"},
+			{Severity: "MINOR", Title: "Overly broad catch", WhatsWrong: "Swallows all errors", DemotedFrom: "MAJOR"},
 		},
 	}
 
@@ -346,6 +356,11 @@ func TestRenderReview_ContainsExpectedSections(t *testing.T) {
 		data.ExecutionLog,
 		"Add error handling for nil input",
 		"Extract helper for repeated logic",
+		"pkg/handler.go",
+		"handler.go:42 dereferences req without a nil check",
+		"Add a nil guard before dereferencing req",
+		"Confidence: high",
+		"demoted from MAJOR",
 	}
 	for _, want := range wantContains {
 		if !strings.Contains(body, want) {
