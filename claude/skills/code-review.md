@@ -81,7 +81,9 @@ Isolated-context multi-agent fan-out: 4 dimension reviewers in parallel, then on
 
 Call the `Workflow` tool with:
 - `scriptPath`: `claude/workflows/code-review-workflow.js`
-- `args`: `{ diff, acceptance_spec, claude_md }` — `diff` from STEP 3, `acceptance_spec` is the PR title/description (PR mode) or branch name + recent commit messages (local mode), `claude_md` from STEP 4 (omit if unavailable)
+- `args`: `{ diff, acceptance_spec, claude_md, project_name }` — `diff` from STEP 3, `acceptance_spec` is the PR title/description (PR mode) or branch name + recent commit messages (local mode), `claude_md` from STEP 4 (omit if unavailable), `project_name` detected the same way as STEP 7a (parse from `git remote get-url origin`; omit if it can't be determined)
+
+`project_name` drives the workflow's own learnings loop: before reviewing, it fetches past `review_learning` events for the project (via `registry_get_events`) and feeds them to the dimension/synthesis agents as extra context; after synthesis, it asks an agent to decide whether this run surfaced a new generalizable pattern worth persisting, and if so writes it back via `registry_write_event(project_name, "review_learning", {pattern, signal, action})`. Both steps are skipped silently if `project_name` is omitted or the registry is unavailable.
 
 The script returns `{ dimensions: [...], findings: [...], verdict }`:
 - `dimensions` — the 4 dimension keys reviewed (`bugs`, `security`, `scope`, `style`)

@@ -2,6 +2,7 @@ export const meta = {
   name: 'code-review-workflow',
   description: 'Graph-mode PR/diff review: 4 isolated @review-dimension agents in parallel, structured severity-graded findings, an adversarial refuter pass on every BLOCKER/MAJOR, then synthesis with a code-computed verdict',
   phases: [
+    { title: 'Learn' },
     { title: 'Review' },
     { title: 'Verify' },
     { title: 'Synthesize' },
@@ -53,6 +54,40 @@ const SYNTHESIS_SCHEMA = {
   required: ['findings'],
 }
 
+const LEARNINGS_FETCH_SCHEMA = {
+  type: 'object',
+  properties: {
+    learnings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string' },
+          signal: { type: 'string' },
+          action: { type: 'string' },
+        },
+      },
+    },
+  },
+  required: ['learnings'],
+}
+
+const LEARNING_WRITE_SCHEMA = {
+  type: 'object',
+  properties: {
+    wrote: { type: 'boolean' },
+    learning: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string' },
+        signal: { type: 'string' },
+        action: { type: 'string' },
+      },
+    },
+  },
+  required: ['wrote'],
+}
+
 const DIMENSIONS = [
   {
     key: 'bugs',
@@ -72,7 +107,12 @@ const DIMENSIONS = [
   },
 ]
 
-function dimensionPrompt(ctx, dimension) {
+function learningsBlock(learnings) {
+  if (!learnings || learnings.length === 0) return ''
+  return `\n\n## Past review learnings for this project\n${JSON.stringify(learnings, null, 2)}\n\nThese are recurring patterns or tooling gaps surfaced by prior reviews. Weigh them, but don't let them substitute for reading the actual diff.`
+}
+
+function dimensionPrompt(ctx, dimension, learnings) {
   return `${dimension.prompt}
 
 ## Dimension
@@ -85,7 +125,7 @@ ${ctx.diff}
 ${ctx.acceptance_spec}
 
 ## CLAUDE.md
-${ctx.claude_md || '(not available)'}
+${ctx.claude_md || '(not available)'}${learningsBlock(learnings)}
 
 Return JSON matching the given schema: a "findings" array. Each finding must carry one of the 5 severities (BLOCKER, MAJOR, MINOR, NIT, QUESTION), a file and (when known) a line, and the plain-English fields (whats_wrong, why_it_matters, evidence, suggested_fix, confidence). If this dimension has no findings, return an empty array.`
 }
@@ -115,7 +155,7 @@ ${ctx.claude_md || '(not available)'}
 Return JSON matching the given schema: refuted (boolean) and reason (string) explaining your call either way.`
 }
 
-function synthesisPrompt(ctx, findings) {
+function synthesisPrompt(ctx, findings, learnings) {
   return `You are given the post-verification findings from 4 independent dimension reviews (bugs/correctness, security, scope, style) of the same diff. Dedupe findings that describe the same file+line+issue and merge related ones into one entry — keep the higher severity and the union of evidence when merging. Do not re-grade severity otherwise, do not praise, do not compute a verdict.
 
 ## Diff
@@ -125,12 +165,35 @@ ${ctx.diff}
 ${ctx.acceptance_spec}
 
 ## CLAUDE.md
-${ctx.claude_md || '(not available)'}
+${ctx.claude_md || '(not available)'}${learningsBlock(learnings)}
 
 ## Findings to dedupe and merge
 ${JSON.stringify(findings, null, 2)}
 
 Return JSON matching the given schema: a "findings" array, deduped and merged, each finding still carrying severity, title, file, line, whats_wrong, why_it_matters, evidence, suggested_fix, confidence, and demoted_from when present.`
+}
+
+function fetchLearningsPrompt(projectName) {
+  return `Call the registry_get_events MCP tool with name="${projectName}" and type="review_learning" to fetch past code-review learnings for this project. Return the entries' "data" objects as the "learnings" array (each has pattern/signal/action). If the tool errors, the project is unknown, or there are no matching events, return an empty array — do not fabricate entries.`
+}
+
+function writeLearningPrompt(ctx, findings, verdict) {
+  return `You are reviewing the outcome of a just-completed 4-dimension code review (bugs, security, scope, style) to decide whether it surfaced a reusable, generalizable learning worth persisting for future reviews of this project — as opposed to a one-off finding specific to this diff.
+
+A learning is worth writing only if it's a recurring pattern likely to recur (e.g. "this codebase repeatedly misses nil checks after X helper", "the review tooling itself degraded silently"), not a restatement of a single finding.
+
+## Verdict
+${verdict}
+
+## Findings (post-synthesis)
+${JSON.stringify(findings, null, 2)}
+
+## Acceptance spec
+${ctx.acceptance_spec}
+
+If there IS a worthwhile learning: call registry_write_event with name="${ctx.project_name}", type="review_learning", data={pattern, signal, action} (pattern: the recurring issue in one sentence; signal: what in this run revealed it; action: what a future review or the reviewer agents should do differently), tags=["code-review"]. Then return {wrote: true, learning: {pattern, signal, action}}.
+
+If there is NOT a worthwhile learning, do not call any tool — just return {wrote: false}.`
 }
 
 function computeVerdict(findings) {
@@ -168,54 +231,62 @@ function reconcileFindings(preSynthesis, postSynthesis) {
 
 const ctx = typeof args === 'string' ? JSON.parse(args) : args
 
-const findings = await pipeline([
-  {
-    title: 'Review',
-    run: async () => {
-      const dimensionResults = await parallel(
-        DIMENSIONS.map(d => () =>
-          agent(dimensionPrompt(ctx, d), {
-            phase: 'Review',
-            label: `review:${d.key}`,
-            agentType: 'review-dimension',
-            schema: DIMENSION_SCHEMA,
-            effort: 'high',
-          }).then(output => ({ key: d.key, findings: (output && output.findings) || [] }))
-        )
-      )
-      return dimensionResults.flatMap(d => (d.findings || []).map(f => ({ ...f, _dimension: d.key })))
-    },
-  },
-  {
-    title: 'Verify',
-    run: async (reviewFindings) => {
-      const toVerify = reviewFindings.filter(f => BLOCKING_SEVERITIES.includes(f.severity))
-      const rest = reviewFindings.filter(f => !BLOCKING_SEVERITIES.includes(f.severity))
+phase('Learn')
+let learnings = []
+if (ctx.project_name) {
+  const fetched = await agent(fetchLearningsPrompt(ctx.project_name), {
+    phase: 'Learn',
+    label: 'fetch-learnings',
+    agentType: 'general-purpose',
+    schema: LEARNINGS_FETCH_SCHEMA,
+    effort: 'low',
+  })
+  learnings = (fetched && fetched.learnings) || []
+}
 
-      const verified = await parallel(
-        toVerify.map(finding => async () => {
-          const verdict = await agent(refuterPrompt(ctx, finding), {
-            phase: 'Verify',
-            label: `refute:${finding._dimension}:${finding.title}`,
-            agentType: 'general-purpose',
-            schema: REFUTER_SCHEMA,
-            effort: 'high',
-          })
-          const refuted = !verdict || verdict.refuted !== false // default to refuted=true when uncertain/missing
-          if (refuted) {
-            return { ...finding, demoted_from: finding.severity, severity: 'MINOR' }
-          }
-          return finding
+const [findings] = await pipeline(
+  [ctx],
+  async () => {
+    const dimensionResults = await parallel(
+      DIMENSIONS.map(d => () =>
+        agent(dimensionPrompt(ctx, d, learnings), {
+          phase: 'Review',
+          label: `review:${d.key}`,
+          agentType: 'review-dimension',
+          schema: DIMENSION_SCHEMA,
+          effort: 'high',
+        }).then(output => ({ key: d.key, findings: (output && output.findings) || [] }))
+      )
+    )
+    return dimensionResults.filter(Boolean).flatMap(d => (d.findings || []).map(f => ({ ...f, _dimension: d.key })))
+  },
+  async (reviewFindings) => {
+    const toVerify = reviewFindings.filter(f => BLOCKING_SEVERITIES.includes(f.severity))
+    const rest = reviewFindings.filter(f => !BLOCKING_SEVERITIES.includes(f.severity))
+
+    const verified = await parallel(
+      toVerify.map(finding => async () => {
+        const verdict = await agent(refuterPrompt(ctx, finding), {
+          phase: 'Verify',
+          label: `refute:${finding._dimension}:${finding.title}`,
+          agentType: 'general-purpose',
+          schema: REFUTER_SCHEMA,
+          effort: 'high',
         })
-      )
+        const refuted = !verdict || verdict.refuted !== false // default to refuted=true when uncertain/missing
+        if (refuted) {
+          return { ...finding, demoted_from: finding.severity, severity: 'MINOR' }
+        }
+        return finding
+      })
+    )
 
-      return [...verified, ...rest]
-    },
-  },
-])
+    return [...verified.filter(Boolean), ...rest]
+  }
+)
 
 phase('Synthesize')
-const synthesis = await agent(synthesisPrompt(ctx, findings), {
+const synthesis = await agent(synthesisPrompt(ctx, findings, learnings), {
   phase: 'Synthesize',
   label: 'synthesis',
   agentType: 'general-purpose',
@@ -229,5 +300,15 @@ const finalFindings = reconcileFindings(findings, synthesis && synthesis.finding
 // BLOCKER/MAJOR from silently vanishing during the free-form merge step
 // and flipping the verdict to something more lenient than it should be.
 const verdict = computeVerdict(findings)
+
+if (ctx.project_name) {
+  await agent(writeLearningPrompt(ctx, finalFindings, verdict), {
+    phase: 'Learn',
+    label: 'write-learning',
+    agentType: 'general-purpose',
+    schema: LEARNING_WRITE_SCHEMA,
+    effort: 'low',
+  })
+}
 
 return { dimensions: DIMENSIONS.map(d => d.key), findings: finalFindings, verdict }
