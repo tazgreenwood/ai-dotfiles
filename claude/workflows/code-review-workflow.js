@@ -141,18 +141,28 @@ function computeVerdict(findings) {
 }
 
 // Guards against the synthesis pass silently dropping a BLOCKER/MAJOR while
-// deduping/merging: any pre-synthesis blocking finding with no same-file
+// deduping/merging: any pre-synthesis blocking finding with no matching
 // blocking counterpart in the merged output is appended back verbatim, so
 // what's displayed/tallied can never show fewer blocking findings than what
 // actually produced the verdict. Also covers `synthesis.findings` coming
 // back empty (`[]` is truthy, so `[] || findings` would otherwise not fall
 // back to the pre-synthesis list).
+//
+// Matching is by file AND title (normalized), not file alone — two distinct
+// blocking findings in the same file (e.g. a security dimension's SQLi and
+// a bugs dimension's nil-deref both in db.go) must not be treated as the
+// same issue just because synthesis kept one of them.
+function findingKey(f) {
+  return `${(f.file || '').trim().toLowerCase()}::${(f.title || '').trim().toLowerCase()}`
+}
+
 function reconcileFindings(preSynthesis, postSynthesis) {
   if (!postSynthesis || postSynthesis.length === 0) return preSynthesis
   const isBlocking = f => BLOCKING_SEVERITIES.includes(f.severity)
+  const postBlockingKeys = new Set(postSynthesis.filter(isBlocking).map(findingKey))
   const missing = preSynthesis
     .filter(isBlocking)
-    .filter(pre => !postSynthesis.some(post => isBlocking(post) && post.file === pre.file))
+    .filter(pre => !postBlockingKeys.has(findingKey(pre)))
   return missing.length > 0 ? [...postSynthesis, ...missing] : postSynthesis
 }
 
