@@ -108,8 +108,16 @@ type DeployCheckEntry struct {
 }
 
 type Suggestion struct {
-	Finding  string `json:"finding"`
-	Severity string `json:"severity"`
+	Severity     string `json:"severity"`
+	Title        string `json:"title,omitempty"`
+	File         string `json:"file,omitempty"`
+	Line         string `json:"line,omitempty"`
+	WhatsWrong   string `json:"whats_wrong,omitempty"`
+	WhyItMatters string `json:"why_it_matters,omitempty"`
+	Evidence     string `json:"evidence,omitempty"`
+	SuggestedFix string `json:"suggested_fix,omitempty"`
+	Confidence   string `json:"confidence,omitempty"`
+	DemotedFrom  string `json:"demoted_from,omitempty"`
 }
 
 type EventEntry struct {

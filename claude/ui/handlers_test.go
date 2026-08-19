@@ -325,8 +325,8 @@ func TestRenderReview_ContainsExpectedSections(t *testing.T) {
 		ExecutionMode: "mock",
 		ExecutionLog:  "ran synthesized inputs through changed functions: all passed",
 		Suggestions: []Suggestion{
-			{Finding: "Add error handling for nil input", Severity: "bug"},
-			{Finding: "Extract helper for repeated logic", Severity: "style"},
+			{Severity: "MAJOR", Title: "Missing nil check", WhatsWrong: "Add error handling for nil input"},
+			{Severity: "NIT", Title: "Duplicated logic", WhatsWrong: "Extract helper for repeated logic"},
 		},
 	}
 

@@ -35,10 +35,19 @@
 
 {{if .Suggestions}}
 <section>
-  <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">Suggestions</h2>
-  <ul class="list-disc list-inside space-y-1 text-sm text-zinc-700 dark:text-zinc-300">
+  <h2 class="text-sm font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2">Findings</h2>
+  <ul class="space-y-3 text-sm text-zinc-700 dark:text-zinc-300">
     {{range .Suggestions}}
-    <li><span class="text-xs uppercase text-zinc-400 dark:text-zinc-500">[{{.Severity}}]</span> {{.Finding}}</li>
+    <li>
+      <div>
+        <span class="text-xs uppercase text-zinc-400 dark:text-zinc-500">[{{.Severity}}{{if .DemotedFrom}}, demoted from {{.DemotedFrom}}{{end}}]</span>
+        {{if .Title}}<span class="font-medium">{{.Title}}</span>{{end}}
+        {{if .File}}<span class="text-xs text-zinc-400 dark:text-zinc-500">— {{.File}}{{if .Line}}:{{.Line}}{{end}}</span>{{end}}
+      </div>
+      {{if .WhatsWrong}}<p>{{.WhatsWrong}}</p>{{end}}
+      {{if .WhyItMatters}}<p class="text-zinc-500 dark:text-zinc-400">{{.WhyItMatters}}</p>{{end}}
+      {{if .SuggestedFix}}<p><span class="font-medium">Fix:</span> {{.SuggestedFix}}</p>{{end}}
+    </li>
     {{end}}
   </ul>
 </section>

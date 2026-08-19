@@ -192,11 +192,16 @@ phase('Synthesize')
 const synthesis = await agent(synthesisPrompt(ctx, findings), {
   phase: 'Synthesize',
   label: 'synthesis',
-  agentType: 'reviewer',
+  agentType: 'general-purpose',
   schema: SYNTHESIS_SCHEMA,
   effort: 'high',
 })
 const finalFindings = (synthesis && synthesis.findings) || findings
-const verdict = computeVerdict(finalFindings)
+
+// Verdict is computed from the pre-synthesis findings, not the LLM-merged
+// output — synthesis only dedupes for display. This stops a confirmed
+// BLOCKER/MAJOR from silently vanishing during the free-form merge step
+// and flipping the verdict to something more lenient than it should be.
+const verdict = computeVerdict(findings)
 
 return { dimensions: DIMENSIONS.map(d => d.key), findings: finalFindings, verdict }
