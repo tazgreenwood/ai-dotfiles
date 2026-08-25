@@ -8,12 +8,19 @@ import (
 	"time"
 )
 
-// ── SSE hub (DOTFILES-25) ─────────────────────────────────────────────────
+// ── SSE hub (DOTFILES-25, global subscriber DOTFILES-32) ──────────────────
 //
 // Per-project pub/sub over stdlib http.Flusher. A background goroutine polls
 // registry.db's mtime every 500ms and broadcasts to all connected projects'
 // channels on change — a simple diff, since SQLite is single-writer WAL and
 // any write touches the file.
+//
+// globalSubKey is a reserved subscriber key (no project is ever named "*")
+// used by the project-less global dashboard pages (Kanban/Reviews/Audits/
+// Issues/Deploy Checks): they subscribe under this key instead of a project
+// name, and broadcastAll notifies it on every change alongside every
+// per-project subscriber.
+const globalSubKey = "*"
 
 type eventHub struct {
 	mu   sync.Mutex
@@ -109,7 +116,20 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	streamEvents(w, r, name)
+}
 
+// handleGlobalEvents is the project-less counterpart to handleEvents, used
+// by the 5 global dashboard pages: it subscribes under globalSubKey instead
+// of a project name, so it's notified on every broadcastAll regardless of
+// which project's data changed.
+func handleGlobalEvents(w http.ResponseWriter, r *http.Request) {
+	streamEvents(w, r, globalSubKey)
+}
+
+// streamEvents runs the shared SSE loop for a given subscriber key (a
+// project name, or globalSubKey for the project-less global pages).
+func streamEvents(w http.ResponseWriter, r *http.Request, subKey string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -124,8 +144,8 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	ch := hub.subscribe(name)
-	defer hub.unsubscribe(name, ch)
+	ch := hub.subscribe(subKey)
+	defer hub.unsubscribe(subKey, ch)
 
 	ping := time.NewTicker(15 * time.Second)
 	defer ping.Stop()

@@ -58,13 +58,21 @@ func groupColorClass(group int) string {
 	return palette[group%len(palette)]
 }
 
-func render(w http.ResponseWriter, page string, data any) {
+// render parses and executes the named content template inside base.html.
+// currentPath is exposed to templates as a func (rather than a data field)
+// so every page — dashboard tabs and per-project pages alike — can compute
+// aria-current on the sidebar without every handler's data struct needing a
+// CurrentPath field.
+func render(w http.ResponseWriter, r *http.Request, page string, data any) {
+	currentPath := r.URL.Path
 	t, err := template.New("base.html").Funcs(template.FuncMap{
 		"sidebarProjects": sidebarProjects,
+		"globalTabs":      globalTabs,
 		"add":             func(a, b int) int { return a + b },
 		"sub":             func(a, b int) int { return a - b },
 		"groupColorClass": groupColorClass,
 		"dateOnly":        dateOnly,
+		"currentPath":     func() string { return currentPath },
 	}).ParseFS(templateFS, "templates/base.html", "templates/"+page)
 	if err != nil {
 		http.Error(w, "template parse error: "+err.Error(), http.StatusInternalServerError)
@@ -80,6 +88,25 @@ func render(w http.ResponseWriter, page string, data any) {
 type breadcrumb struct {
 	Label string
 	URL   string
+}
+
+// navLink is one sidebar entry — either a global tab (fixed URL, no count)
+// or a per-project link (rendered separately by sidebarProjects).
+type navLink struct {
+	Label string
+	URL   string
+}
+
+// globalTabs returns the 5 fixed global-dashboard sidebar links, in display
+// order, rendered above the per-project list.
+func globalTabs() []navLink {
+	return []navLink{
+		{Label: "Kanban", URL: "/"},
+		{Label: "Reviews", URL: "/reviews"},
+		{Label: "Audits", URL: "/audits"},
+		{Label: "Issues", URL: "/issues"},
+		{Label: "Deploy Checks", URL: "/deploy-checks"},
+	}
 }
 
 // kanbanProjectGroup buckets a global Kanban column's cards by project, so
@@ -132,7 +159,7 @@ func groupCardsByProject(cards []KanbanCard) []kanbanProjectGroup {
 	return groups
 }
 
-func handleDashboardKanban(w http.ResponseWriter, _ *http.Request) {
+func handleDashboardKanban(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	cutoff := time.Now().Add(-doneCutoffWindow)
 	cards, hiddenOlder := AggregateKanban(cutoff)
@@ -158,7 +185,7 @@ func handleDashboardKanban(w http.ResponseWriter, _ *http.Request) {
 		Breadcrumbs: []breadcrumb{{Label: "Registry", URL: "/"}},
 		Columns:     columns,
 	}
-	render(w, "dashboard_kanban.html", data)
+	render(w, r, "dashboard_kanban.html", data)
 }
 
 type issueData struct {
@@ -298,7 +325,7 @@ func handleDashboardReviews(w http.ResponseWriter, r *http.Request) {
 		Selected:    selected,
 		Entries:     AggregateEvents("pr_review", selected),
 	}
-	render(w, "dashboard_reviews.html", data)
+	render(w, r, "dashboard_reviews.html", data)
 }
 
 // handleDashboardAudits renders the global Audits tab: audit entries
@@ -312,7 +339,7 @@ func handleDashboardAudits(w http.ResponseWriter, r *http.Request) {
 		Selected:    selected,
 		Entries:     AggregateAudit(selected),
 	}
-	render(w, "dashboard_audits.html", data)
+	render(w, r, "dashboard_audits.html", data)
 }
 
 // handleDashboardIssues renders the global Issues tab: issue-log entries
@@ -326,7 +353,7 @@ func handleDashboardIssues(w http.ResponseWriter, r *http.Request) {
 		Selected:    selected,
 		Entries:     AggregateIssues(selected),
 	}
-	render(w, "dashboard_issues.html", data)
+	render(w, r, "dashboard_issues.html", data)
 }
 
 // handleDashboardDeployChecks renders the global Deploy Checks tab: deploy
@@ -341,7 +368,7 @@ func handleDashboardDeployChecks(w http.ResponseWriter, r *http.Request) {
 		Selected:    selected,
 		Entries:     AggregateDeployChecks(selected),
 	}
-	render(w, "dashboard_deploy_checks.html", data)
+	render(w, r, "dashboard_deploy_checks.html", data)
 }
 
 func handlePlan(w http.ResponseWriter, r *http.Request) {
@@ -382,7 +409,7 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 		Plan:    plan,
 		Columns: columns,
 	}
-	render(w, "plan.html", data)
+	render(w, r, "plan.html", data)
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {
@@ -413,7 +440,7 @@ func handleAudit(w http.ResponseWriter, r *http.Request) {
 		Since:       since,
 		Until:       until,
 	}
-	render(w, "audit.html", data)
+	render(w, r, "audit.html", data)
 }
 
 func handleDeployChecks(w http.ResponseWriter, r *http.Request) {
@@ -444,7 +471,7 @@ func handleDeployChecks(w http.ResponseWriter, r *http.Request) {
 		Since:       since,
 		Until:       until,
 	}
-	render(w, "deploy_checks.html", data)
+	render(w, r, "deploy_checks.html", data)
 }
 
 func handleReviewDetail(w http.ResponseWriter, r *http.Request) {
@@ -476,7 +503,7 @@ func handleReviewDetail(w http.ResponseWriter, r *http.Request) {
 		ExecutionLog:  entry.ExecutionLog,
 		Suggestions:   entry.Suggestions,
 	}
-	render(w, "review.html", data)
+	render(w, r, "review.html", data)
 }
 
 // handleReviewsList renders the list of code reviews for a project, querying the registry event log for pr_review entries.
@@ -501,7 +528,7 @@ func handleReviewsList(w http.ResponseWriter, r *http.Request) {
 		ProjectName: name,
 		Entries:     entries,
 	}
-	render(w, "reviews.html", data)
+	render(w, r, "reviews.html", data)
 }
 
 func handleProject(w http.ResponseWriter, r *http.Request) {
@@ -601,7 +628,7 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 		HasNext:            page < totalPages,
 	}
 
-	render(w, "project.html", data)
+	render(w, r, "project.html", data)
 }
 
 func handleIssues(w http.ResponseWriter, r *http.Request) {
@@ -627,5 +654,5 @@ func handleIssues(w http.ResponseWriter, r *http.Request) {
 		Entries:     entries,
 		Severity:    severity,
 	}
-	render(w, "issues.html", data)
+	render(w, r, "issues.html", data)
 }
