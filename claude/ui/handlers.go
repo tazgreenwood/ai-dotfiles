@@ -6,7 +6,12 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"time"
 )
+
+// doneCutoffWindow is how far back a "done" plan step is still shown in the
+// global Kanban board's Done column before it's counted as hidden instead.
+const doneCutoffWindow = 14 * 24 * time.Hour
 
 const plansPerPage = 10
 
@@ -59,7 +64,7 @@ func render(w http.ResponseWriter, page string, data any) {
 		"add":             func(a, b int) int { return a + b },
 		"sub":             func(a, b int) int { return a - b },
 		"groupColorClass": groupColorClass,
-		"dateOnly": dateOnly,
+		"dateOnly":        dateOnly,
 	}).ParseFS(templateFS, "templates/base.html", "templates/"+page)
 	if err != nil {
 		http.Error(w, "template parse error: "+err.Error(), http.StatusInternalServerError)
@@ -77,24 +82,83 @@ type breadcrumb struct {
 	URL   string
 }
 
-type indexData struct {
+// kanbanProjectGroup buckets a global Kanban column's cards by project, so
+// the template can render a real sub-heading per project within the column.
+type kanbanProjectGroup struct {
+	Project string
+	Cards   []KanbanCard
+}
+
+// kanbanColumn is one of the 4 fixed Kanban columns (Pending/In
+// Progress/Done/Blocked), holding its cards grouped by project.
+// HiddenOlder is only ever set on the Done column: the count of "done"
+// steps excluded from Groups because their done_at predates the 14-day
+// cutoff.
+type kanbanColumn struct {
+	Header      string
+	Status      string
+	Groups      []kanbanProjectGroup
+	HiddenOlder int
+}
+
+type dashboardKanbanData struct {
 	Breadcrumbs []breadcrumb
-	Projects    []projectSummary
-	Stats       dashboardStats
+	Columns     []kanbanColumn
 }
 
-type dashboardStats struct {
-	TotalProjects int
-	ActivePlans   int
-	ShippedPlans  int
-	OpenIssues    int
+// groupCardsByProject buckets cards by Project, sorted alphabetically by
+// project name, with cards inside each group sorted by ticket then step.
+func groupCardsByProject(cards []KanbanCard) []kanbanProjectGroup {
+	byProject := map[string][]KanbanCard{}
+	var projects []string
+	for _, c := range cards {
+		if _, ok := byProject[c.Project]; !ok {
+			projects = append(projects, c.Project)
+		}
+		byProject[c.Project] = append(byProject[c.Project], c)
+	}
+	sort.Strings(projects)
+	groups := make([]kanbanProjectGroup, 0, len(projects))
+	for _, p := range projects {
+		cs := byProject[p]
+		sort.SliceStable(cs, func(i, j int) bool {
+			if cs[i].Ticket != cs[j].Ticket {
+				return cs[i].Ticket < cs[j].Ticket
+			}
+			return cs[i].Step < cs[j].Step
+		})
+		groups = append(groups, kanbanProjectGroup{Project: p, Cards: cs})
+	}
+	return groups
 }
 
-type projectSummary struct {
-	Name       string
-	PlanCount  int
-	AuditCount int
-	IssueCount int
+func handleDashboardKanban(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	cutoff := time.Now().Add(-doneCutoffWindow)
+	cards, hiddenOlder := AggregateKanban(cutoff)
+
+	columns := []kanbanColumn{
+		{Header: "Pending", Status: "pending"},
+		{Header: "In Progress", Status: "in_progress"},
+		{Header: "Done (14d)", Status: "done"},
+		{Header: "Blocked", Status: "blocked"},
+	}
+	byStatus := map[string][]KanbanCard{}
+	for _, c := range cards {
+		byStatus[c.Status] = append(byStatus[c.Status], c)
+	}
+	for i := range columns {
+		columns[i].Groups = groupCardsByProject(byStatus[columns[i].Status])
+		if columns[i].Status == "done" {
+			columns[i].HiddenOlder = hiddenOlder
+		}
+	}
+
+	data := dashboardKanbanData{
+		Breadcrumbs: []breadcrumb{{Label: "Registry", URL: "/"}},
+		Columns:     columns,
+	}
+	render(w, "dashboard_kanban.html", data)
 }
 
 type issueData struct {
@@ -178,45 +242,6 @@ type reviewsListData struct {
 	Breadcrumbs []breadcrumb
 	ProjectName string
 	Entries     []EventEntry
-}
-
-func handleIndex(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-	projects, err := ReadProjects()
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	summaries := make([]projectSummary, 0, len(projects))
-	stats := dashboardStats{TotalProjects: len(projects)}
-	for _, p := range projects {
-		plans, _ := ReadPlans(p.Name)
-		audit, _ := ReadAudit(p.Name, "", "")
-		issues, _ := ReadIssues(p.Name, "")
-		summaries = append(summaries, projectSummary{
-			Name:       p.Name,
-			PlanCount:  len(plans),
-			AuditCount: len(audit),
-			IssueCount: len(issues),
-		})
-		for _, pl := range plans {
-			if pl.Status == "shipped" {
-				stats.ShippedPlans++
-			} else {
-				stats.ActivePlans++
-			}
-		}
-		stats.OpenIssues += len(issues)
-	}
-
-	data := indexData{
-		Breadcrumbs: []breadcrumb{{Label: "Registry", URL: "/"}},
-		Projects:    summaries,
-		Stats:       stats,
-	}
-
-	render(w, "index.html", data)
 }
 
 func handlePlan(w http.ResponseWriter, r *http.Request) {

@@ -8,7 +8,7 @@ import (
 func newRouter() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /", handleIndex)
+	mux.HandleFunc("GET /", handleDashboardKanban)
 
 	mux.HandleFunc("GET /projects/{name}", handleProject)
 
