@@ -244,6 +244,63 @@ type reviewsListData struct {
 	Entries     []EventEntry
 }
 
+type dashboardReviewsData struct {
+	Breadcrumbs []breadcrumb
+	Projects    []string
+	Selected    string
+	Entries     []EventWithProject
+}
+
+type dashboardAuditsData struct {
+	Breadcrumbs []breadcrumb
+	Projects    []string
+	Selected    string
+	Entries     []AuditWithProject
+}
+
+// projectNames returns every project's name, sorted alphabetically, for
+// populating a global tab's project-filter <select>.
+func projectNames() []string {
+	projects, err := ReadProjects()
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(projects))
+	for _, p := range projects {
+		names = append(names, p.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// handleDashboardReviews renders the global Reviews tab: pr_review events
+// aggregated across every project, optionally narrowed by ?project=.
+func handleDashboardReviews(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	selected := r.URL.Query().Get("project")
+	data := dashboardReviewsData{
+		Breadcrumbs: []breadcrumb{{Label: "Reviews"}},
+		Projects:    projectNames(),
+		Selected:    selected,
+		Entries:     AggregateEvents("pr_review", selected),
+	}
+	render(w, "dashboard_reviews.html", data)
+}
+
+// handleDashboardAudits renders the global Audits tab: audit entries
+// aggregated across every project, optionally narrowed by ?project=.
+func handleDashboardAudits(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	selected := r.URL.Query().Get("project")
+	data := dashboardAuditsData{
+		Breadcrumbs: []breadcrumb{{Label: "Audits"}},
+		Projects:    projectNames(),
+		Selected:    selected,
+		Entries:     AggregateAudit(selected),
+	}
+	render(w, "dashboard_audits.html", data)
+}
+
 func handlePlan(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	name := r.PathValue("name")

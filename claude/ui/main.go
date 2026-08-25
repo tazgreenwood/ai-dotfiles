@@ -10,6 +10,10 @@ func newRouter() http.Handler {
 
 	mux.HandleFunc("GET /", handleDashboardKanban)
 
+	mux.HandleFunc("GET /reviews", handleDashboardReviews)
+
+	mux.HandleFunc("GET /audits", handleDashboardAudits)
+
 	mux.HandleFunc("GET /projects/{name}", handleProject)
 
 	mux.HandleFunc("GET /projects/{name}/plans/{ticket}", handlePlan)
