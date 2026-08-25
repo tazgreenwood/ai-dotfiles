@@ -14,6 +14,10 @@ func newRouter() http.Handler {
 
 	mux.HandleFunc("GET /audits", handleDashboardAudits)
 
+	mux.HandleFunc("GET /issues", handleDashboardIssues)
+
+	mux.HandleFunc("GET /deploy-checks", handleDashboardDeployChecks)
+
 	mux.HandleFunc("GET /projects/{name}", handleProject)
 
 	mux.HandleFunc("GET /projects/{name}/plans/{ticket}", handlePlan)

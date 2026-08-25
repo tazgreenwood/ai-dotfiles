@@ -258,6 +258,20 @@ type dashboardAuditsData struct {
 	Entries     []AuditWithProject
 }
 
+type dashboardIssuesData struct {
+	Breadcrumbs []breadcrumb
+	Projects    []string
+	Selected    string
+	Entries     []IssueWithProject
+}
+
+type dashboardDeployChecksData struct {
+	Breadcrumbs []breadcrumb
+	Projects    []string
+	Selected    string
+	Entries     []DeployCheckWithProject
+}
+
 // projectNames returns every project's name, sorted alphabetically, for
 // populating a global tab's project-filter <select>.
 func projectNames() []string {
@@ -299,6 +313,35 @@ func handleDashboardAudits(w http.ResponseWriter, r *http.Request) {
 		Entries:     AggregateAudit(selected),
 	}
 	render(w, "dashboard_audits.html", data)
+}
+
+// handleDashboardIssues renders the global Issues tab: issue-log entries
+// aggregated across every project, optionally narrowed by ?project=.
+func handleDashboardIssues(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	selected := r.URL.Query().Get("project")
+	data := dashboardIssuesData{
+		Breadcrumbs: []breadcrumb{{Label: "Issues"}},
+		Projects:    projectNames(),
+		Selected:    selected,
+		Entries:     AggregateIssues(selected),
+	}
+	render(w, "dashboard_issues.html", data)
+}
+
+// handleDashboardDeployChecks renders the global Deploy Checks tab: deploy
+// check entries aggregated across every project, optionally narrowed by
+// ?project=.
+func handleDashboardDeployChecks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	selected := r.URL.Query().Get("project")
+	data := dashboardDeployChecksData{
+		Breadcrumbs: []breadcrumb{{Label: "Deploy Checks"}},
+		Projects:    projectNames(),
+		Selected:    selected,
+		Entries:     AggregateDeployChecks(selected),
+	}
+	render(w, "dashboard_deploy_checks.html", data)
 }
 
 func handlePlan(w http.ResponseWriter, r *http.Request) {
