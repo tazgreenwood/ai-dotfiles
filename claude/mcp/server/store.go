@@ -236,6 +236,11 @@ func (s *store) UpdateStep(project, ticket string, stepIndex int, status string)
 		return fmt.Errorf("step %d is not an object", stepIndex)
 	}
 	step["status"] = status
+	if status == "done" {
+		step["done_at"] = time.Now().UTC().Format(time.RFC3339)
+	} else {
+		delete(step, "done_at")
+	}
 
 	b, err := json.Marshal(plan)
 	if err != nil {
