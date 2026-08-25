@@ -64,24 +64,38 @@ var hub = newEventHub()
 
 var watcherOnce sync.Once
 
-// startWatcher launches (once) a background goroutine that polls dbPath()'s
-// mtime every 500ms and broadcasts to the hub on change.
+// dbModTime returns the newer of registry.db's and registry.db-wal's mtimes.
+//
+// SQLite in WAL mode buffers writes in the -wal file and only flushes them
+// into the main database file on checkpoint. Stat'ing registry.db alone is
+// therefore blind to any write that hasn't been checkpointed yet — the
+// watcher would miss live updates until something forced a checkpoint (e.g.
+// a process restart). Considering both files' mtimes closes that gap.
+func dbModTime() time.Time {
+	var latest time.Time
+	if info, err := os.Stat(dbPath()); err == nil {
+		latest = info.ModTime()
+	}
+	if info, err := os.Stat(dbPath() + "-wal"); err == nil {
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+	}
+	return latest
+}
+
+// startWatcher launches (once) a background goroutine that polls dbModTime()
+// every 500ms and broadcasts to the hub on change.
 func startWatcher() {
 	watcherOnce.Do(func() {
 		go func() {
-			var lastMod time.Time
-			if info, err := os.Stat(dbPath()); err == nil {
-				lastMod = info.ModTime()
-			}
+			lastMod := dbModTime()
 			ticker := time.NewTicker(500 * time.Millisecond)
 			defer ticker.Stop()
 			for range ticker.C {
-				info, err := os.Stat(dbPath())
-				if err != nil {
-					continue
-				}
-				if info.ModTime().After(lastMod) {
-					lastMod = info.ModTime()
+				mod := dbModTime()
+				if mod.After(lastMod) {
+					lastMod = mod
 					hub.broadcastAll()
 				}
 			}
