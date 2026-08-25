@@ -796,6 +796,59 @@ func TestStore_PlanWriteGetUpdateStep(t *testing.T) {
 	}
 }
 
+func TestStore_UpdateStep_StampsAndClearsDoneAt(t *testing.T) {
+	s := openTestStore(t)
+
+	plan := map[string]any{
+		"ticket":  "TEST-2",
+		"summary": "done_at test plan",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "pending"},
+		},
+	}
+	if err := s.WritePlan("myproject", "TEST-2", plan); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	if err := s.UpdateStep("myproject", "TEST-2", 0, "done"); err != nil {
+		t.Fatalf("UpdateStep (done): %v", err)
+	}
+
+	got, err := s.GetPlan("myproject", "TEST-2")
+	if err != nil {
+		t.Fatalf("GetPlan (after done): %v", err)
+	}
+	steps, ok := got["plan_steps"].([]any)
+	if !ok || len(steps) != 1 {
+		t.Fatalf("want 1 plan_step, got %v", got["plan_steps"])
+	}
+	step0, _ := steps[0].(map[string]any)
+	doneAt, _ := step0["done_at"].(string)
+	if doneAt == "" {
+		t.Fatal("want done_at set after transition to done, got empty")
+	}
+	if _, err := time.Parse(time.RFC3339, doneAt); err != nil {
+		t.Errorf("want done_at to parse as RFC3339, got %q: %v", doneAt, err)
+	}
+
+	if err := s.UpdateStep("myproject", "TEST-2", 0, "pending"); err != nil {
+		t.Fatalf("UpdateStep (pending): %v", err)
+	}
+
+	got2, err := s.GetPlan("myproject", "TEST-2")
+	if err != nil {
+		t.Fatalf("GetPlan (after pending): %v", err)
+	}
+	steps2, ok := got2["plan_steps"].([]any)
+	if !ok || len(steps2) != 1 {
+		t.Fatalf("want 1 plan_step, got %v", got2["plan_steps"])
+	}
+	step0b, _ := steps2[0].(map[string]any)
+	if _, present := step0b["done_at"]; present {
+		t.Errorf("want done_at cleared after moving out of done, got %v", step0b["done_at"])
+	}
+}
+
 func TestStore_AuditWriteAndDateRangeFilter(t *testing.T) {
 	s := openTestStore(t)
 

@@ -55,6 +55,7 @@ type PlanStep struct {
 	ID            int      `json:"id,omitempty"`
 	Execution     string   `json:"execution,omitempty"`
 	ParallelGroup int      `json:"parallel_group,omitempty"`
+	DoneAt        string   `json:"done_at,omitempty"`
 }
 
 type PlanMeta struct {
