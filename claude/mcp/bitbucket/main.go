@@ -87,6 +87,8 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return bbGetCommits(args)
 	case "bitbucket_add_pr_comment":
 		return bbAddPRComment(args)
+	case "bitbucket_get_pr_comments":
+		return bbGetPRComments(args)
 	case "bitbucket_get_repo":
 		return bbGetRepo(args)
 	case "bitbucket_list_branches":

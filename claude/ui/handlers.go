@@ -125,6 +125,7 @@ type kanbanColumn struct {
 	Header      string
 	Status      string
 	Groups      []kanbanProjectGroup
+	CardCount   int
 	HiddenOlder int
 }
 
@@ -176,6 +177,7 @@ func handleDashboardKanban(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := range columns {
 		columns[i].Groups = groupCardsByProject(byStatus[columns[i].Status])
+		columns[i].CardCount = len(byStatus[columns[i].Status])
 		if columns[i].Status == "done" {
 			columns[i].HiddenOlder = hiddenOlder
 		}

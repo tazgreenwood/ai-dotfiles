@@ -49,7 +49,7 @@ func AggregateKanban(doneCutoff time.Time) (cards []KanbanCard, hiddenOlder int)
 			if err != nil {
 				continue
 			}
-			for _, s := range plan.PlanSteps {
+			for i, s := range plan.PlanSteps {
 				if s.Status == "done" && s.DoneAt != "" {
 					if t, err := time.Parse(time.RFC3339, s.DoneAt); err == nil && t.Before(doneCutoff) {
 						hiddenOlder++
@@ -60,7 +60,7 @@ func AggregateKanban(doneCutoff time.Time) (cards []KanbanCard, hiddenOlder int)
 					Project: p.Name,
 					Ticket:  m.Ticket,
 					Title:   s.Title,
-					Step:    s.Step,
+					Step:    i + 1,
 					Status:  s.Status,
 					Why:     s.Why,
 					DoneAt:  s.DoneAt,
