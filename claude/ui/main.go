@@ -8,7 +8,17 @@ import (
 func newRouter() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /", handleIndex)
+	mux.HandleFunc("GET /", handleDashboardKanban)
+
+	mux.HandleFunc("GET /events", handleGlobalEvents)
+
+	mux.HandleFunc("GET /reviews", handleDashboardReviews)
+
+	mux.HandleFunc("GET /audits", handleDashboardAudits)
+
+	mux.HandleFunc("GET /issues", handleDashboardIssues)
+
+	mux.HandleFunc("GET /deploy-checks", handleDashboardDeployChecks)
 
 	mux.HandleFunc("GET /projects/{name}", handleProject)
 

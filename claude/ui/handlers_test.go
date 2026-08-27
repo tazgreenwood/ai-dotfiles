@@ -341,7 +341,8 @@ func TestRenderReview_ContainsExpectedSections(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	render(rec, "review.html", data)
+	req := httptest.NewRequest(http.MethodGet, "/projects/example/reviews/1", nil)
+	render(rec, req, "review.html", data)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())

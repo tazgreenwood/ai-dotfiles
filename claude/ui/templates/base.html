@@ -23,11 +23,25 @@
         Registry
       </a>
       <nav class="flex-1 overflow-y-auto py-3">
-        <div class="px-5 pb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Projects</div>
-        {{$current := ""}}
-        {{if gt (len .Breadcrumbs) 1}}{{$current = (index .Breadcrumbs 1).Label}}{{end}}
+        {{$path := currentPath}}
+        <div class="px-5 pb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Overview</div>
+        {{range globalTabs}}
+        <a
+          href="{{.URL}}"
+          {{if eq .URL $path}}aria-current="page"{{end}}
+          class="flex items-center gap-2 mx-2 px-3 py-1.5 rounded-md text-sm{{if eq .URL $path}} bg-zinc-100 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-medium{{else}} text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900{{end}}"
+        >
+          <span class="truncate">{{.Label}}</span>
+        </a>
+        {{end}}
+        <div class="mt-4 px-5 pb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Projects</div>
         {{range sidebarProjects}}
-        <a href="/projects/{{.Name}}" class="flex items-center justify-between gap-2 mx-2 px-3 py-1.5 rounded-md text-sm{{if eq .Name $current}} bg-zinc-100 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-medium{{else}} text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900{{end}}">
+        {{$href := printf "/projects/%s" .Name}}
+        <a
+          href="{{$href}}"
+          {{if eq $href $path}}aria-current="page"{{end}}
+          class="flex items-center justify-between gap-2 mx-2 px-3 py-1.5 rounded-md text-sm{{if eq $href $path}} bg-zinc-100 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 font-medium{{else}} text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900{{end}}"
+        >
           <span class="truncate">{{.Name}}</span>
           <span class="text-[11px] text-zinc-400 dark:text-zinc-500 shrink-0">{{.PlanCount}}</span>
         </a>
@@ -84,8 +98,14 @@
 
       var contentEl = document.getElementById('content');
       var projectEl = contentEl.querySelector('[data-project]');
-      if (!projectEl) return;
-      var project = projectEl.getAttribute('data-project');
+      var globalEl = contentEl.querySelector('[data-global]');
+      var eventsURL = null;
+      if (projectEl) {
+        eventsURL = '/projects/' + encodeURIComponent(projectEl.getAttribute('data-project')) + '/events';
+      } else if (globalEl) {
+        eventsURL = '/events';
+      }
+      if (!eventsURL) return;
 
       function isFocusInsideContent() {
         var active = document.activeElement;
@@ -110,7 +130,7 @@
           .catch(function () {});
       }
 
-      var source = new EventSource('/projects/' + encodeURIComponent(project) + '/events');
+      var source = new EventSource(eventsURL);
       source.addEventListener('message', function () {
         swap();
       });

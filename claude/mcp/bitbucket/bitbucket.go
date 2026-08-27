@@ -289,11 +289,58 @@ func bbAddPRComment(args map[string]any) ToolResult {
 	repo := str(args, "repo")
 	id := intArg(args, "pr_id")
 	payload := map[string]any{"content": map[string]any{"raw": str(args, "comment")}}
-	_, err := bbPost(fmt.Sprintf("%s/pullrequests/%d/comments", repoPath(repo), id), payload)
+	path := str(args, "path")
+	if path != "" {
+		inline := map[string]any{"path": path}
+		if line := intArg(args, "line"); line > 0 {
+			inline["to"] = line
+		}
+		if fromLine := intArg(args, "from_line"); fromLine > 0 {
+			inline["from"] = fromLine
+		}
+		payload["inline"] = inline
+	}
+	if parentID := intArg(args, "parent_id"); parentID > 0 {
+		payload["parent"] = map[string]any{"id": parentID}
+	}
+	data, err := bbPost(fmt.Sprintf("%s/pullrequests/%d/comments", repoPath(repo), id), payload)
 	if err != nil {
 		return toolErr(err.Error())
 	}
-	return toolOK(map[string]any{"ok": true})
+	return toolOK(map[string]any{"ok": true, "id": data["id"]})
+}
+
+func bbGetPRComments(args map[string]any) ToolResult {
+	repo := str(args, "repo")
+	id := intArg(args, "pr_id")
+	limit := intArgOr(args, "limit", 50)
+	comments, err := bbPaginate(fmt.Sprintf("%s/pullrequests/%d/comments", repoPath(repo), id), limit)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	var result []map[string]any
+	for _, c := range comments {
+		cm, _ := c.(map[string]any)
+		if cm["deleted"] == true {
+			continue
+		}
+		entry := map[string]any{
+			"id":         cm["id"],
+			"author":     nestedStr(cm, "user", "display_name"),
+			"content":    nestedStr(cm, "content", "raw"),
+			"created_on": cm["created_on"],
+		}
+		if inline := nestedMap(cm, "inline"); inline != nil {
+			entry["path"] = inline["path"]
+			entry["line"] = inline["to"]
+			entry["from_line"] = inline["from"]
+		}
+		if parent := nestedMap(cm, "parent"); parent != nil {
+			entry["parent_id"] = parent["id"]
+		}
+		result = append(result, entry)
+	}
+	return toolOK(map[string]any{"comments": result})
 }
 
 func bbGetRepo(args map[string]any) ToolResult {
@@ -468,15 +515,32 @@ func bitbucketTools() []Tool {
 		},
 		{
 			Name:        "bitbucket_add_pr_comment",
-			Description: "Add a comment to a pull request",
+			Description: "Add a comment to a pull request. Set path (+ line) for an inline comment on a diff; set parent_id to reply to an existing comment.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"repo":    map[string]any{"type": "string"},
-					"pr_id":   map[string]any{"type": "number"},
-					"comment": map[string]any{"type": "string"},
+					"repo":      map[string]any{"type": "string"},
+					"pr_id":     map[string]any{"type": "number"},
+					"comment":   map[string]any{"type": "string"},
+					"path":      map[string]any{"type": "string", "description": "File path for an inline comment"},
+					"line":      map[string]any{"type": "number", "description": "Line number on the destination (new) side of the diff"},
+					"from_line": map[string]any{"type": "number", "description": "Line number on the source (old) side, for comments on removed lines"},
+					"parent_id": map[string]any{"type": "number", "description": "ID of comment to reply to"},
 				},
 				"required": []string{"repo", "pr_id", "comment"},
+			},
+		},
+		{
+			Name:        "bitbucket_get_pr_comments",
+			Description: "List comments on a pull request, including inline (path/line) comments",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"repo":  map[string]any{"type": "string"},
+					"pr_id": map[string]any{"type": "number"},
+					"limit": map[string]any{"type": "number", "description": "Default 50"},
+				},
+				"required": []string{"repo", "pr_id"},
 			},
 		},
 		{

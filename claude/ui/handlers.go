@@ -6,7 +6,12 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"time"
 )
+
+// doneCutoffWindow is how far back a "done" plan step is still shown in the
+// global Kanban board's Done column before it's counted as hidden instead.
+const doneCutoffWindow = 14 * 24 * time.Hour
 
 const plansPerPage = 10
 
@@ -53,13 +58,21 @@ func groupColorClass(group int) string {
 	return palette[group%len(palette)]
 }
 
-func render(w http.ResponseWriter, page string, data any) {
+// render parses and executes the named content template inside base.html.
+// currentPath is exposed to templates as a func (rather than a data field)
+// so every page — dashboard tabs and per-project pages alike — can compute
+// aria-current on the sidebar without every handler's data struct needing a
+// CurrentPath field.
+func render(w http.ResponseWriter, r *http.Request, page string, data any) {
+	currentPath := r.URL.Path
 	t, err := template.New("base.html").Funcs(template.FuncMap{
 		"sidebarProjects": sidebarProjects,
+		"globalTabs":      globalTabs,
 		"add":             func(a, b int) int { return a + b },
 		"sub":             func(a, b int) int { return a - b },
 		"groupColorClass": groupColorClass,
-		"dateOnly": dateOnly,
+		"dateOnly":        dateOnly,
+		"currentPath":     func() string { return currentPath },
 	}).ParseFS(templateFS, "templates/base.html", "templates/"+page)
 	if err != nil {
 		http.Error(w, "template parse error: "+err.Error(), http.StatusInternalServerError)
@@ -77,24 +90,104 @@ type breadcrumb struct {
 	URL   string
 }
 
-type indexData struct {
+// navLink is one sidebar entry — either a global tab (fixed URL, no count)
+// or a per-project link (rendered separately by sidebarProjects).
+type navLink struct {
+	Label string
+	URL   string
+}
+
+// globalTabs returns the 5 fixed global-dashboard sidebar links, in display
+// order, rendered above the per-project list.
+func globalTabs() []navLink {
+	return []navLink{
+		{Label: "Kanban", URL: "/"},
+		{Label: "Reviews", URL: "/reviews"},
+		{Label: "Audits", URL: "/audits"},
+		{Label: "Issues", URL: "/issues"},
+		{Label: "Deploy Checks", URL: "/deploy-checks"},
+	}
+}
+
+// kanbanProjectGroup buckets a global Kanban column's cards by project, so
+// the template can render a real sub-heading per project within the column.
+type kanbanProjectGroup struct {
+	Project string
+	Cards   []KanbanCard
+}
+
+// kanbanColumn is one of the 4 fixed Kanban columns (Pending/In
+// Progress/Done/Blocked), holding its cards grouped by project.
+// HiddenOlder is only ever set on the Done column: the count of "done"
+// steps excluded from Groups because their done_at predates the 14-day
+// cutoff.
+type kanbanColumn struct {
+	Header      string
+	Status      string
+	Groups      []kanbanProjectGroup
+	CardCount   int
+	HiddenOlder int
+}
+
+type dashboardKanbanData struct {
 	Breadcrumbs []breadcrumb
-	Projects    []projectSummary
-	Stats       dashboardStats
+	Columns     []kanbanColumn
 }
 
-type dashboardStats struct {
-	TotalProjects int
-	ActivePlans   int
-	ShippedPlans  int
-	OpenIssues    int
+// groupCardsByProject buckets cards by Project, sorted alphabetically by
+// project name, with cards inside each group sorted by ticket then step.
+func groupCardsByProject(cards []KanbanCard) []kanbanProjectGroup {
+	byProject := map[string][]KanbanCard{}
+	var projects []string
+	for _, c := range cards {
+		if _, ok := byProject[c.Project]; !ok {
+			projects = append(projects, c.Project)
+		}
+		byProject[c.Project] = append(byProject[c.Project], c)
+	}
+	sort.Strings(projects)
+	groups := make([]kanbanProjectGroup, 0, len(projects))
+	for _, p := range projects {
+		cs := byProject[p]
+		sort.SliceStable(cs, func(i, j int) bool {
+			if cs[i].Ticket != cs[j].Ticket {
+				return cs[i].Ticket < cs[j].Ticket
+			}
+			return cs[i].Step < cs[j].Step
+		})
+		groups = append(groups, kanbanProjectGroup{Project: p, Cards: cs})
+	}
+	return groups
 }
 
-type projectSummary struct {
-	Name       string
-	PlanCount  int
-	AuditCount int
-	IssueCount int
+func handleDashboardKanban(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	cutoff := time.Now().Add(-doneCutoffWindow)
+	cards, hiddenOlder := AggregateKanban(cutoff)
+
+	columns := []kanbanColumn{
+		{Header: "Pending", Status: "pending"},
+		{Header: "In Progress", Status: "in_progress"},
+		{Header: "Done (14d)", Status: "done"},
+		{Header: "Blocked", Status: "blocked"},
+	}
+	byStatus := map[string][]KanbanCard{}
+	for _, c := range cards {
+		byStatus[c.Status] = append(byStatus[c.Status], c)
+	}
+	for i := range columns {
+		columns[i].Groups = groupCardsByProject(byStatus[columns[i].Status])
+		columns[i].CardCount = len(byStatus[columns[i].Status])
+		if columns[i].Status == "done" {
+			columns[i].HiddenOlder = hiddenOlder
+		}
+	}
+
+	data := dashboardKanbanData{
+		Breadcrumbs: []breadcrumb{{Label: "Registry", URL: "/"}},
+		Columns:     columns,
+	}
+	render(w, r, "dashboard_kanban.html", data)
 }
 
 type issueData struct {
@@ -180,43 +273,104 @@ type reviewsListData struct {
 	Entries     []EventEntry
 }
 
-func handleIndex(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
+type dashboardReviewsData struct {
+	Breadcrumbs []breadcrumb
+	Projects    []string
+	Selected    string
+	Entries     []EventWithProject
+}
+
+type dashboardAuditsData struct {
+	Breadcrumbs []breadcrumb
+	Projects    []string
+	Selected    string
+	Entries     []AuditWithProject
+}
+
+type dashboardIssuesData struct {
+	Breadcrumbs []breadcrumb
+	Projects    []string
+	Selected    string
+	Entries     []IssueWithProject
+}
+
+type dashboardDeployChecksData struct {
+	Breadcrumbs []breadcrumb
+	Projects    []string
+	Selected    string
+	Entries     []DeployCheckWithProject
+}
+
+// projectNames returns every project's name, sorted alphabetically, for
+// populating a global tab's project-filter <select>.
+func projectNames() []string {
 	projects, err := ReadProjects()
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return nil
 	}
-
-	summaries := make([]projectSummary, 0, len(projects))
-	stats := dashboardStats{TotalProjects: len(projects)}
+	names := make([]string, 0, len(projects))
 	for _, p := range projects {
-		plans, _ := ReadPlans(p.Name)
-		audit, _ := ReadAudit(p.Name, "", "")
-		issues, _ := ReadIssues(p.Name, "")
-		summaries = append(summaries, projectSummary{
-			Name:       p.Name,
-			PlanCount:  len(plans),
-			AuditCount: len(audit),
-			IssueCount: len(issues),
-		})
-		for _, pl := range plans {
-			if pl.Status == "shipped" {
-				stats.ShippedPlans++
-			} else {
-				stats.ActivePlans++
-			}
-		}
-		stats.OpenIssues += len(issues)
+		names = append(names, p.Name)
 	}
+	sort.Strings(names)
+	return names
+}
 
-	data := indexData{
-		Breadcrumbs: []breadcrumb{{Label: "Registry", URL: "/"}},
-		Projects:    summaries,
-		Stats:       stats,
+// handleDashboardReviews renders the global Reviews tab: pr_review events
+// aggregated across every project, optionally narrowed by ?project=.
+func handleDashboardReviews(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	selected := r.URL.Query().Get("project")
+	data := dashboardReviewsData{
+		Breadcrumbs: []breadcrumb{{Label: "Reviews"}},
+		Projects:    projectNames(),
+		Selected:    selected,
+		Entries:     AggregateEvents("pr_review", selected),
 	}
+	render(w, r, "dashboard_reviews.html", data)
+}
 
-	render(w, "index.html", data)
+// handleDashboardAudits renders the global Audits tab: audit entries
+// aggregated across every project, optionally narrowed by ?project=.
+func handleDashboardAudits(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	selected := r.URL.Query().Get("project")
+	data := dashboardAuditsData{
+		Breadcrumbs: []breadcrumb{{Label: "Audits"}},
+		Projects:    projectNames(),
+		Selected:    selected,
+		Entries:     AggregateAudit(selected),
+	}
+	render(w, r, "dashboard_audits.html", data)
+}
+
+// handleDashboardIssues renders the global Issues tab: issue-log entries
+// aggregated across every project, optionally narrowed by ?project=.
+func handleDashboardIssues(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	selected := r.URL.Query().Get("project")
+	data := dashboardIssuesData{
+		Breadcrumbs: []breadcrumb{{Label: "Issues"}},
+		Projects:    projectNames(),
+		Selected:    selected,
+		Entries:     AggregateIssues(selected),
+	}
+	render(w, r, "dashboard_issues.html", data)
+}
+
+// handleDashboardDeployChecks renders the global Deploy Checks tab: deploy
+// check entries aggregated across every project, optionally narrowed by
+// ?project=.
+func handleDashboardDeployChecks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	selected := r.URL.Query().Get("project")
+	data := dashboardDeployChecksData{
+		Breadcrumbs: []breadcrumb{{Label: "Deploy Checks"}},
+		Projects:    projectNames(),
+		Selected:    selected,
+		Entries:     AggregateDeployChecks(selected),
+	}
+	render(w, r, "dashboard_deploy_checks.html", data)
 }
 
 func handlePlan(w http.ResponseWriter, r *http.Request) {
@@ -257,7 +411,7 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 		Plan:    plan,
 		Columns: columns,
 	}
-	render(w, "plan.html", data)
+	render(w, r, "plan.html", data)
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {
@@ -288,7 +442,7 @@ func handleAudit(w http.ResponseWriter, r *http.Request) {
 		Since:       since,
 		Until:       until,
 	}
-	render(w, "audit.html", data)
+	render(w, r, "audit.html", data)
 }
 
 func handleDeployChecks(w http.ResponseWriter, r *http.Request) {
@@ -319,7 +473,7 @@ func handleDeployChecks(w http.ResponseWriter, r *http.Request) {
 		Since:       since,
 		Until:       until,
 	}
-	render(w, "deploy_checks.html", data)
+	render(w, r, "deploy_checks.html", data)
 }
 
 func handleReviewDetail(w http.ResponseWriter, r *http.Request) {
@@ -351,7 +505,7 @@ func handleReviewDetail(w http.ResponseWriter, r *http.Request) {
 		ExecutionLog:  entry.ExecutionLog,
 		Suggestions:   entry.Suggestions,
 	}
-	render(w, "review.html", data)
+	render(w, r, "review.html", data)
 }
 
 // handleReviewsList renders the list of code reviews for a project, querying the registry event log for pr_review entries.
@@ -376,7 +530,7 @@ func handleReviewsList(w http.ResponseWriter, r *http.Request) {
 		ProjectName: name,
 		Entries:     entries,
 	}
-	render(w, "reviews.html", data)
+	render(w, r, "reviews.html", data)
 }
 
 func handleProject(w http.ResponseWriter, r *http.Request) {
@@ -476,7 +630,7 @@ func handleProject(w http.ResponseWriter, r *http.Request) {
 		HasNext:            page < totalPages,
 	}
 
-	render(w, "project.html", data)
+	render(w, r, "project.html", data)
 }
 
 func handleIssues(w http.ResponseWriter, r *http.Request) {
@@ -502,5 +656,5 @@ func handleIssues(w http.ResponseWriter, r *http.Request) {
 		Entries:     entries,
 		Severity:    severity,
 	}
-	render(w, "issues.html", data)
+	render(w, r, "issues.html", data)
 }

@@ -8,12 +8,19 @@ import (
 	"time"
 )
 
-// ── SSE hub (DOTFILES-25) ─────────────────────────────────────────────────
+// ── SSE hub (DOTFILES-25, global subscriber DOTFILES-32) ──────────────────
 //
 // Per-project pub/sub over stdlib http.Flusher. A background goroutine polls
 // registry.db's mtime every 500ms and broadcasts to all connected projects'
 // channels on change — a simple diff, since SQLite is single-writer WAL and
 // any write touches the file.
+//
+// globalSubKey is a reserved subscriber key (no project is ever named "*")
+// used by the project-less global dashboard pages (Kanban/Reviews/Audits/
+// Issues/Deploy Checks): they subscribe under this key instead of a project
+// name, and broadcastAll notifies it on every change alongside every
+// per-project subscriber.
+const globalSubKey = "*"
 
 type eventHub struct {
 	mu   sync.Mutex
@@ -64,24 +71,38 @@ var hub = newEventHub()
 
 var watcherOnce sync.Once
 
-// startWatcher launches (once) a background goroutine that polls dbPath()'s
-// mtime every 500ms and broadcasts to the hub on change.
+// dbModTime returns the newer of registry.db's and registry.db-wal's mtimes.
+//
+// SQLite in WAL mode buffers writes in the -wal file and only flushes them
+// into the main database file on checkpoint. Stat'ing registry.db alone is
+// therefore blind to any write that hasn't been checkpointed yet — the
+// watcher would miss live updates until something forced a checkpoint (e.g.
+// a process restart). Considering both files' mtimes closes that gap.
+func dbModTime() time.Time {
+	var latest time.Time
+	if info, err := os.Stat(dbPath()); err == nil {
+		latest = info.ModTime()
+	}
+	if info, err := os.Stat(dbPath() + "-wal"); err == nil {
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+	}
+	return latest
+}
+
+// startWatcher launches (once) a background goroutine that polls dbModTime()
+// every 500ms and broadcasts to the hub on change.
 func startWatcher() {
 	watcherOnce.Do(func() {
 		go func() {
-			var lastMod time.Time
-			if info, err := os.Stat(dbPath()); err == nil {
-				lastMod = info.ModTime()
-			}
+			lastMod := dbModTime()
 			ticker := time.NewTicker(500 * time.Millisecond)
 			defer ticker.Stop()
 			for range ticker.C {
-				info, err := os.Stat(dbPath())
-				if err != nil {
-					continue
-				}
-				if info.ModTime().After(lastMod) {
-					lastMod = info.ModTime()
+				mod := dbModTime()
+				if mod.After(lastMod) {
+					lastMod = mod
 					hub.broadcastAll()
 				}
 			}
@@ -95,7 +116,20 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	streamEvents(w, r, name)
+}
 
+// handleGlobalEvents is the project-less counterpart to handleEvents, used
+// by the 5 global dashboard pages: it subscribes under globalSubKey instead
+// of a project name, so it's notified on every broadcastAll regardless of
+// which project's data changed.
+func handleGlobalEvents(w http.ResponseWriter, r *http.Request) {
+	streamEvents(w, r, globalSubKey)
+}
+
+// streamEvents runs the shared SSE loop for a given subscriber key (a
+// project name, or globalSubKey for the project-less global pages).
+func streamEvents(w http.ResponseWriter, r *http.Request, subKey string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -110,8 +144,8 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	ch := hub.subscribe(name)
-	defer hub.unsubscribe(name, ch)
+	ch := hub.subscribe(subKey)
+	defer hub.unsubscribe(subKey, ch)
 
 	ping := time.NewTicker(15 * time.Second)
 	defer ping.Stop()

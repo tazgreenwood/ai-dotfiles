@@ -3,10 +3,56 @@ package main
 import (
 	"bufio"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// ── dbModTime WAL-blindness (DOTFILES-32) ──────────────────────────────────
+//
+// The watcher previously stat'd only registry.db. WAL-mode writes land in
+// registry.db-wal and never touch the main file's mtime until a checkpoint,
+// so the poller missed changes until something forced one (e.g. restart).
+// dbModTime() must consider both files and return the newer mtime.
+
+func TestDbModTime_ReflectsWalFileMtime(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	t.Setenv("REGISTRY_DATA_DIR", dir)
+
+	mainPath := dbPath()
+	if err := os.WriteFile(mainPath, []byte("main"), 0o644); err != nil {
+		t.Fatalf("write main db file: %v", err)
+	}
+	oldTime := time.Now().Add(-1 * time.Hour)
+	if err := os.Chtimes(mainPath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes main db file: %v", err)
+	}
+
+	before := dbModTime()
+	if !before.Equal(oldTime) {
+		t.Fatalf("before touching -wal: dbModTime() = %v, want %v", before, oldTime)
+	}
+
+	walPath := mainPath + "-wal"
+	if err := os.WriteFile(walPath, []byte("wal"), 0o644); err != nil {
+		t.Fatalf("write -wal file: %v", err)
+	}
+	newTime := time.Now()
+	if err := os.Chtimes(walPath, newTime, newTime); err != nil {
+		t.Fatalf("chtimes -wal file: %v", err)
+	}
+
+	after := dbModTime()
+	if !after.After(before) {
+		t.Fatalf("after touching only -wal file: dbModTime() = %v, want newer than %v", after, before)
+	}
+	if !after.Equal(newTime) {
+		t.Fatalf("dbModTime() = %v, want %v (the -wal file's mtime)", after, newTime)
+	}
+}
 
 // ── GET /projects/{name}/events ─────────────────────────────────────────────
 //
