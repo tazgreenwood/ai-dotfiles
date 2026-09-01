@@ -303,6 +303,30 @@ func TestDashboardProposals_PermalinkRenderStates(t *testing.T) {
 		}
 	})
 
+	t.Run("no permalink and never notified renders the badge alone", func(t *testing.T) {
+		dir, cleanup := setupFixtureDir(t)
+		defer cleanup()
+		seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
+		seedProposals(t, dir, []proposalFixture{
+			{Project: "alpha", Summary: "BARE-ROW", Permalink: "", NotifiedAt: nil},
+		})
+		ts := newTestServer(t, dir)
+		defer ts.Close()
+
+		// The only state where the badge is the whole cell, and the only one
+		// exercising the false branch of the conditional spacing class.
+		body := getBody(t, ts.URL+"/proposals")
+		if !strings.Contains(body, "Not sent") {
+			t.Errorf("want the 'Not sent' badge, got:\n%s", body)
+		}
+		if strings.Contains(body, "Open in Slack") {
+			t.Errorf("want NO anchor when there is no permalink")
+		}
+		if strings.Contains(body, `href=""`) {
+			t.Errorf("want NO empty href anywhere in the page")
+		}
+	})
+
 	t.Run("notified with permalink renders the link in a new tab", func(t *testing.T) {
 		dir, cleanup := setupFixtureDir(t)
 		defer cleanup()
@@ -317,13 +341,15 @@ func TestDashboardProposals_PermalinkRenderStates(t *testing.T) {
 		if !strings.Contains(body, `href="https://slack.example/archives/C1/p2"`) {
 			t.Errorf("want the permalink anchor, got:\n%s", body)
 		}
-		// Without target="_blank" the rel attributes are inert and the click
-		// navigates the queue away, losing the filter state.
-		if !strings.Contains(body, `target="_blank"`) {
-			t.Errorf("want target=\"_blank\" so rel=noopener noreferrer is meaningful")
+		// Assert the attributes ON THE ANCHOR, not merely somewhere on the page:
+		// a page-global check passes vacuously the moment any other element
+		// gains target="_blank", and the AC-3 regression goes undetected.
+		wantAnchor := `<a href="https://slack.example/archives/C1/p2" target="_blank" rel="noopener noreferrer"`
+		if !strings.Contains(body, wantAnchor) {
+			t.Errorf("want the anchor to carry href+target+rel together:\n  want: %s\n  got:\n%s", wantAnchor, body)
 		}
-		if !strings.Contains(body, `rel="noopener noreferrer"`) {
-			t.Errorf("want rel=noopener noreferrer retained alongside target=_blank")
+		if !strings.Contains(body, "Open in Slack") {
+			t.Errorf("want the 'Open in Slack' label")
 		}
 		// A delivered row has nothing to warn about.
 		if strings.Contains(body, "Not sent") {

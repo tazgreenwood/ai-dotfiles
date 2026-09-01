@@ -77,7 +77,7 @@
                Gating the anchor on .NotifiedAt hid a working permalink behind a
                "Not sent" badge on exactly the rows that needed the exit most. */}}
           {{if .SourcePermalink}}
-          <a href="{{.SourcePermalink}}" target="_blank" rel="noopener noreferrer" class="text-zinc-600 dark:text-zinc-300 hover:underline">Open in Slack &rarr;</a>
+          <a href="{{.SourcePermalink}}" target="_blank" rel="noopener noreferrer" class="text-zinc-600 dark:text-zinc-300 hover:underline">Open in Slack &rarr;<span class="sr-only"> (opens in a new tab)</span></a>
           {{end}}
           {{if not .NotifiedAt}}
           <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 ring-1 ring-inset ring-zinc-500/20{{if .SourcePermalink}} ml-1.5{{end}}">Not sent</span>
