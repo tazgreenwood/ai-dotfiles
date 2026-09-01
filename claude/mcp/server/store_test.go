@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -440,5 +442,141 @@ func TestUpdateProposalStatus_RejectedKeepsNote(t *testing.T) {
 	}
 	if got.DecidedAt == nil {
 		t.Error("decided_at: want stamped, got NULL")
+	}
+}
+
+// ── project index (DOTFILES-36) ──────────────────────────────────────────────
+
+// seedProject writes a project plus optional plans. Plans are given newest-last.
+func seedProject(t *testing.T, s *store, name, purpose string, plans []map[string]any) {
+	t.Helper()
+	data := map[string]any{
+		"name": name,
+		"repo": map[string]any{"workspace": "clearlinkit", "localPath": "/tmp/" + name},
+		// A large subtree that must NOT appear in the index payload.
+		"resources": map[string]any{"slack": map[string]any{"channel": "C0NOISE"}},
+	}
+	if purpose != "" {
+		data["purpose"] = purpose
+	}
+	if err := s.SetProject(name, data); err != nil {
+		t.Fatalf("SetProject %s: %v", name, err)
+	}
+	for i, p := range plans {
+		ticket, _ := p["ticket"].(string)
+		if err := s.WritePlan(name, ticket, p); err != nil {
+			t.Fatalf("WritePlan %s #%d: %v", name, i, err)
+		}
+	}
+}
+
+func planWith(ticket, summary string, statuses ...string) map[string]any {
+	steps := make([]any, 0, len(statuses))
+	for i, st := range statuses {
+		steps = append(steps, map[string]any{"id": i + 1, "status": st})
+	}
+	return map[string]any{"ticket": ticket, "summary": summary, "plan_steps": steps}
+}
+
+func indexByName(t *testing.T, rows []projectIndexEntry, name string) projectIndexEntry {
+	t.Helper()
+	for _, r := range rows {
+		if r.Name == name {
+			return r
+		}
+	}
+	t.Fatalf("project %q not present in index", name)
+	return projectIndexEntry{}
+}
+
+func TestListIndex_OneRowPerProjectWithActivePlan(t *testing.T) {
+	s := newTestStore(t)
+
+	seedProject(t, s, "alpha", "Alpha does the alpha thing", []map[string]any{
+		planWith("ALPHA-1", "old shipped work", "done", "done"),
+		planWith("ALPHA-2", "the live one", "done", "pending"),
+	})
+	seedProject(t, s, "beta", "Beta does the beta thing", nil)
+
+	rows, err := s.ListIndex()
+	if err != nil {
+		t.Fatalf("ListIndex: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want one row per project (2), got %d", len(rows))
+	}
+
+	alpha := indexByName(t, rows, "alpha")
+	if alpha.Purpose != "Alpha does the alpha thing" {
+		t.Errorf("purpose: got %q", alpha.Purpose)
+	}
+	if alpha.LocalPath != "/tmp/alpha" {
+		t.Errorf("local_path: got %q", alpha.LocalPath)
+	}
+	if alpha.ActivePlan == nil {
+		t.Fatal("active_plan: want the newest non-shipped plan, got nil")
+	}
+	if alpha.ActivePlan.Ticket != "ALPHA-2" {
+		t.Errorf("active_plan.ticket: want ALPHA-2 (newest non-shipped), got %q", alpha.ActivePlan.Ticket)
+	}
+	if alpha.ActivePlan.Summary != "the live one" {
+		t.Errorf("active_plan.summary: got %q", alpha.ActivePlan.Summary)
+	}
+}
+
+func TestListIndex_NoPlansAndAllShippedReportNoActivePlan(t *testing.T) {
+	s := newTestStore(t)
+
+	seedProject(t, s, "noplans", "has no plans at all", nil)
+	seedProject(t, s, "allshipped", "everything is done", []map[string]any{
+		planWith("SHIP-1", "done work", "done"),
+		planWith("SHIP-2", "also done", "done", "done"),
+	})
+
+	rows, err := s.ListIndex()
+	if err != nil {
+		t.Fatalf("ListIndex: %v", err)
+	}
+	if ap := indexByName(t, rows, "noplans").ActivePlan; ap != nil {
+		t.Errorf("noplans: want nil active_plan, got %+v", ap)
+	}
+	if ap := indexByName(t, rows, "allshipped").ActivePlan; ap != nil {
+		t.Errorf("allshipped: want nil active_plan, got %+v", ap)
+	}
+}
+
+func TestListIndex_MissingPurposeIsEmptyNotError(t *testing.T) {
+	s := newTestStore(t)
+	seedProject(t, s, "nopurpose", "", nil)
+
+	rows, err := s.ListIndex()
+	if err != nil {
+		t.Fatalf("ListIndex must not error on a missing purpose: %v", err)
+	}
+	if got := indexByName(t, rows, "nopurpose").Purpose; got != "" {
+		t.Errorf("purpose: want empty string, got %q", got)
+	}
+}
+
+// The whole point of the index is that it is cheap. A routing decision must not
+// drag plan bodies, audit entries or resource subtrees into context.
+func TestListIndex_PayloadCarriesNoHeavySubtrees(t *testing.T) {
+	s := newTestStore(t)
+	seedProject(t, s, "alpha", "Alpha does the alpha thing", []map[string]any{
+		planWith("ALPHA-2", "the live one", "pending"),
+	})
+
+	rows, err := s.ListIndex()
+	if err != nil {
+		t.Fatalf("ListIndex: %v", err)
+	}
+	blob, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, forbidden := range []string{"plan_steps", "resources", "C0NOISE"} {
+		if strings.Contains(string(blob), forbidden) {
+			t.Errorf("index payload leaks %q: %s", forbidden, blob)
+		}
 	}
 }

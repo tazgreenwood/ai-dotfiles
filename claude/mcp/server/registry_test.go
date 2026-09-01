@@ -1505,3 +1505,92 @@ func TestProposalToolsRegisteredInDispatchAndSchemas(t *testing.T) {
 		}
 	}
 }
+
+// ── registry_index (DOTFILES-36) ─────────────────────────────────────────────
+
+// decodeIndex parses a registry_index ToolResult into its projects array.
+func decodeIndex(t *testing.T, result ToolResult) []map[string]any {
+	t.Helper()
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var body struct {
+		Projects []map[string]any `json:"projects"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &body); err != nil {
+		t.Fatalf("unmarshal index: %v (body: %s)", err, result.Content[0].Text)
+	}
+	return body.Projects
+}
+
+func TestRegistryIndex_ReturnsThinRowPerProject(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	if err := s.SetProject("alpha", map[string]any{
+		"name":      "alpha",
+		"purpose":   "Alpha does the alpha thing",
+		"repo":      map[string]any{"workspace": "clearlinkit", "localPath": "/tmp/alpha"},
+		"resources": map[string]any{"slack": map[string]any{"channel": "C0NOISE"}},
+	}); err != nil {
+		t.Fatalf("SetProject: %v", err)
+	}
+	if err := s.WritePlan("alpha", "ALPHA-9", map[string]any{
+		"ticket":     "ALPHA-9",
+		"summary":    "live work",
+		"plan_steps": []any{map[string]any{"id": 1, "status": "pending"}},
+	}); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	result := registryIndex(map[string]any{})
+	projects := decodeIndex(t, result)
+	if len(projects) != 1 {
+		t.Fatalf("want 1 project row, got %d", len(projects))
+	}
+	row := projects[0]
+	if row["name"] != "alpha" {
+		t.Errorf("name: got %v", row["name"])
+	}
+	if row["purpose"] != "Alpha does the alpha thing" {
+		t.Errorf("purpose: got %v", row["purpose"])
+	}
+	if row["local_path"] != "/tmp/alpha" {
+		t.Errorf("local_path: got %v", row["local_path"])
+	}
+	if row["repo"] != "clearlinkit/alpha" {
+		t.Errorf("repo: got %v", row["repo"])
+	}
+	ap, ok := row["active_plan"].(map[string]any)
+	if !ok {
+		t.Fatalf("active_plan: want an object, got %v", row["active_plan"])
+	}
+	if ap["ticket"] != "ALPHA-9" || ap["summary"] != "live work" {
+		t.Errorf("active_plan: got %v", ap)
+	}
+
+	// Routing must never drag heavy subtrees along.
+	for _, forbidden := range []string{"plan_steps", "resources", "C0NOISE"} {
+		if strings.Contains(result.Content[0].Text, forbidden) {
+			t.Errorf("index body leaks %q: %s", forbidden, result.Content[0].Text)
+		}
+	}
+}
+
+func TestRegistryIndex_EmptyRegistryReturnsEmptyListNotNull(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	result := registryIndex(map[string]any{})
+	projects := decodeIndex(t, result)
+	if projects == nil {
+		t.Fatal("want an empty array, got JSON null — callers iterate this")
+	}
+	if len(projects) != 0 {
+		t.Errorf("want 0 rows on an empty registry, got %d", len(projects))
+	}
+}
