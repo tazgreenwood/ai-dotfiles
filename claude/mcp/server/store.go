@@ -580,8 +580,14 @@ func (s *store) CreateProposal(p *proposal) (int64, error) {
 	if p.Source == "" || p.SourceRef == "" {
 		return 0, fmt.Errorf("proposal source and source_ref are required")
 	}
-	if p.SourceChannel == "" || p.SourcePermalink == "" {
-		return 0, fmt.Errorf("proposal source_channel and source_permalink are required")
+	// source_channel and source_permalink are required for anything that came
+	// from a conversation, because a queue row with no way back to that
+	// conversation is not actionable. A proposal planned in-session
+	// (source="session") has no originating message, so there is nothing to link
+	// to — relax the check for that source ONLY. Widening it further would
+	// reintroduce dead rows in the UI's one actionable control.
+	if p.Source != "session" && (p.SourceChannel == "" || p.SourcePermalink == "") {
+		return 0, fmt.Errorf("proposal source_channel and source_permalink are required for source %q", p.Source)
 	}
 	if !proposalKinds[p.Kind] {
 		return 0, fmt.Errorf("invalid proposal kind %q (want plan|fix|review|improvement)", p.Kind)
