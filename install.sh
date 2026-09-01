@@ -6,6 +6,26 @@ CLAUDE_DIR="$HOME/.claude"
 
 echo "Installing private-dotfiles from $DOTFILES"
 
+JARVIS_LABEL="com.tazgreenwood.jarvis"
+JARVIS_LAUNCHAGENT="$HOME/Library/LaunchAgents/$JARVIS_LABEL.plist"
+
+# ── Uninstall subcommand ───────────────────────────────────────────────────────
+# `./install.sh uninstall-jarvis` removes only the poller: it unloads the job and
+# deletes the installed plist. It deliberately does NOT touch ~/.config/jarvis/env
+# (your tokens) or the logs.
+if [ "${1:-}" = "uninstall-jarvis" ]; then
+  if [ -f "$JARVIS_LAUNCHAGENT" ]; then
+    launchctl unload "$JARVIS_LAUNCHAGENT" 2>/dev/null || true
+    rm -f "$JARVIS_LAUNCHAGENT"
+    echo "  ✓ jarvis poller unloaded and removed"
+  else
+    echo "  ✓ jarvis poller not installed — nothing to do"
+  fi
+  echo "  ℹ left in place: ~/.config/jarvis/env and ~/.config/jarvis/logs/"
+  exit 0
+fi
+
+
 # ── Claude Skills ──────────────────────────────────────────────────────────────
 echo "Linking Claude skills..."
 mkdir -p "$CLAUDE_DIR/skills"
@@ -159,6 +179,68 @@ if [ -f "$UI_BINARY" ] && [ -f "$UI_PLIST" ]; then
   launchctl unload "$UI_LAUNCHAGENTS" 2>/dev/null || true
   launchctl load "$UI_LAUNCHAGENTS"
   echo "  ✓ registry-ui daemon loaded (auto-starts on login)"
+fi
+
+# ── Jarvis unattended poller ───────────────────────────────────────────────────
+# Two-tier launchd job. Tier 1 is pure shell (registry read + one Slack
+# conversations.history call) and spawns NO agent, so a quiet tick costs $0.
+# Tier 2 escalates to `claude -p '/jarvis poll'` only when tier 1 sees a
+# candidate message, bounded by --max-turns.
+#
+# CREDENTIALS: the committed plist contains NO secrets. It sources
+# ~/.config/jarvis/env (mode 600) at run time and references only the variable
+# NAMES $SLACK_BOT_TOKEN and $CLAUDE_CODE_OAUTH_TOKEN.
+JARVIS_DIR="$DOTFILES/claude/jarvis"
+JARVIS_PLIST="$JARVIS_DIR/$JARVIS_LABEL.plist"
+JARVIS_ENV="$HOME/.config/jarvis/env"
+
+echo "Installing Jarvis poller..."
+
+# Logs live under ~/.config/jarvis/logs — outside the repo, so a poll never
+# dirties the working tree. launchd cannot create these itself.
+mkdir -p "$HOME/.config/jarvis/logs"
+touch "$HOME/.config/jarvis/logs/poll.log"
+chmod 700 "$HOME/.config/jarvis"
+
+# NEVER clobber an existing env file — it holds live tokens.
+if [ -f "$JARVIS_ENV" ]; then
+  chmod 600 "$JARVIS_ENV"
+  echo "  ✓ $JARVIS_ENV already exists — left untouched"
+else
+  umask 177
+  cat > "$JARVIS_ENV" <<'ENVEOF'
+# Jarvis credentials. This file is sourced by the launchd poller; it is NOT in
+# the repo and must never be committed. Mode 600.
+#
+# Slack bot token (the bot-token kind, not a user token). Needs scopes:
+#   chat:write, channels:history, groups:history
+# groups:history is REQUIRED because the Jarvis channel is a PRIVATE channel;
+# without it conversations.history returns missing_scope and the poller cannot
+# see incoming messages.
+#SLACK_BOT_TOKEN=
+#
+# Long-lived Claude Code token, so the poller does not depend on keychain auth.
+# Mint it interactively (it cannot be created unattended):
+#   claude setup-token
+# then paste the value here.
+#CLAUDE_CODE_OAUTH_TOKEN=
+ENVEOF
+  umask 022
+  chmod 600 "$JARVIS_ENV"
+  echo "  ✓ created $JARVIS_ENV (mode 600) with placeholders"
+  echo "  ⚠ ACTION REQUIRED: fill in SLACK_BOT_TOKEN and CLAUDE_CODE_OAUTH_TOKEN"
+  echo "    (run 'claude setup-token' for the latter — it is interactive)"
+fi
+
+if [ -f "$JARVIS_PLIST" ]; then
+  cp "$JARVIS_PLIST" "$JARVIS_LAUNCHAGENT"
+  # Defense in depth: the plist holds no secret today, but keep it non-world-readable.
+  chmod 600 "$JARVIS_LAUNCHAGENT"
+  launchctl unload "$JARVIS_LAUNCHAGENT" 2>/dev/null || true
+  launchctl load "$JARVIS_LAUNCHAGENT"
+  echo "  ✓ jarvis poller loaded (polls every 300s; logs to ~/.config/jarvis/logs/poll.log)"
+  echo "    tail -f ~/.config/jarvis/logs/poll.log"
+  echo "    ./install.sh uninstall-jarvis   # to remove"
 fi
 
 echo ""

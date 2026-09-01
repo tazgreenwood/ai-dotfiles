@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tazgreenwood.jarvis</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>set -a; . "$HOME/.config/jarvis/env"; set +a
+J="$HOME/.config/jarvis"; LOCK="$J/poll.lock"; REPO="$HOME/github.com/tazgreenwood/private-dotfiles"
+t() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+mkdir "$LOCK" 2&gt;/dev/null || { echo "$(t) skip: previous tick still running"; exit 0; }
+trap 'rmdir "$LOCK" 2&gt;/dev/null' EXIT
+[ -n "$SLACK_BOT_TOKEN" ] || { echo "$(t) fatal: SLACK_BOT_TOKEN unset in $J/env"; exit 1; }
+[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || { echo "$(t) fatal: CLAUDE_CODE_OAUTH_TOKEN unset in $J/env"; exit 1; }
+R="$REPO/claude/mcp/server/registry"
+RES=$(printf '%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"jarvis-poll","version":"1"}}}' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"registry_get_resources","arguments":{"name":"private-dotfiles","category":"slack"}}}' | "$R" 2&gt;/dev/null | tail -1 | jq -r '.result.content[0].text // empty')
+CH=$(printf '%s' "$RES" | jq -r '.resources.slack.jarvis_channel // empty')
+WHO=$(printf '%s' "$RES" | jq -r '.resources.slack.jarvis_user_id // empty')
+[ -n "$CH" ] &amp;&amp; [ -n "$WHO" ] || { echo "$(t) fatal: registry gave no jarvis_channel/jarvis_user_id"; exit 1; }
+H=$(curl -sS --max-time 30 "https://slack.com/api/conversations.history?channel=$CH&amp;limit=30" -H "Authorization: Bearer $SLACK_BOT_TOKEN")
+[ "$(printf '%s' "$H" | jq -r '.ok')" = "true" ] || { echo "$(t) fatal: slack read failed: $(printf '%s' "$H" | jq -r '.error')"; exit 1; }
+N=$(printf '%s' "$H" | jq --arg u "$WHO" '[.messages[] | select(.user == $u or ((.reply_count // 0) &gt; 0))] | length')
+[ "$N" = "0" ] &amp;&amp; { echo "$(t) tick: quiet, no agent spawned, cost 0.00"; exit 0; }
+echo "$(t) tick: $N candidate(s), escalating to planning run"
+cd "$REPO" || exit 1
+O=$(claude -p '/jarvis poll' --permission-mode default --max-turns 80 --output-format json 2&gt;&amp;1)
+echo "$(t) run: subtype=$(printf '%s' "$O" | jq -r '.subtype // "unparsed"' 2&gt;/dev/null) cost=$(printf '%s' "$O" | jq -r '.total_cost_usd // "?"' 2&gt;/dev/null)"</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/taz.greenwood</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles</string>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/taz.greenwood/.config/jarvis/logs/poll.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/taz.greenwood/.config/jarvis/logs/poll.log</string>
+</dict>
+</plist>
