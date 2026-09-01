@@ -309,6 +309,21 @@ function isJoinLeaveNotice(text) {
   return JOIN_LEAVE_RE.test(String(text || '').trim())
 }
 
+// A message whose entire content is @-mentions, channel/user refs and
+// punctuation carries no request. Verified against real #taz-ai-portal history
+// on 2026-09-01: inviting the app into the channel posts a message whose whole
+// text is `<@U0BTZJZ51GA|ai-portal>`, which the other filters let through and
+// which was claimed as proposal 4 — a plan proposal about a bare mention.
+// Strip every Slack ref (<@user>, <#channel>, <!here>, <http|label>) and any
+// leftover punctuation; if nothing is left, there is no request here.
+function hasSubstantiveText(text) {
+  const stripped = String(text || '')
+    .replace(/<[@#!][^>]*>/g, ' ')
+    .replace(/<[^>|]*(\|[^>]*)?>/g, ' ')
+    .replace(/[\s.,:;!?\-—–_*`~"']+/g, '')
+  return stripped.length > 0
+}
+
 function isSystemSubtype(subtype) {
   if (!subtype) return false
   return !HUMAN_SUBTYPES.has(subtype)
@@ -341,6 +356,7 @@ function selectCandidates(messages, ctx) {
     if (isThreadReply(msg)) continue
     if (isSystemSubtype(msg.subtype)) continue
     if (isJoinLeaveNotice(msg.text)) continue
+    if (!hasSubstantiveText(msg.text)) continue
     // When the caller pins an author, honour it: only that human's messages
     // become requests. Absent that, any non-bot human in this private channel.
     if (ctx.user_id && msg.user !== ctx.user_id) continue
