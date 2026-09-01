@@ -623,7 +623,7 @@ type proposal struct {
 }
 
 var (
-	proposalKinds    = map[string]bool{"plan": true, "fix": true, "review": true, "improvement": true}
+	proposalKinds    = map[string]bool{"plan": true, "fix": true, "review": true, "improvement": true, "registration": true}
 	proposalStatuses = map[string]bool{"pending": true, "approved": true, "rejected": true, "superseded": true}
 	// Statuses a caller may set directly. "superseded" is excluded: it must go
 	// through SupersedeProposal so status and superseded_by move together and
@@ -657,7 +657,7 @@ func (s *store) CreateProposal(p *proposal) (int64, error) {
 		return 0, fmt.Errorf("proposal source_channel and source_permalink are required for source %q", p.Source)
 	}
 	if !proposalKinds[p.Kind] {
-		return 0, fmt.Errorf("invalid proposal kind %q (want plan|fix|review|improvement)", p.Kind)
+		return 0, fmt.Errorf("invalid proposal kind %q (want plan|fix|review|improvement|registration)", p.Kind)
 	}
 	status := p.Status
 	if status == "" {

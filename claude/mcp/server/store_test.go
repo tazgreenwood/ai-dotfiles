@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -102,6 +103,31 @@ func TestCreateProposal_RejectsBadKindAndStatus(t *testing.T) {
 	bad2.Status = "shipped"
 	if _, err := s.CreateProposal(bad2); err == nil {
 		t.Error("want error for invalid status, got nil")
+	}
+}
+
+// TestCreateProposal_ValidKinds pins the kind enum. "registration" joins the
+// original four so Stuart can propose registering an unregistered repo through
+// the same approval gate a plan goes through; the enum stays closed so a typo
+// is still an error rather than a silently unroutable row.
+func TestCreateProposal_ValidKinds(t *testing.T) {
+	s := newTestStore(t)
+
+	for i, kind := range []string{"plan", "fix", "review", "improvement", "registration"} {
+		p := sampleProposal("kind " + kind)
+		p.Kind = kind
+		p.SourceRef = fmt.Sprintf("1756600001.0001%02d", i)
+		id, err := s.CreateProposal(p)
+		if err != nil {
+			t.Fatalf("CreateProposal(kind=%q): %v", kind, err)
+		}
+		got, err := s.GetProposal(id)
+		if err != nil {
+			t.Fatalf("GetProposal(kind=%q): %v", kind, err)
+		}
+		if got.Kind != kind {
+			t.Errorf("kind: want %q, got %q", kind, got.Kind)
+		}
 	}
 }
 

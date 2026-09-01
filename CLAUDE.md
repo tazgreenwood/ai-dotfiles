@@ -226,9 +226,11 @@ The `agent_runs` resume spine behind `/lead build`. One row ties proposal → pl
 `registry_update_run` writes phase, status, cursor, note and ticket in a **single statement** — deliberately not the `UpdateStep` read-modify-write, since this is the row a concurrent resume reads. **Omitting `cursor` or `ticket` leaves the stored value unchanged**: a phase-only advance that blanked the cursor would make a resume re-run completed steps, and the ticket can only ever arrive on a later advance because the run is opened *before* the key is allocated. Writes are scoped to the caller's project.
 
 #### `registry_write_proposal(name: string, proposal: map[string]any) -> {ok: bool, id: int} | error`
-Creates a proposal — a unit of work awaiting a human decision. Caller supplies `source`, `source_channel`, `source_ref`, `source_permalink` (all required, non-empty), `kind` (`plan|fix|review|improvement`), `summary`, `payload` (the full plan JSON), and optionally `notified_at` (RFC3339).
+Creates a proposal — a unit of work awaiting a human decision. Caller supplies `source`, `source_channel`, `source_ref`, `source_permalink` (all required, non-empty), `kind` (`plan|fix|review|improvement|registration`), `summary`, `payload` (the full plan JSON), and optionally `notified_at` (RFC3339).
 
 Server-owned, never accepted from the caller: `id`, `project`, `created_at`, `decided_at`, `superseded_by`. `status` defaults to `pending`.
+
+`kind: "registration"` is `/lead` STEP 1a-bis's zero-match output: the request matched no registered project but a repo on disk confidently matches it. Its `payload` is `{name, local_path, remote, drafted_purpose, original_request}` rather than a plan, and it is filed under the **cwd** project because the project it proposes does not exist yet. Registration is propose-only — the trigger text is untrusted, so nothing is written to the registry until a human approves.
 
 `notified_at` is **create-only** — `registry_update_proposal` carries decision fields only, so a proposal must be posted to Slack *before* it is persisted.
 
