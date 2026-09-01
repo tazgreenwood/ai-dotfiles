@@ -46,6 +46,16 @@ Report to the user that the build is running in the background; they can watch l
 
 ---
 
+## STEP 3a: RECORD AGENT CALLS
+
+After the workflow returns, follow `~/.claude/skills/_record-agent-calls.md`: write one `agent_calls` row per agent it ran — every `dev:`, `qa:`, `commit:`, `block:` and merge agent, across every retry — using the `workflowProgress` entries for real model/token/duration data.
+
+Pass `workflow: "build"`. Record retries too: a step that took three developer attempts cost three times, and hiding that is exactly the thing a cost view exists to reveal. Pass `run_id` when `/build` was invoked as part of a `/lead build` chain; omit it otherwise.
+
+Best-effort: a failed record must never fail the build, and it must not change the reported step statuses.
+
+---
+
 ## STEP 4: REPORT RESULT
 
 When the workflow completes, it returns `{ status: 'complete' | 'blocked' | 'awaiting_human', results, ... }`.

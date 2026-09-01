@@ -24,6 +24,9 @@ Codebase = user-facing skills + supporting MCP tools:
 - `idea-validation.md` — agent-graph fan-out: idea-fleshing agent, then 4 parallel isolated research agents (competitor, market-trend, risk-assumption, technical-feasibility), synthesized into a self-contained HTML report
 - `lead.md` — **Stuart**, the team lead. `/lead <request>` turns prose into a plan proposal, posts it to Slack as the bot (push-notifies the phone), and persists it as `pending`. `/lead check` sweeps for new requests and classifies thread replies as approve/reject/pushback. Propose-only: approval records a decision and never triggers execution.
 
+**Shared skill references** (`claude/skills/_*.md`): files whose basename starts with `_` are reference docs that skills read, not invocable commands. `install.sh` links them **flat** into `~/.claude/skills/` rather than as a `<name>/SKILL.md` skill directory, so they never become a slash command and so skills can read them by an absolute path that resolves in any repo.
+- `_record-agent-calls.md` — how `/ship`, `/code-review`, `/build` and `/lead build` write `agent_calls` rows from a Workflow result. Lives in the callers because a workflow script cannot see its own agents' token usage.
+
 **Workflow scripts** (`claude/workflows/`):
 - `build-workflow.js` — deterministic run-partitioning (sync/async), developer/QA retry loop, git-worktree lifecycle, sequential merge-back. Invoked by `build.md`, which is now a thin dispatcher.
 - `code-review-workflow.js` — `--graph` mode's 4-dimension parallel fan-out + synthesis, as real control flow. Invoked by `code-review.md`.

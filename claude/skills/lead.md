@@ -376,6 +376,12 @@ Invoke the **existing** skills. Do not reimplement `build-workflow.js` or `ship-
 
 Put the reason in the run's `note` in every case, so `registry_get_runs(project, "failed")` and `(project, "paused")` answer "what is stuck and why" without re-reading a transcript.
 
+### 8c-bis. Record agent calls
+
+After `/build` returns and again after `/ship` returns, follow `~/.claude/skills/_record-agent-calls.md` for each workflow's result. Pass `workflow: "build"` / `"ship-review"` and **always** pass this chain's `run_id`, so the cost of a whole `/lead build` rolls up to one run and one ticket.
+
+This is the only path where `run_id` is known, which makes it the only place per-ticket cost becomes answerable. Best-effort: a failed record must never fail or pause the chain.
+
 ### 8d. Report — make review cheap
 
 "Here is a PR" hands the work back: the human would reconstruct intent from a diff. `/ship` already computes everything needed; assemble it rather than recomputing.

@@ -104,6 +104,16 @@ Pass:
 
 ---
 
+## STEP 5a: RECORD AGENT CALLS
+
+Immediately after the graph workflow returns, follow `~/.claude/skills/_record-agent-calls.md`: write one `agent_calls` row per agent it ran — the 4 `@review-dimension` agents, every refuter, and synthesis — using the `workflowProgress` entries for real model/token/duration data.
+
+Pass `workflow: "code-review"`. Set each row's `verdict` to that agent's own output where it produced one (a dimension's finding count, a refuter's refuted/upheld). Omit `run_id` — a `/code-review` has no build chain.
+
+This is the workflow with the most agents per run and therefore the most cost, which is why it is worth recording. Best-effort: a failed record must never fail the review.
+
+---
+
 ## STEP 6: PROVE BEHAVIOR (EXECUTE, DON'T ASSUME)
 
 Findings from STEP 5 are based on reading the diff alone — they assume correctness. This step captures real, observed output for the changed code.

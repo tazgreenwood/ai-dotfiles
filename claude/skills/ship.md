@@ -42,6 +42,16 @@ This runs `@security` on the full diff on every ship (per the [2026-08-18] widen
 
 ---
 
+---
+
+## STEP 2b: RECORD AGENT CALLS
+
+Immediately after the workflow returns, follow `~/.claude/skills/_record-agent-calls.md`: write one `agent_calls` row per agent the workflow ran, using the `workflowProgress` entries for real model/token/duration data. Pass `workflow: "ship-review"`, and `run_id` only if this ship is part of a `/lead build` chain.
+
+Best-effort: a failed record must never fail the ship.
+
+---
+
 ## STEP 3: INVOKE @documenter
 
 Pass the completed plan steps and changed files. @documenter syncs:

@@ -11,6 +11,17 @@ echo "Linking Claude skills..."
 mkdir -p "$CLAUDE_DIR/skills"
 for skill_file in "$DOTFILES/claude/skills"/*.md; do
   skill_name=$(basename "$skill_file" .md)
+  # A leading underscore marks a shared REFERENCE doc that skills read, not an
+  # invocable skill. Linking it as one would create a bogus slash command.
+  # Link it flat instead, so skills can read it by an absolute path that
+  # resolves no matter which repo they are running in.
+  case "$skill_name" in
+    _*)
+      ln -sf "$skill_file" "$CLAUDE_DIR/skills/$skill_name.md"
+      echo "  ✓ $skill_name (shared reference, not a command)"
+      continue
+      ;;
+  esac
   skill_dir="$CLAUDE_DIR/skills/$skill_name"
   mkdir -p "$skill_dir"
   ln -sf "$skill_file" "$skill_dir/SKILL.md"
