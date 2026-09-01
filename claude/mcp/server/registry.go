@@ -1156,7 +1156,7 @@ func registryTools() []Tool {
 							"source_channel":   map[string]any{"type": "string", "description": "Channel id the request arrived in"},
 							"source_permalink": map[string]any{"type": "string", "description": "Link back to the originating message"},
 							"source_ref":       map[string]any{"type": "string", "description": "Dedup key, e.g. a Slack message ts"},
-							"kind":             map[string]any{"type": "string", "enum": []string{"plan", "fix", "review", "improvement"}},
+							"kind":             map[string]any{"type": "string", "enum": []string{"plan", "fix", "review", "improvement", "registration"}},
 							"summary":          map[string]any{"type": "string", "description": "One-line human-readable summary"},
 							"payload":          map[string]any{"type": "object", "description": "Kind-specific body, e.g. the proposed plan"},
 							"status":           map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected"}, "description": "Defaults to pending"},

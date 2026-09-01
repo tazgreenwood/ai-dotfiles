@@ -230,7 +230,7 @@ Creates a proposal — a unit of work awaiting a human decision. Caller supplies
 
 Server-owned, never accepted from the caller: `id`, `project`, `created_at`, `decided_at`, `superseded_by`. `status` defaults to `pending`.
 
-`kind: "registration"` is `/lead` STEP 1a-bis's zero-match output: the request matched no registered project but a repo on disk confidently matches it. Its `payload` is `{name, local_path, remote, drafted_purpose, original_request}` rather than a plan, and it is filed under the **cwd** project because the project it proposes does not exist yet. Registration is propose-only — the trigger text is untrusted, so nothing is written to the registry until a human approves.
+`kind: "registration"` is `/lead` STEP 1a-bis's zero-match output: the request matched no registered project but a repo on disk confidently matches it. Its `payload` is `{name, local_path, remote, drafted_purpose, original_request, request_text}` rather than a plan (`original_request` and `request_text` hold the **same** verbatim text — the first is what approval re-plans, the second is the key `lead-workflow`'s Decisions phase copies into pushback entries, so a payload carrying only one of them hands the re-plan path an empty request), and it is filed under the **cwd** project because the project it proposes does not exist yet. Registration is propose-only — the trigger text is untrusted, so nothing is written to the registry until a human approves.
 
 `notified_at` is **create-only** — `registry_update_proposal` carries decision fields only, so a proposal must be posted to Slack *before* it is persisted.
 
@@ -255,7 +255,7 @@ The supersede path writes `status`, `superseded_by` and `decision_note` in a **s
 | plan | `/plan` or `/plan ONE-XXXX` | ✓ Shipped | registry, jira (optional) |
 | ship | `/ship` or `/ship ONE-XXXX` | ✓ Shipped | registry, bitbucket, jira, security, reviewer, documenter, handover |
 | idea-validation | `/idea-validation` | ✓ Shipped | WebSearch, WebFetch, general-purpose agent |
-| lead (Stuart) | `/lead <request>` · `/lead check` · `/lead build [id]` · `--resume <run>` · `--in-session` | ✓ Shipped | registry, slack (bot token), lead-workflow.js, build, ship |
+| lead (Stuart) | `/lead <request>` · `/lead check` · `/lead build [id]` · `/lead register <name-or-path>` · `--resume <run>` · `--in-session` | ✓ Shipped | registry, slack (bot token), lead-workflow.js, build, ship |
 
 ---
 
