@@ -188,12 +188,18 @@ fi
 # NEWER than the persisted watermark (~/.config/jarvis/last_seen_ts), and only
 # while the day's spend is under the cap.
 #
-# COST CAP: the installed claude has no --max-budget-usd flag, so the cap is
-# enforced by the job itself — a per-UTC-day ledger at
-# ~/.config/jarvis/spend-YYYY-MM-DD.txt accumulates each run's total_cost_usd and
-# escalation is suppressed once it reaches $JARVIS_DAILY_USD_CAP (default 2.00).
-# --max-turns bounds a single run's length on top of that. The watermark advances
-# on EVERY tick, so one message can trigger at most one escalation.
+# COST CAP: the per-run cap is the escalation's own --max-budget-usd flag
+# ($JARVIS_RUN_USD_CAP, default 0.50) — claude aborts the run when the spend
+# passes it, so no single tick can overshoot. Two additional guards sit on top:
+# a per-UTC-day ledger at ~/.config/jarvis/spend-YYYY-MM-DD.txt accumulates each
+# run's total_cost_usd and suppresses further escalation once it reaches
+# $JARVIS_DAILY_USD_CAP (default 2.00), and --max-turns bounds a single run's
+# length. The watermark advances on EVERY tick, so one message can trigger at
+# most one escalation.
+#
+# PERMISSION MODE: tier 2 runs --permission-mode default rather than dontAsk.
+# Under -p, default neither prompts nor hangs, and tier 2 needs write tools that
+# the global allowlist does not cover; dontAsk would auto-deny them.
 #
 # CREDENTIALS: the committed plist contains NO secrets. It sources
 # ~/.config/jarvis/env (mode 600) at run time and references only the variable
@@ -267,6 +273,7 @@ if [ -f "$JARVIS_PLIST" ]; then
   launchctl load "$JARVIS_LAUNCHAGENT"
   echo "  ✓ jarvis poller loaded (polls every 300s; logs to ~/.config/jarvis/logs/poll.log)"
   echo "    daily cost cap: \$${JARVIS_DAILY_USD_CAP:-2.00} (override via JARVIS_DAILY_USD_CAP in $JARVIS_ENV)"
+  echo "    per-run cost cap: \$${JARVIS_RUN_USD_CAP:-0.50} via claude --max-budget-usd (override via JARVIS_RUN_USD_CAP in $JARVIS_ENV)"
   echo "    tail -f ~/.config/jarvis/logs/poll.log"
   echo "    ./install.sh uninstall-jarvis   # to remove"
 fi
