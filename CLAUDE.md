@@ -69,6 +69,7 @@ Codebase = user-facing skills + supporting MCP tools:
 
 ## Commands
 
+- Run agent evals: `./scripts/run-agent-evals.sh` (`--update` to record a baseline, `--budget N` to cap spend). Drives the real `code-review-workflow.js` graph against `evals/fixtures/`; exits non-zero on regression. Costs real money — see `evals/README.md`.
 - Build registry MCP server: `cd claude/mcp/server && go build -o registry`
 - Build bitbucket MCP server: `cd claude/mcp/bitbucket && go build -o bitbucket`
 - Run server: `./registry` or `./bitbucket` (listens stdin/stdout, JSON-RPC)
@@ -206,6 +207,14 @@ Thin cross-project index backing `/lead`'s routing decision (STEP 1a). One row p
 
 `purpose` is a one-line project description stored in project metadata via `registry_set(name, "purpose", ...)`. It is the entire routing signal, so a vague one degrades routing silently. Near-identical names must be distinguishable from their purpose lines alone — `mapi` (local dev orchestrator, no product code) vs `mapi-server` (the Laravel API) vs `mapi-js` (the browser SDK) is the known collision.
 
+#### `registry_claim_proposal_for_build(name, proposal_id) -> {ok, run_id} | error`
+The **single enforcement point** for `/lead build`'s refusal guards, which used to be prose in `lead.md` where nothing but prompt fidelity enforced them. One transaction: refuses unless status is exactly `approved`; refuses if any run carries the proposal (use `--resume`); refuses if any plan carries `from_proposal` (covers everything built before `agent_runs` existed); refuses across projects. Concurrent claims produce exactly **one** run. Every refusal names the blocking condition. `lead.md` must not re-implement any of these checks — a second copy is a second thing to drift.
+
+#### `registry_write_call(name, run_id?, workflow?, agent_label?, model?, status?, input_tokens?, output_tokens?, cost_usd?, verdict?, trajectory?, error?) -> {ok, id}`
+#### `registry_get_calls(name, since?, until?) -> {calls: [...]}`
+#### `registry_sum_cost(since) -> {cost_usd, run_count}`
+`agent_calls` records per-invocation trajectory and cost — which model, how long, how many tokens, what it cost, and the tool-call trace. `agent_runs` records *what* happened in a chain; this records *how*. A run spawns many invocations, so this is a **child** of a run and `run_id` is nullable (a bare `/ship` has no run). Timestamps are stamped server-side when omitted, because workflow scripts cannot call `Date`. `registry_sum_cost` is deliberately **global, not project-scoped** — a spend ceiling is a property of the machine.
+
 #### `registry_write_run(name, proposal_id?, ticket?, phase?, status?, cursor?, note?) -> {ok, id}`
 #### `registry_get_runs(name, status?, id?) -> {runs: [...]}`
 #### `registry_update_run(name, id, phase, status, cursor?, note?, ticket?) -> {ok}`
@@ -259,6 +268,7 @@ Full architecture-decision history lives in the registry event log, not here —
 - **Audit entry**: Metadata about shipped work (ticket, type, impact, PR URL, files changed, story points, labels, date).
 - **Registry**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db` w/ project metadata, plans, audit trails, issues, deploy checks, events, proposals. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`) hard-dependent on registry uptime (no local fallback).
 - **Stuart**: The team lead persona (`claude/skills/lead.md`, invoked `/lead`). Takes a prose request, produces a plan proposal, notifies a human, and records their decision. Named a lead rather than an assistant on purpose: the prompt requires it to push back when a request is the wrong work, since deference is the failure mode that produces plausible plans for bad ideas. Renamed from "Jarvis" on 2026-09-01 along with the removal of the unattended poller.
+- **Agent call**: A row in `agent_calls` — one agent invocation with its model, timings, tokens, USD cost and trajectory, child of an [[agent run]] (nullable, since a bare `/ship` has no run). Recording outcomes without trajectories is the documented blind spot: an audit of 731 agent trajectories found 63% of *successful* resolutions retrieved the fix rather than deriving it, which is invisible if you only check whether the result looked right.
 - **Agent run**: A row in `agent_runs` — the resumable record of one `/lead build` chain (proposal → plan → build → ship → PR). Carries a `cursor` so `/lead build --resume <id>` re-enters where the chain stopped instead of restarting; a chain that cannot resume cannot survive a crash, a rate limit, a sleeping laptop, or a mid-build question. Query stuck work with `registry_get_runs(project, "paused"|"failed")` — the reason is in `note`.
 - **Question-pause**: When a `/lead build` step hits genuine mid-build ambiguity it commits what is done, sets the run `paused` with the question in `note`, asks in the proposal's Slack thread, and stops — never guessing, never hanging. The next `--resume` reads the reply via `lead-workflow` `mode: "answers"` and continues. Foreseeable ambiguity belongs in the proposal's `assumptions`, where the human sees it before approving.
 - **Project index**: The `registry_index()` view — name, one-line `purpose`, repo, `local_path` and active plan per project. Read by `/lead` STEP 1a to route a request to the right project without opening any other project's context. Ambiguity stops and asks rather than guessing; a mis-route is always visible because the proposal names its project.
