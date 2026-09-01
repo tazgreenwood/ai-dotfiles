@@ -201,6 +201,11 @@ Checks whether `ticket` is a registry auto-generated fake ticket (vs. a real JIR
 #### `registry_union_files(file_groups: [[string]]) -> {files: [string]}`
 Flattens and deduplicates multiple file-path arrays into one union, preserving first-occurrence order.
 
+#### `registry_index() -> {projects: [{name, purpose, repo, local_path, active_plan}]}`
+Thin cross-project index backing `/lead`'s routing decision (STEP 1a). One row per project; `active_plan` is `{ticket, summary}` for the newest non-shipped plan, or `null`. Deliberately carries **no** plan bodies, audit entries or `resources` subtree — the whole point is that choosing a project costs one small call instead of reading every project's `CLAUDE.md`. Two queries regardless of project count, never N+1. ~4KB across 8 projects.
+
+`purpose` is a one-line project description stored in project metadata via `registry_set(name, "purpose", ...)`. It is the entire routing signal, so a vague one degrades routing silently. Near-identical names must be distinguishable from their purpose lines alone — `mapi` (local dev orchestrator, no product code) vs `mapi-server` (the Laravel API) vs `mapi-js` (the browser SDK) is the known collision.
+
 #### `registry_write_proposal(name: string, proposal: map[string]any) -> {ok: bool, id: int} | error`
 Creates a proposal — a unit of work awaiting a human decision. Caller supplies `source`, `source_channel`, `source_ref`, `source_permalink` (all required, non-empty), `kind` (`plan|fix|review|improvement`), `summary`, `payload` (the full plan JSON), and optionally `notified_at` (RFC3339).
 
@@ -247,6 +252,7 @@ Full architecture-decision history lives in the registry event log, not here —
 - **Audit entry**: Metadata about shipped work (ticket, type, impact, PR URL, files changed, story points, labels, date).
 - **Registry**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db` w/ project metadata, plans, audit trails, issues, deploy checks, events, proposals. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`) hard-dependent on registry uptime (no local fallback).
 - **Stuart**: The team lead persona (`claude/skills/lead.md`, invoked `/lead`). Takes a prose request, produces a plan proposal, notifies a human, and records their decision. Named a lead rather than an assistant on purpose: the prompt requires it to push back when a request is the wrong work, since deference is the failure mode that produces plausible plans for bad ideas. Renamed from "Jarvis" on 2026-09-01 along with the removal of the unattended poller.
+- **Project index**: The `registry_index()` view — name, one-line `purpose`, repo, `local_path` and active plan per project. Read by `/lead` STEP 1a to route a request to the right project without opening any other project's context. Ambiguity stops and asks rather than guessing; a mis-route is always visible because the proposal names its project.
 - **Proposal**: A row in the `proposals` table — work awaiting a human decision, distinct from a plan (approved work) and an audit entry (shipped work). Statuses: `pending`, `approved`, `rejected`, `superseded`. Approval sets status **only**; wiring approval to `/build` is a deliberate later phase. Viewable at `/proposals` in registry-ui.
 - **Supersede chain**: A proposal revised after human pushback is never overwritten — a new row is written and the old one moves to `superseded` with `superseded_by` pointing at the successor and the human's note stored as `decision_note`. All three fields move in one transaction, and only a `pending` row can be superseded. Preserves *why* a revision happened, which is the point of the chain.
 - **Resource cache**: External integrations (Slack channels, Grafana dashboards, Bitbucket repos, AWS log groups, etc.) stored under `project.resources` in registry. Organized by category (grafana, slack, aws, bitbucket, confluence, jira, scripts).
