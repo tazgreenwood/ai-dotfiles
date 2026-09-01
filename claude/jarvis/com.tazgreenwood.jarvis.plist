@@ -2,55 +2,92 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key>
-  <string>com.tazgreenwood.jarvis</string>
-
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/zsh</string>
-    <string>-lc</string>
-    <string>set -a; . "$HOME/.config/jarvis/env"; set +a
-J="$HOME/.config/jarvis"; LOCK="$J/poll.lock"; REPO="$HOME/github.com/tazgreenwood/private-dotfiles"
+	<key>Label</key>
+	<string>com.tazgreenwood.jarvis</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>-lc</string>
+		<string>set -a; . "$HOME/.config/jarvis/env"; set +a
+J="$HOME/.config/jarvis"; LOCK="$J/poll.lock"; LOG="$J/logs/poll.log"; WM="$J/last_seen_ts"
+REPO="$HOME/github.com/tazgreenwood/private-dotfiles"
+CAP="${JARVIS_DAILY_USD_CAP:-2.00}"
 t() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+# Bound the log in place (launchd holds the fd, so truncate — never mv).
+if [ -f "$LOG" ] &amp;&amp; [ "$(wc -c &lt; "$LOG" | tr -d ' ')" -gt 5242880 ]; then : &gt; "$LOG"; echo "$(t) log truncated at 5MB"; fi
 mkdir "$LOCK" 2&gt;/dev/null || { echo "$(t) skip: previous tick still running"; exit 0; }
 trap 'rmdir "$LOCK" 2&gt;/dev/null' EXIT
 [ -n "$SLACK_BOT_TOKEN" ] || { echo "$(t) fatal: SLACK_BOT_TOKEN unset in $J/env"; exit 1; }
 [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || { echo "$(t) fatal: CLAUDE_CODE_OAUTH_TOKEN unset in $J/env"; exit 1; }
+# Reading a PRIVATE channel's history needs groups:history. Prefer a user token
+# when one is configured; otherwise use the bot token.
+READ_TOKEN="$SLACK_BOT_TOKEN"; READ_AS="bot"
+[ -n "$SLACK_USER_TOKEN" ] &amp;&amp; { READ_TOKEN="$SLACK_USER_TOKEN"; READ_AS="user"; }
 R="$REPO/claude/mcp/server/registry"
 RES=$(printf '%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"jarvis-poll","version":"1"}}}' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"registry_get_resources","arguments":{"name":"private-dotfiles","category":"slack"}}}' | "$R" 2&gt;/dev/null | tail -1 | jq -r '.result.content[0].text // empty')
 CH=$(printf '%s' "$RES" | jq -r '.resources.slack.jarvis_channel // empty')
 WHO=$(printf '%s' "$RES" | jq -r '.resources.slack.jarvis_user_id // empty')
 [ -n "$CH" ] &amp;&amp; [ -n "$WHO" ] || { echo "$(t) fatal: registry gave no jarvis_channel/jarvis_user_id"; exit 1; }
-H=$(curl -sS --max-time 30 "https://slack.com/api/conversations.history?channel=$CH&amp;limit=30" -H "Authorization: Bearer $SLACK_BOT_TOKEN")
-[ "$(printf '%s' "$H" | jq -r '.ok')" = "true" ] || { echo "$(t) fatal: slack read failed: $(printf '%s' "$H" | jq -r '.error')"; exit 1; }
-N=$(printf '%s' "$H" | jq --arg u "$WHO" '[.messages[] | select(.user == $u or ((.reply_count // 0) &gt; 0))] | length')
-[ "$N" = "0" ] &amp;&amp; { echo "$(t) tick: quiet, no agent spawned, cost 0.00"; exit 0; }
-echo "$(t) tick: $N candidate(s), escalating to planning run"
+H=$(curl -sS --max-time 30 "https://slack.com/api/conversations.history?channel=$CH&amp;limit=30" -H "Authorization: Bearer $READ_TOKEN")
+if [ "$(printf '%s' "$H" | jq -r '.ok')" != "true" ]; then
+  E=$(printf '%s' "$H" | jq -r '.error // "unparseable"')
+  case "$E" in
+    missing_scope|not_in_channel|channel_not_found|invalid_auth|account_inactive)
+      echo "$(t) unconfigured: slack read as $READ_AS denied ($E) — no agent spawned, cost 0.00"
+      echo "$(t)   REMEDIATION (pick one): (a) add the groups:history scope to the aiportal Slack app and reinstall it, then retry; or (b) append SLACK_USER_TOKEN=&lt;a user token holding groups:history&gt; to $J/env."
+      exit 0 ;;
+    *) echo "$(t) fatal: slack read failed: $E"; exit 1 ;;
+  esac
+fi
+MAXTS=$(printf '%s' "$H" | jq -r '([.messages[]? | (.ts // "0"), (.latest_reply // "0")] | max) // "0"')
+WMV=$(cat "$WM" 2&gt;/dev/null | tr -d '[:space:]')
+if [ -z "$WMV" ]; then
+  printf '%s' "$MAXTS" &gt; "$WM"; chmod 600 "$WM"
+  echo "$(t) tick: watermark initialised at $MAXTS (read as $READ_AS), no backlog escalation, cost 0.00"
+  exit 0
+fi
+# New == authored by the human after the watermark, or a thread whose newest
+# reply is after the watermark and which the human has replied in.
+N=$(printf '%s' "$H" | jq --arg u "$WHO" --arg wm "$WMV" '[.messages[]? | select((((.user // "") == $u) and ((.ts // "0") &gt; $wm)) or (((.latest_reply // "0") &gt; $wm) and (((.reply_users // []) | index($u)) != null)))] | length')
+# Advance unconditionally: a message that has been considered once must never be
+# able to re-trigger an escalation on every subsequent tick.
+NEWWM=$(printf '%s\n%s\n' "$WMV" "$MAXTS" | sort | tail -1)
+printf '%s' "$NEWWM" &gt; "$WM"; chmod 600 "$WM"
+if [ "$N" = "0" ]; then
+  echo "$(t) tick: quiet (read as $READ_AS, watermark $NEWWM), no agent spawned, cost 0.00"
+  exit 0
+fi
+DAY=$(date -u +%Y-%m-%d); LEDGER="$J/spend-$DAY.txt"
+SPENT=$(cat "$LEDGER" 2&gt;/dev/null | tr -d '[:space:]'); [ -n "$SPENT" ] || SPENT=0
+if [ "$(awk -v s="$SPENT" -v c="$CAP" 'BEGIN{print (s+0 &gt;= c+0) ? 1 : 0}')" = "1" ]; then
+  echo "$(t) tick: $N candidate(s) but daily cost cap reached (spent \$$SPENT of \$$CAP) — escalation suppressed, cost 0.00"
+  exit 0
+fi
+echo "$(t) tick: $N candidate(s) past watermark $WMV, escalating (spent \$$SPENT of \$$CAP today)"
 cd "$REPO" || exit 1
 O=$(claude -p '/jarvis poll' --permission-mode default --max-turns 80 --output-format json 2&gt;&amp;1)
-echo "$(t) run: subtype=$(printf '%s' "$O" | jq -r '.subtype // "unparsed"' 2&gt;/dev/null) cost=$(printf '%s' "$O" | jq -r '.total_cost_usd // "?"' 2&gt;/dev/null)"</string>
-  </array>
-
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>HOME</key>
-    <string>/Users/taz.greenwood</string>
-  </dict>
-
-  <key>WorkingDirectory</key>
-  <string>/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles</string>
-
-  <key>StartInterval</key>
-  <integer>300</integer>
-
-  <key>RunAtLoad</key>
-  <false/>
-
-  <key>StandardOutPath</key>
-  <string>/Users/taz.greenwood/.config/jarvis/logs/poll.log</string>
-  <key>StandardErrorPath</key>
-  <string>/Users/taz.greenwood/.config/jarvis/logs/poll.log</string>
+COST=$(printf '%s' "$O" | jq -r '.total_cost_usd // 0' 2&gt;/dev/null); [ -n "$COST" ] || COST=0
+awk -v s="$SPENT" -v c="$COST" 'BEGIN{printf "%.4f", s+0+c+0}' &gt; "$LEDGER"; chmod 600 "$LEDGER"
+find "$J" -maxdepth 1 -name 'spend-*.txt' -mtime +7 -delete 2&gt;/dev/null || true
+echo "$(t) run: subtype=$(printf '%s' "$O" | jq -r '.subtype // "unparsed"' 2&gt;/dev/null) cost=$COST day_total=$(cat "$LEDGER")"
+</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/taz.greenwood</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles</string>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/Users/taz.greenwood/.config/jarvis/logs/poll.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/taz.greenwood/.config/jarvis/logs/poll.log</string>
 </dict>
 </plist>

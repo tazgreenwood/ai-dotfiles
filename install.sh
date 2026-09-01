@@ -184,12 +184,20 @@ fi
 # ── Jarvis unattended poller ───────────────────────────────────────────────────
 # Two-tier launchd job. Tier 1 is pure shell (registry read + one Slack
 # conversations.history call) and spawns NO agent, so a quiet tick costs $0.
-# Tier 2 escalates to `claude -p '/jarvis poll'` only when tier 1 sees a
-# candidate message, bounded by --max-turns.
+# Tier 2 escalates to `claude -p '/jarvis poll'` only when tier 1 sees a message
+# NEWER than the persisted watermark (~/.config/jarvis/last_seen_ts), and only
+# while the day's spend is under the cap.
+#
+# COST CAP: the installed claude has no --max-budget-usd flag, so the cap is
+# enforced by the job itself — a per-UTC-day ledger at
+# ~/.config/jarvis/spend-YYYY-MM-DD.txt accumulates each run's total_cost_usd and
+# escalation is suppressed once it reaches $JARVIS_DAILY_USD_CAP (default 2.00).
+# --max-turns bounds a single run's length on top of that. The watermark advances
+# on EVERY tick, so one message can trigger at most one escalation.
 #
 # CREDENTIALS: the committed plist contains NO secrets. It sources
 # ~/.config/jarvis/env (mode 600) at run time and references only the variable
-# NAMES $SLACK_BOT_TOKEN and $CLAUDE_CODE_OAUTH_TOKEN.
+# NAMES $SLACK_BOT_TOKEN, $SLACK_USER_TOKEN and $CLAUDE_CODE_OAUTH_TOKEN.
 JARVIS_DIR="$DOTFILES/claude/jarvis"
 JARVIS_PLIST="$JARVIS_DIR/$JARVIS_LABEL.plist"
 JARVIS_ENV="$HOME/.config/jarvis/env"
@@ -212,12 +220,21 @@ else
 # Jarvis credentials. This file is sourced by the launchd poller; it is NOT in
 # the repo and must never be committed. Mode 600.
 #
-# Slack bot token (the bot-token kind, not a user token). Needs scopes:
-#   chat:write, channels:history, groups:history
-# groups:history is REQUIRED because the Jarvis channel is a PRIVATE channel;
-# without it conversations.history returns missing_scope and the poller cannot
-# see incoming messages.
+# Slack bot token (the bot-token kind, not a user token). Used to POST — chat:write
+# is sufficient for that and is already granted.
 #SLACK_BOT_TOKEN=
+#
+# READ credential. The Jarvis channel is a PRIVATE channel, so reading its
+# history needs the groups:history scope, which the aiportal bot token does NOT
+# currently hold (granted: channels:history, chat:write, commands). Pick ONE:
+#   (a) add groups:history to the aiportal Slack app and reinstall it — then the
+#       bot token above is enough and you can leave SLACK_USER_TOKEN unset; or
+#   (b) paste a user token that holds groups:history below. When set, the poller
+#       reads with it in preference to the bot token.
+# Until one of these is done, every tick logs 'unconfigured: slack read ...
+# denied (missing_scope)' with the remediation and exits 0 without spawning an
+# agent — the job does not hard-fail, it just cannot see incoming messages.
+#SLACK_USER_TOKEN=
 #
 # Long-lived Claude Code token, so the poller does not depend on keychain auth.
 # Mint it interactively (it cannot be created unattended):
@@ -232,6 +249,16 @@ ENVEOF
   echo "    (run 'claude setup-token' for the latter — it is interactive)"
 fi
 
+# Surface the read-scope gap every install, not just on first creation: the
+# poller cannot read the PRIVATE Jarvis channel until one of these is done.
+if [ -f "$JARVIS_ENV" ] && ! grep -qE '^[[:space:]]*SLACK_USER_TOKEN=.' "$JARVIS_ENV"; then
+  echo "  ⚠ ACTION REQUIRED (slack read scope): the Jarvis channel is PRIVATE, so"
+  echo "    conversations.history needs groups:history, which the aiportal bot token"
+  echo "    does not hold. Either add groups:history to the app and reinstall it, or"
+  echo "    append SLACK_USER_TOKEN=<user token with groups:history> to $JARVIS_ENV."
+  echo "    Until then each tick exits 0 with an 'unconfigured' log line."
+fi
+
 if [ -f "$JARVIS_PLIST" ]; then
   cp "$JARVIS_PLIST" "$JARVIS_LAUNCHAGENT"
   # Defense in depth: the plist holds no secret today, but keep it non-world-readable.
@@ -239,6 +266,7 @@ if [ -f "$JARVIS_PLIST" ]; then
   launchctl unload "$JARVIS_LAUNCHAGENT" 2>/dev/null || true
   launchctl load "$JARVIS_LAUNCHAGENT"
   echo "  ✓ jarvis poller loaded (polls every 300s; logs to ~/.config/jarvis/logs/poll.log)"
+  echo "    daily cost cap: \$${JARVIS_DAILY_USD_CAP:-2.00} (override via JARVIS_DAILY_USD_CAP in $JARVIS_ENV)"
   echo "    tail -f ~/.config/jarvis/logs/poll.log"
   echo "    ./install.sh uninstall-jarvis   # to remove"
 fi
