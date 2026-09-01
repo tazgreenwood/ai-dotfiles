@@ -184,6 +184,24 @@ func registryListProjects(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"projects": projects})
 }
 
+// registryIndex backs /lead's routing decision: one thin row per project, so
+// choosing WHICH project a request belongs to never requires loading another
+// project's CLAUDE.md or plan bodies.
+func registryIndex(args map[string]any) ToolResult {
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	entries, err := s.ListIndex()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	if entries == nil {
+		entries = []projectIndexEntry{}
+	}
+	return toolOK(map[string]any{"projects": entries})
+}
+
 func registryListPlans(args map[string]any) ToolResult {
 	name := str(args, "name")
 	if name == "" {
@@ -201,19 +219,8 @@ func registryListPlans(args map[string]any) ToolResult {
 	for _, data := range rows {
 		ticket, _ := data["ticket"].(string)
 		status := "active"
-		if steps, ok := data["plan_steps"].([]any); ok {
-			allDone := true
-			for _, s := range steps {
-				if step, ok := s.(map[string]any); ok {
-					if step["status"] != "done" {
-						allDone = false
-						break
-					}
-				}
-			}
-			if allDone {
-				status = "shipped"
-			}
+		if planIsShipped(data) {
+			status = "shipped"
 		}
 		plans = append(plans, map[string]any{
 			"ticket":  ticket,
@@ -660,6 +667,11 @@ func registryTools() []Tool {
 		{
 			Name:        "registry_list_projects",
 			Description: "List all projects in the registry",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "registry_index",
+			Description: "Thin cross-project index for routing: one row per project (name, purpose, repo, local_path, active_plan). Carries no plan bodies, audit entries or resource subtrees.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{

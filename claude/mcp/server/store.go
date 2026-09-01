@@ -768,3 +768,114 @@ func (s *store) SupersedeProposal(oldID, newID int64, note string) error {
 
 	return tx.Commit()
 }
+
+// ── project index (DOTFILES-36) ──────────────────────────────────────────────
+//
+// A deliberately thin, cross-project view: enough for /lead to decide WHICH
+// project a request belongs to, and nothing more. Plan bodies, audit entries
+// and the resources subtree are all excluded on purpose — the whole reason this
+// exists is so routing costs one small call instead of reading every project's
+// context.
+
+type activePlanRef struct {
+	Ticket  string `json:"ticket"`
+	Summary string `json:"summary"`
+}
+
+type projectIndexEntry struct {
+	Name       string         `json:"name"`
+	Purpose    string         `json:"purpose"`
+	Repo       string         `json:"repo"`
+	LocalPath  string         `json:"local_path"`
+	ActivePlan *activePlanRef `json:"active_plan"`
+}
+
+// planIsShipped reports whether every step of a plan is done. A plan with no
+// steps is not shipped — an empty plan is unfinished, not complete.
+func planIsShipped(data map[string]any) bool {
+	steps, ok := data["plan_steps"].([]any)
+	if !ok || len(steps) == 0 {
+		return false
+	}
+	for _, raw := range steps {
+		step, ok := raw.(map[string]any)
+		if !ok || step["status"] != "done" {
+			return false
+		}
+	}
+	return true
+}
+
+// ListIndex returns one row per project, newest-non-shipped plan included.
+// Two queries total regardless of project count — deliberately not N+1, since
+// this runs on every routed request.
+func (s *store) ListIndex() ([]projectIndexEntry, error) {
+	projRows, err := s.db.Query(`SELECT name, data FROM projects ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer projRows.Close()
+
+	var entries []projectIndexEntry
+	order := map[string]int{}
+	for projRows.Next() {
+		var name, raw string
+		if err := projRows.Scan(&name, &raw); err != nil {
+			return nil, err
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			return nil, fmt.Errorf("project %s data: %w", name, err)
+		}
+		purpose, _ := data["purpose"].(string)
+		entry := projectIndexEntry{Name: name, Purpose: purpose}
+		// repo is a map ({workspace, localPath, ...}) in current projects, but
+		// tolerate a bare string rather than dropping the field on older rows.
+		switch repo := data["repo"].(type) {
+		case map[string]any:
+			ws, _ := repo["workspace"].(string)
+			if ws != "" {
+				entry.Repo = ws + "/" + name
+			}
+			entry.LocalPath, _ = repo["localPath"].(string)
+		case string:
+			entry.Repo = repo
+		}
+		order[name] = len(entries)
+		entries = append(entries, entry)
+	}
+	if err := projRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Newest first, so the first non-shipped plan seen per project wins.
+	planRows, err := s.db.Query(`SELECT project, ticket, data FROM plans ORDER BY id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer planRows.Close()
+
+	for planRows.Next() {
+		var project, ticket, raw string
+		if err := planRows.Scan(&project, &ticket, &raw); err != nil {
+			return nil, err
+		}
+		idx, ok := order[project]
+		if !ok || entries[idx].ActivePlan != nil {
+			continue // unknown project, or this project already has its newest
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			return nil, fmt.Errorf("plan %s/%s data: %w", project, ticket, err)
+		}
+		if planIsShipped(data) {
+			continue
+		}
+		if t, _ := data["ticket"].(string); t != "" {
+			ticket = t
+		}
+		summary, _ := data["summary"].(string)
+		entries[idx].ActivePlan = &activePlanRef{Ticket: ticket, Summary: summary}
+	}
+	return entries, planRows.Err()
+}
