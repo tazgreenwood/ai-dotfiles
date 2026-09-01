@@ -83,7 +83,7 @@ echo "$(t) run: subtype=$(printf '%s' "$O" | jq -r '.subtype // "unparsed"' 2&gt
 	<key>WorkingDirectory</key>
 	<string>/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles</string>
 	<key>StartInterval</key>
-	<integer>900</integer>
+	<integer>300</integer>
 	<key>RunAtLoad</key>
 	<false/>
 	<key>StandardOutPath</key>
