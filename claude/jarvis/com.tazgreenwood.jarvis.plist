@@ -66,7 +66,7 @@ if [ "$(awk -v s="$SPENT" -v c="$CAP" 'BEGIN{print (s+0 &gt;= c+0) ? 1 : 0}')" =
 fi
 echo "$(t) tick: $N candidate(s) past watermark $WMV, escalating (per-run cap \$$RUN_CAP; spent \$$SPENT of \$$CAP today)"
 cd "$REPO" || exit 1
-O=$(claude -p '/jarvis poll' --permission-mode default --max-budget-usd "$RUN_CAP" --max-turns 80 --output-format json 2&gt;&amp;1)
+O=$(claude -p '/jarvis poll' --permission-mode dontAsk --max-budget-usd "$RUN_CAP" --output-format json 2&gt;&amp;1)
 COST=$(printf '%s' "$O" | jq -r '.total_cost_usd // 0' 2&gt;/dev/null); [ -n "$COST" ] || COST=0
 awk -v s="$SPENT" -v c="$COST" 'BEGIN{printf "%.4f", s+0+c+0}' &gt; "$LEDGER"; chmod 600 "$LEDGER"
 find "$J" -maxdepth 1 -name 'spend-*.txt' -mtime +7 -delete 2&gt;/dev/null || true
@@ -83,7 +83,7 @@ echo "$(t) run: subtype=$(printf '%s' "$O" | jq -r '.subtype // "unparsed"' 2&gt
 	<key>WorkingDirectory</key>
 	<string>/Users/taz.greenwood/github.com/tazgreenwood/private-dotfiles</string>
 	<key>StartInterval</key>
-	<integer>300</integer>
+	<integer>900</integer>
 	<key>RunAtLoad</key>
 	<false/>
 	<key>StandardOutPath</key>
