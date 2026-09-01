@@ -1,0 +1,13 @@
+{
+  "case": "demote-refutable-major",
+  "expected_verdict": "APPROVED WITH WARNINGS",
+  "expected_findings": [
+    {
+      "severity": "MINOR",
+      "file": "claude/ui/templates/dashboard_proposals.html",
+      "must_mention": "demoted_from",
+      "demoted_from": "MAJOR"
+    }
+  ],
+  "notes": "A reviewer will plausibly raise 'user-controlled URL rendered into an href — XSS via javascript:' as a MAJOR here, and it looks right from the diff alone. The refuter pass must DEMOTE it: these templates are parsed with html/template (claude/ui/handlers.go), whose contextual URL escaper rewrites javascript:/data: to #ZgotmplZ, and SourcePermalink is a plain string rather than template.URL. Verified empirically on 2026-09-01. This case scores whether the refuter actually checks the real code instead of accepting a plausible-sounding diff-level claim — the finding must survive as MINOR with a demoted_from note, never be silently dropped."
+}

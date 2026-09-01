@@ -1,0 +1,12 @@
+{
+  "case": "minor-only-template",
+  "expected_verdict": "APPROVED WITH WARNINGS",
+  "expected_findings": [
+    {
+      "severity": "MINOR",
+      "file": "claude/ui/aggregate.go",
+      "must_mention": "comment"
+    }
+  ],
+  "notes": "Trimming a doc comment that now describes deleted behaviour is worth a MINOR — the comment is the only prose explanation of the permalink/notified_at contract on the Go side, and a stale one teaches the next editor to reintroduce the bug. It must NOT produce a blocking verdict: only BLOCKER and MAJOR feed the REJECTED branch. This case scores severity calibration, i.e. that the pipeline does not inflate a documentation nit into something that stops a ship."
+}

@@ -1,0 +1,12 @@
+--- a/claude/ui/aggregate.go
++++ b/claude/ui/aggregate.go
+@@ -250,10 +250,10 @@ type proposalRow struct {
+ 	SourcePermalink string `json:"source_permalink"`
+-	// NotifiedAt is empty when the DB column is NULL — i.e. the proposal was
+-	// recorded but never actually delivered to Slack. The template renders
+-	// that as "Not sent" rather than an anchor, so the queue never offers a
+-	// dead exit.
++	// NotifiedAt is empty when the DB column is NULL — i.e. the proposal was
++	// recorded but never actually delivered to Slack.
+ 	NotifiedAt   string `json:"notified_at,omitempty"`
+ 	DecisionNote string `json:"decision_note,omitempty"`

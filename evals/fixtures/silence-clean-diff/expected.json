@@ -1,0 +1,6 @@
+{
+  "case": "silence-clean-diff",
+  "expected_verdict": "APPROVED",
+  "expected_findings": [],
+  "notes": "Adding the missing rows.Err() check is straightforwardly correct and complete. The correct review outcome is SILENCE. This case exists because a reviewer that never shuts up is the documented noise failure mode — a good reviewer produces no actionable comment a large fraction of the time, and 'correctly says nothing' has to be scored or the pipeline drifts toward flagging everything."
+}

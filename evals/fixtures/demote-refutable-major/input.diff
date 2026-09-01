@@ -1,0 +1,11 @@
+--- a/claude/ui/templates/dashboard_proposals.html
++++ b/claude/ui/templates/dashboard_proposals.html
+@@ -75,9 +75,7 @@
+-          {{if .NotifiedAt}}
+-            {{if .SourcePermalink}}
+-            <a href="{{.SourcePermalink}}" rel="noopener noreferrer">Open in Slack</a>
+-            {{end}}
+-          {{end}}
++          {{if .SourcePermalink}}
++          <a href="{{.SourcePermalink}}" target="_blank" rel="noopener noreferrer">Open in Slack</a>
++          {{end}}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -901,5 +902,325 @@ func TestCreateProposal_SessionSourceStillDedups(t *testing.T) {
 	}
 	if _, err := s.CreateProposal(mk()); err == nil {
 		t.Fatal("want UNIQUE(source, source_ref) to still reject a duplicate session proposal")
+	}
+}
+
+// ── atomic build claim (DOTFILES-35 step 1) ──────────────────────────────────
+
+func approvedProposal(t *testing.T, s *store, sourceRef string) int64 {
+	t.Helper()
+	p := sampleProposal("claimable")
+	p.SourceRef = sourceRef
+	id, err := s.CreateProposal(p)
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+	if err := s.UpdateProposalStatus(id, "approved", "approve"); err != nil {
+		t.Fatalf("UpdateProposalStatus: %v", err)
+	}
+	return id
+}
+
+func TestClaimProposalForBuild_HappyPathOpensARun(t *testing.T) {
+	s := newTestStore(t)
+	pid := approvedProposal(t, s, "1756600000.000700")
+
+	runID, err := s.ClaimProposalForBuild("private-dotfiles", pid)
+	if err != nil {
+		t.Fatalf("ClaimProposalForBuild: %v", err)
+	}
+	r, err := s.GetRun(runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if r.Phase != "planning" || r.Status != "running" {
+		t.Errorf("want a fresh planning/running run, got %s/%s", r.Phase, r.Status)
+	}
+	if r.ProposalID == nil || *r.ProposalID != pid {
+		t.Errorf("run must carry the proposal id, got %v", r.ProposalID)
+	}
+}
+
+func TestClaimProposalForBuild_RefusesNonApproved(t *testing.T) {
+	s := newTestStore(t)
+	for i, status := range []string{"pending", "rejected"} {
+		p := sampleProposal("not approved")
+		p.SourceRef = "1756600000.00071" + string(rune('0'+i))
+		id, err := s.CreateProposal(p)
+		if err != nil {
+			t.Fatalf("CreateProposal: %v", err)
+		}
+		if status != "pending" {
+			if err := s.UpdateProposalStatus(id, status, "no"); err != nil {
+				t.Fatalf("UpdateProposalStatus: %v", err)
+			}
+		}
+		_, err = s.ClaimProposalForBuild("private-dotfiles", id)
+		if err == nil {
+			t.Errorf("%s proposal must not be claimable", status)
+			continue
+		}
+		if !strings.Contains(err.Error(), status) {
+			t.Errorf("refusal must name the blocking status %q, got: %v", status, err)
+		}
+	}
+}
+
+func TestClaimProposalForBuild_RefusesWhenARunAlreadyExists(t *testing.T) {
+	s := newTestStore(t)
+	pid := approvedProposal(t, s, "1756600000.000720")
+
+	if _, err := s.ClaimProposalForBuild("private-dotfiles", pid); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if _, err := s.ClaimProposalForBuild("private-dotfiles", pid); err == nil {
+		t.Fatal("second claim must refuse — the human wants --resume, not a second build")
+	}
+}
+
+// The pre-agent_runs case: DOTFILES-36 was converted by hand, so proposal 2 has
+// a plan and no run. The run check alone would miss it.
+func TestClaimProposalForBuild_RefusesWhenAPlanAlreadyCarriesIt(t *testing.T) {
+	s := newTestStore(t)
+	pid := approvedProposal(t, s, "1756600000.000730")
+
+	if err := s.WritePlan("private-dotfiles", "DOTFILES-LEGACY", map[string]any{
+		"ticket": "DOTFILES-LEGACY", "from_proposal": pid, "plan_steps": []any{},
+	}); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	if _, err := s.ClaimProposalForBuild("private-dotfiles", pid); err == nil {
+		t.Fatal("must refuse a proposal a plan already carries, even with no run")
+	}
+}
+
+func TestClaimProposalForBuild_RefusesCrossProjectAndUnknown(t *testing.T) {
+	s := newTestStore(t)
+	pid := approvedProposal(t, s, "1756600000.000740")
+
+	if _, err := s.ClaimProposalForBuild("emily", pid); err == nil {
+		t.Error("a caller scoped to another project must not claim this proposal")
+	}
+	if _, err := s.ClaimProposalForBuild("private-dotfiles", 999999); err == nil {
+		t.Error("must refuse an unknown proposal id")
+	}
+}
+
+// The race the separate check-then-create sequence allowed: two concurrent
+// claims both passed their checks and both built.
+func TestClaimProposalForBuild_ConcurrentClaimsProduceExactlyOneRun(t *testing.T) {
+	s := newTestStore(t)
+	pid := approvedProposal(t, s, "1756600000.000750")
+
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var won []int64
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if runID, err := s.ClaimProposalForBuild("private-dotfiles", pid); err == nil {
+				mu.Lock()
+				won = append(won, runID)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if len(won) != 1 {
+		t.Fatalf("exactly one claim must win, got %d: %v", len(won), won)
+	}
+	runs, err := s.ListRuns("private-dotfiles", "")
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("want exactly 1 run row after %d concurrent claims, got %d", n, len(runs))
+	}
+}
+
+// ── UpdateStep concurrency (DOTFILES-35 step 2) ──────────────────────────────
+
+// build-workflow.js runs async steps concurrently and each spawned subagent
+// calls registry_update_step independently. UpdateStep SELECTs the whole plan
+// blob, mutates it in Go, and UPDATEs it back — so without serialization the
+// last writer wins on the ENTIRE blob and other steps' statuses vanish.
+//
+// Demonstrated failing against the pre-fix code on 2026-09-01: 9 of 12 statuses
+// lost and 7 of 12 calls errored outright (no busy_timeout, so blocked writers
+// error instead of waiting). A test that passes against the broken code proves
+// nothing, so this one was verified to reproduce before the fix landed.
+func TestUpdateStep_ConcurrentUpdatesAllPersist(t *testing.T) {
+	s := newTestStore(t)
+
+	const n = 12
+	steps := make([]any, n)
+	for i := 0; i < n; i++ {
+		steps[i] = map[string]any{"id": i + 1, "status": "pending"}
+	}
+	if err := s.WritePlan("private-dotfiles", "RACE-1", map[string]any{
+		"ticket": "RACE-1", "plan_steps": steps,
+	}); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-start // release together, maximising interleave
+			errs[idx] = s.UpdateStep("private-dotfiles", "RACE-1", idx, "done")
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("step %d update errored (a blocked writer must wait, not fail): %v", i, err)
+		}
+	}
+	plan, err := s.GetPlan("private-dotfiles", "RACE-1")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	got := plan["plan_steps"].([]any)
+	if len(got) != n {
+		t.Fatalf("want %d steps, got %d", n, len(got))
+	}
+	lost := 0
+	for _, raw := range got {
+		if raw.(map[string]any)["status"] != "done" {
+			lost++
+		}
+	}
+	if lost != 0 {
+		t.Errorf("%d of %d concurrent step updates were lost — the blob read-modify-write is not serialized", lost, n)
+	}
+}
+
+// The step's status was being written into the PLAN's status column: marking
+// step 3 in_progress set the whole plan's status. Invisible only because
+// nothing reads that column (plan status is derived from step statuses).
+func TestUpdateStep_DoesNotWriteStepStatusIntoPlanColumn(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.WritePlan("private-dotfiles", "COL-1", map[string]any{
+		"ticket": "COL-1", "plan_steps": []any{map[string]any{"id": 1, "status": "pending"}},
+	}); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	if err := s.UpdateStep("private-dotfiles", "COL-1", 0, "in_progress"); err != nil {
+		t.Fatalf("UpdateStep: %v", err)
+	}
+	var col string
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(status, '') FROM plans WHERE project = ? AND ticket = ?`,
+		"private-dotfiles", "COL-1",
+	).Scan(&col); err != nil {
+		t.Fatalf("status query: %v", err)
+	}
+	if col == "in_progress" {
+		t.Errorf("plans.status was set to the STEP's status %q — a persisted lie", col)
+	}
+}
+
+// ── agent_calls (DOTFILES-35 step 3) ─────────────────────────────────────────
+
+func sampleCall(project string, cost float64) *agentCall {
+	rid := int64(1)
+	return &agentCall{
+		RunID: &rid, Project: project, Workflow: "ship-review", AgentLabel: "security",
+		Model: "claude-opus-5", Status: "ok", StartedAt: "2026-09-01T10:00:00Z",
+		EndedAt: "2026-09-01T10:01:00Z", InputTokens: 1200, OutputTokens: 340,
+		CostUSD: cost, Verdict: "GO WITH WARNINGS",
+		Trajectory: map[string]any{"tool_calls": []any{"Read", "Grep"}},
+	}
+}
+
+func TestCreateAgentCall_Roundtrip(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.CreateAgentCall(sampleCall("private-dotfiles", 0.42))
+	if err != nil {
+		t.Fatalf("CreateAgentCall: %v", err)
+	}
+	calls, err := s.ListAgentCalls("private-dotfiles", "", "")
+	if err != nil {
+		t.Fatalf("ListAgentCalls: %v", err)
+	}
+	if len(calls) != 1 || calls[0].ID != id {
+		t.Fatalf("want the created call back, got %+v", calls)
+	}
+	c := calls[0]
+	if c.CostUSD != 0.42 {
+		t.Errorf("cost_usd must survive as REAL, got %v", c.CostUSD)
+	}
+	if c.Trajectory == nil {
+		t.Error("trajectory must round-trip as JSON")
+	}
+	if c.Verdict != "GO WITH WARNINGS" || c.Model != "claude-opus-5" {
+		t.Errorf("verdict/model: %q / %q", c.Verdict, c.Model)
+	}
+}
+
+// A call outside a /lead build chain (a bare /ship) has no run to belong to.
+func TestCreateAgentCall_NullRunIDIsValid(t *testing.T) {
+	s := newTestStore(t)
+	c := sampleCall("private-dotfiles", 0.1)
+	c.RunID = nil
+	if _, err := s.CreateAgentCall(c); err != nil {
+		t.Fatalf("a call with no run must be valid: %v", err)
+	}
+	calls, _ := s.ListAgentCalls("private-dotfiles", "", "")
+	if len(calls) != 1 || calls[0].RunID != nil {
+		t.Errorf("run_id must persist as NULL, got %+v", calls[0].RunID)
+	}
+}
+
+func TestListAgentCalls_RespectsWindowInclusively(t *testing.T) {
+	s := newTestStore(t)
+	for _, ts := range []string{"2026-08-30T00:00:00Z", "2026-08-31T00:00:00Z", "2026-09-01T00:00:00Z"} {
+		c := sampleCall("private-dotfiles", 0.1)
+		c.StartedAt = ts
+		if _, err := s.CreateAgentCall(c); err != nil {
+			t.Fatalf("CreateAgentCall: %v", err)
+		}
+	}
+	got, err := s.ListAgentCalls("private-dotfiles", "2026-08-31", "2026-08-31")
+	if err != nil {
+		t.Fatalf("ListAgentCalls: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("window must be inclusive on both ends: want 1, got %d", len(got))
+	}
+}
+
+// SumCostSince is deliberately GLOBAL: a future daily ceiling is machine-wide,
+// not per project.
+func TestSumCostSince_IsGlobalAndZeroWhenEmpty(t *testing.T) {
+	s := newTestStore(t)
+	total, n, err := s.SumCostSince("2026-01-01")
+	if err != nil {
+		t.Fatalf("SumCostSince on an empty table must not error: %v", err)
+	}
+	if total != 0 || n != 0 {
+		t.Errorf("want 0/0 on empty, got %v/%d", total, n)
+	}
+	if _, err := s.CreateAgentCall(sampleCall("private-dotfiles", 0.25)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateAgentCall(sampleCall("emily", 0.75)); err != nil {
+		t.Fatal(err)
+	}
+	total, n, err = s.SumCostSince("2026-01-01")
+	if err != nil {
+		t.Fatalf("SumCostSince: %v", err)
+	}
+	if total != 1.0 || n != 2 {
+		t.Errorf("want a cross-project total of 1.0 over 2 calls, got %v over %d", total, n)
 	}
 }
