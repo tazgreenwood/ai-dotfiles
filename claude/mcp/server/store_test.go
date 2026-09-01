@@ -1128,3 +1128,99 @@ func TestUpdateStep_DoesNotWriteStepStatusIntoPlanColumn(t *testing.T) {
 		t.Errorf("plans.status was set to the STEP's status %q — a persisted lie", col)
 	}
 }
+
+// ── agent_calls (DOTFILES-35 step 3) ─────────────────────────────────────────
+
+func sampleCall(project string, cost float64) *agentCall {
+	rid := int64(1)
+	return &agentCall{
+		RunID: &rid, Project: project, Workflow: "ship-review", AgentLabel: "security",
+		Model: "claude-opus-5", Status: "ok", StartedAt: "2026-09-01T10:00:00Z",
+		EndedAt: "2026-09-01T10:01:00Z", InputTokens: 1200, OutputTokens: 340,
+		CostUSD: cost, Verdict: "GO WITH WARNINGS",
+		Trajectory: map[string]any{"tool_calls": []any{"Read", "Grep"}},
+	}
+}
+
+func TestCreateAgentCall_Roundtrip(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.CreateAgentCall(sampleCall("private-dotfiles", 0.42))
+	if err != nil {
+		t.Fatalf("CreateAgentCall: %v", err)
+	}
+	calls, err := s.ListAgentCalls("private-dotfiles", "", "")
+	if err != nil {
+		t.Fatalf("ListAgentCalls: %v", err)
+	}
+	if len(calls) != 1 || calls[0].ID != id {
+		t.Fatalf("want the created call back, got %+v", calls)
+	}
+	c := calls[0]
+	if c.CostUSD != 0.42 {
+		t.Errorf("cost_usd must survive as REAL, got %v", c.CostUSD)
+	}
+	if c.Trajectory == nil {
+		t.Error("trajectory must round-trip as JSON")
+	}
+	if c.Verdict != "GO WITH WARNINGS" || c.Model != "claude-opus-5" {
+		t.Errorf("verdict/model: %q / %q", c.Verdict, c.Model)
+	}
+}
+
+// A call outside a /lead build chain (a bare /ship) has no run to belong to.
+func TestCreateAgentCall_NullRunIDIsValid(t *testing.T) {
+	s := newTestStore(t)
+	c := sampleCall("private-dotfiles", 0.1)
+	c.RunID = nil
+	if _, err := s.CreateAgentCall(c); err != nil {
+		t.Fatalf("a call with no run must be valid: %v", err)
+	}
+	calls, _ := s.ListAgentCalls("private-dotfiles", "", "")
+	if len(calls) != 1 || calls[0].RunID != nil {
+		t.Errorf("run_id must persist as NULL, got %+v", calls[0].RunID)
+	}
+}
+
+func TestListAgentCalls_RespectsWindowInclusively(t *testing.T) {
+	s := newTestStore(t)
+	for _, ts := range []string{"2026-08-30T00:00:00Z", "2026-08-31T00:00:00Z", "2026-09-01T00:00:00Z"} {
+		c := sampleCall("private-dotfiles", 0.1)
+		c.StartedAt = ts
+		if _, err := s.CreateAgentCall(c); err != nil {
+			t.Fatalf("CreateAgentCall: %v", err)
+		}
+	}
+	got, err := s.ListAgentCalls("private-dotfiles", "2026-08-31", "2026-08-31")
+	if err != nil {
+		t.Fatalf("ListAgentCalls: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("window must be inclusive on both ends: want 1, got %d", len(got))
+	}
+}
+
+// SumCostSince is deliberately GLOBAL: a future daily ceiling is machine-wide,
+// not per project.
+func TestSumCostSince_IsGlobalAndZeroWhenEmpty(t *testing.T) {
+	s := newTestStore(t)
+	total, n, err := s.SumCostSince("2026-01-01")
+	if err != nil {
+		t.Fatalf("SumCostSince on an empty table must not error: %v", err)
+	}
+	if total != 0 || n != 0 {
+		t.Errorf("want 0/0 on empty, got %v/%d", total, n)
+	}
+	if _, err := s.CreateAgentCall(sampleCall("private-dotfiles", 0.25)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateAgentCall(sampleCall("emily", 0.75)); err != nil {
+		t.Fatal(err)
+	}
+	total, n, err = s.SumCostSince("2026-01-01")
+	if err != nil {
+		t.Fatalf("SumCostSince: %v", err)
+	}
+	if total != 1.0 || n != 2 {
+		t.Errorf("want a cross-project total of 1.0 over 2 calls, got %v over %d", total, n)
+	}
+}

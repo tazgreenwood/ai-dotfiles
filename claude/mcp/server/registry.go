@@ -278,6 +278,87 @@ func registryUpdateRun(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"ok": true})
 }
 
+// ── agent calls (DOTFILES-35) ────────────────────────────────────────────────
+
+func registryWriteCall(args map[string]any) ToolResult {
+	name := str(args, "name")
+	if name == "" {
+		return toolErr("name required")
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	c := &agentCall{
+		Project:    name,
+		Workflow:   str(args, "workflow"),
+		AgentLabel: str(args, "agent_label"),
+		Model:      str(args, "model"),
+		Status:     strOr(args, "status", "ok"),
+		// Stamped here when the caller omits them: workflow scripts cannot call
+		// Date (it would break resume), so they have nothing sensible to send.
+		StartedAt: strOr(args, "started_at", time.Now().UTC().Format(time.RFC3339)),
+		EndedAt:   strOr(args, "ended_at", time.Now().UTC().Format(time.RFC3339)),
+		Verdict:   str(args, "verdict"),
+		Error:     str(args, "error"),
+	}
+	if v, ok := int64Arg(args, "run_id"); ok {
+		c.RunID = &v
+	}
+	if v, ok := int64Arg(args, "input_tokens"); ok {
+		c.InputTokens = v
+	}
+	if v, ok := int64Arg(args, "output_tokens"); ok {
+		c.OutputTokens = v
+	}
+	if v, ok := args["cost_usd"].(float64); ok {
+		c.CostUSD = v
+	}
+	if t, ok := args["trajectory"].(map[string]any); ok {
+		c.Trajectory = t
+	}
+	id, err := s.CreateAgentCall(c)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "id": id})
+}
+
+func registryGetCalls(args map[string]any) ToolResult {
+	name := str(args, "name")
+	if name == "" {
+		return toolErr("name required")
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	calls, err := s.ListAgentCalls(name, str(args, "since"), str(args, "until"))
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	if calls == nil {
+		calls = []*agentCall{}
+	}
+	return toolOK(map[string]any{"calls": calls})
+}
+
+func registrySumCost(args map[string]any) ToolResult {
+	since := str(args, "since")
+	if since == "" {
+		return toolErr("since required (inclusive ISO date)")
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	total, n, err := s.SumCostSince(since)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"cost_usd": total, "run_count": n})
+}
+
 // registryClaimProposalForBuild is the SINGLE enforcement point for /lead
 // build's refusal guards. They used to be prose in lead.md, where nothing but
 // prompt fidelity enforced them.
@@ -829,6 +910,34 @@ func registryTools() []Tool {
 				},
 				"required": []string{"name", "id", "phase", "status"},
 			},
+		},
+		{
+			Name:        "registry_write_call",
+			Description: "Record one agent invocation: model, timings, tokens, USD cost, verdict and trajectory. run_id is optional — a bare /ship or /code-review has no run.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+				"name": map[string]any{"type": "string"}, "run_id": map[string]any{"type": "integer"},
+				"workflow": map[string]any{"type": "string"}, "agent_label": map[string]any{"type": "string"},
+				"model": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
+				"started_at": map[string]any{"type": "string"}, "ended_at": map[string]any{"type": "string"},
+				"input_tokens": map[string]any{"type": "integer"}, "output_tokens": map[string]any{"type": "integer"},
+				"cost_usd": map[string]any{"type": "number"}, "verdict": map[string]any{"type": "string"},
+				"trajectory": map[string]any{"type": "object"}, "error": map[string]any{"type": "string"},
+			}, "required": []string{"name"}},
+		},
+		{
+			Name:        "registry_get_calls",
+			Description: "List a project's agent calls, newest first, optionally within an inclusive ISO date window.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+				"name": map[string]any{"type": "string"}, "since": map[string]any{"type": "string"},
+				"until": map[string]any{"type": "string"},
+			}, "required": []string{"name"}},
+		},
+		{
+			Name:        "registry_sum_cost",
+			Description: "Total USD spend and call count since an inclusive ISO date, across ALL projects — a spend ceiling is machine-wide, not per project.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+				"since": map[string]any{"type": "string"},
+			}, "required": []string{"since"}},
 		},
 		{
 			Name:        "registry_claim_proposal_for_build",

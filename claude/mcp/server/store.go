@@ -95,6 +95,25 @@ func (s *store) createSchema() error {
 			tags TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_project_type_occurred ON events(project, type, occurred_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_calls (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			run_id INTEGER,
+			project TEXT NOT NULL,
+			workflow TEXT,
+			agent_label TEXT,
+			model TEXT,
+			status TEXT,
+			started_at TEXT,
+			ended_at TEXT,
+			input_tokens INTEGER DEFAULT 0,
+			output_tokens INTEGER DEFAULT 0,
+			cost_usd REAL DEFAULT 0,
+			verdict TEXT,
+			trajectory TEXT,
+			error TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_calls_project_started ON agent_calls(project, started_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_calls_run ON agent_calls(run_id)`,
 		`CREATE TABLE IF NOT EXISTS agent_runs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			project TEXT NOT NULL,
@@ -1226,4 +1245,133 @@ func (s *store) ClaimProposalForBuild(project string, proposalID int64) (int64, 
 		return 0, err
 	}
 	return runID, nil
+}
+
+// ── agent calls: per-invocation trajectory + cost (DOTFILES-35) ──────────────
+//
+// agent_runs records WHAT happened in a /lead build chain (phase, cursor).
+// This records HOW: which model, how long, how many tokens, what it cost, and
+// the tool-call trace. One run spawns many agent invocations (developer, qa,
+// security, reviewer, refuters), so this is a CHILD of a run — and run_id is
+// nullable, because a bare /ship or /code-review has no run to belong to.
+//
+// Recording outcomes without trajectories is the documented blind spot: an
+// audit of 731 agent trajectories found 63% of *successful* resolutions
+// retrieved the fix rather than deriving it — invisible if you only check
+// whether the result looked right.
+
+type agentCall struct {
+	ID           int64          `json:"id"`
+	RunID        *int64         `json:"run_id"`
+	Project      string         `json:"project"`
+	Workflow     string         `json:"workflow"`
+	AgentLabel   string         `json:"agent_label"`
+	Model        string         `json:"model"`
+	Status       string         `json:"status"`
+	StartedAt    string         `json:"started_at"`
+	EndedAt      string         `json:"ended_at"`
+	InputTokens  int64          `json:"input_tokens"`
+	OutputTokens int64          `json:"output_tokens"`
+	CostUSD      float64        `json:"cost_usd"`
+	Verdict      string         `json:"verdict,omitempty"`
+	Trajectory   map[string]any `json:"trajectory,omitempty"`
+	Error        string         `json:"error,omitempty"`
+}
+
+const agentCallColumns = `id, run_id, project, workflow, agent_label, model, status,
+	started_at, ended_at, input_tokens, output_tokens, cost_usd, verdict, trajectory, error`
+
+func scanAgentCall(sc interface{ Scan(...any) error }) (*agentCall, error) {
+	var c agentCall
+	var verdict, trajectory, errStr, model, label, workflow, status, started, ended sql.NullString
+	if err := sc.Scan(
+		&c.ID, &c.RunID, &c.Project, &workflow, &label, &model, &status,
+		&started, &ended, &c.InputTokens, &c.OutputTokens, &c.CostUSD,
+		&verdict, &trajectory, &errStr,
+	); err != nil {
+		return nil, err
+	}
+	c.Workflow, c.AgentLabel, c.Model, c.Status = workflow.String, label.String, model.String, status.String
+	c.StartedAt, c.EndedAt = started.String, ended.String
+	c.Verdict, c.Error = verdict.String, errStr.String
+	if trajectory.String != "" {
+		if err := json.Unmarshal([]byte(trajectory.String), &c.Trajectory); err != nil {
+			return nil, fmt.Errorf("agent_call %d trajectory: %w", c.ID, err)
+		}
+	}
+	return &c, nil
+}
+
+func (s *store) CreateAgentCall(c *agentCall) (int64, error) {
+	if c == nil || c.Project == "" {
+		return 0, fmt.Errorf("agent call requires a project")
+	}
+	trajectory := ""
+	if c.Trajectory != nil {
+		b, err := json.Marshal(c.Trajectory)
+		if err != nil {
+			return 0, err
+		}
+		trajectory = string(b)
+	}
+	res, err := s.db.Exec(
+		`INSERT INTO agent_calls
+		   (run_id, project, workflow, agent_label, model, status, started_at, ended_at,
+		    input_tokens, output_tokens, cost_usd, verdict, trajectory, error)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.RunID, c.Project, c.Workflow, c.AgentLabel, c.Model, c.Status,
+		c.StartedAt, c.EndedAt, c.InputTokens, c.OutputTokens, c.CostUSD,
+		c.Verdict, trajectory, c.Error,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ListAgentCalls returns a project's calls newest first. since/until are
+// inclusive ISO dates compared against the first 10 chars of started_at, the
+// same lexicographic trick registry_get_audit uses.
+func (s *store) ListAgentCalls(project, since, until string) ([]*agentCall, error) {
+	query := `SELECT ` + agentCallColumns + ` FROM agent_calls WHERE project = ?`
+	args := []any{project}
+	if since != "" {
+		query += ` AND substr(started_at, 1, 10) >= ?`
+		args = append(args, since)
+	}
+	if until != "" {
+		query += ` AND substr(started_at, 1, 10) <= ?`
+		args = append(args, until)
+	}
+	query += ` ORDER BY id DESC`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var calls []*agentCall
+	for rows.Next() {
+		c, err := scanAgentCall(rows)
+		if err != nil {
+			return nil, err
+		}
+		calls = append(calls, c)
+	}
+	return calls, rows.Err()
+}
+
+// SumCostSince is deliberately GLOBAL, not project-scoped: a daily spend
+// ceiling is a property of the machine, not of one project.
+func (s *store) SumCostSince(since string) (float64, int, error) {
+	var total sql.NullFloat64
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COALESCE(SUM(cost_usd), 0), COUNT(*) FROM agent_calls
+		  WHERE substr(started_at, 1, 10) >= ?`, since,
+	).Scan(&total, &n)
+	if err != nil {
+		return 0, 0, err
+	}
+	return total.Float64, n, nil
 }
