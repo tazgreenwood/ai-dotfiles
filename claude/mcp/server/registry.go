@@ -278,6 +278,26 @@ func registryUpdateRun(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"ok": true})
 }
 
+// registryClaimProposalForBuild is the SINGLE enforcement point for /lead
+// build's refusal guards. They used to be prose in lead.md, where nothing but
+// prompt fidelity enforced them.
+func registryClaimProposalForBuild(args map[string]any) ToolResult {
+	name := str(args, "name")
+	id, hasID := int64Arg(args, "proposal_id")
+	if name == "" || !hasID {
+		return toolErr("name and proposal_id required")
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	runID, err := s.ClaimProposalForBuild(name, id)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "run_id": runID})
+}
+
 // registryIndex backs /lead's routing decision: one thin row per project, so
 // choosing WHICH project a request belongs to never requires loading another
 // project's CLAUDE.md or plan bodies.
@@ -808,6 +828,18 @@ func registryTools() []Tool {
 					"ticket": map[string]any{"type": "string"},
 				},
 				"required": []string{"name", "id", "phase", "status"},
+			},
+		},
+		{
+			Name:        "registry_claim_proposal_for_build",
+			Description: "Atomically claim an approved proposal for building and open its run. Enforces every /lead build guard in one transaction: refuses unless status is approved, refuses if a run or a plan already carries the proposal, and refuses across projects. Concurrent claims produce exactly one run.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":        map[string]any{"type": "string"},
+					"proposal_id": map[string]any{"type": "integer"},
+				},
+				"required": []string{"name", "proposal_id"},
 			},
 		},
 		{

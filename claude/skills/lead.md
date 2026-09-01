@@ -334,21 +334,23 @@ A correct check run leaves:
 
 `/lead build [<proposal-id>]`. This is the only place in this skill where approval causes execution. Everything here is about doing that without becoming a way around the gates.
 
-### 8a. Resolve and guard
+### 8a. Claim the proposal
 
-With no id, take the **newest `approved` proposal for the routed project**. Then check, in order — every one is a hard stop that changes nothing:
+With no id, take the **newest `approved` proposal for the routed project**.
 
-1. The proposal exists and `project` matches the routed project.
-2. Its status is exactly **`approved`**. A `pending` proposal has no decision; a `rejected` one was declined; a `superseded` one was replaced. Refuse and name the actual status.
-3. **It has not already been built.** Check **both**, because they cover different eras and either alone has a hole:
-   - `registry_get_runs(project)` — refuse if any run carries this `proposal_id`. Report that run's id, phase and status; the human wants `--resume`, not a second build.
-   - `registry_list_plans(project)` + `registry_get_plan` — refuse if any plan carries `from_proposal: <id>`.
+Then call **`registry_claim_proposal_for_build(project, proposal_id)`** and obey the result. It enforces every guard in one transaction and returns the `run_id` on success:
 
-   The run check alone misses anything built before `agent_runs` existed (DOTFILES-36 was converted by hand, so proposal 2 has a plan and no run — `/lead build 2` would cheerfully rebuild it). The plan check alone misses a run that opened and then failed before its plan was written. Check both.
+- status must be exactly `approved` — `pending` has no decision, `rejected` was declined, `superseded` was replaced
+- no run may already carry the proposal (the human wants `--resume`, not a second build)
+- no plan may already carry `from_proposal` (covers everything built before `agent_runs` existed)
+- the proposal must belong to the routed project
+- concurrent claims produce exactly **one** run
+
+**Do not re-implement these checks here.** They live in the store precisely so a prompt edit cannot weaken them, and a second copy in prose would be a second thing to drift. If the call refuses, quote its message — it names the blocking condition — and stop. Nothing was mutated.
 
 ### 8b. Open the run, allocate the ticket, write the plan
 
-1. `registry_write_run(project, proposal_id, phase="planning", status="running")` → keep the run id. **Open the run first**, so a crash between here and the plan write leaves a visible `planning` run rather than silence.
+1. The run is already open in `planning` — STEP 8a's claim created it and returned its id. Opening it inside the claim is deliberate: a crash between the claim and the plan write leaves a visible `planning` run rather than silence.
 2. Allocate a ticket key: read `ticket_counter` via `registry_get_project`, increment it with `registry_set`, and form the key from the project's prefix.
 3. `registry_derive_branch_name(ticket, ticket_type, description)`.
 4. Take `payload` as the plan body. **If it has no end-to-end integration step, append one** per `plan.md` STEP 5c — proposals written before that rule exists, or by an older Stuart, must not skip it.

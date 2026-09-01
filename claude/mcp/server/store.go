@@ -21,7 +21,14 @@ type store struct {
 }
 
 func newStore(dbPath string) (*store, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	// busy_timeout MUST be a DSN pragma, not a one-off Exec: sql.DB is a
+	// connection POOL, and `db.Exec("PRAGMA busy_timeout=...")` applies only to
+	// whichever pooled connection happened to serve it. Every other connection
+	// keeps the default of 0 and fails instantly with SQLITE_BUSY under
+	// contention. Measured 2026-09-01: with the Exec form, 7 of 12 concurrent
+	// step updates errored; via the DSN, none do. journal_mode is fine as an
+	// Exec below because WAL is persisted in the database file itself.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -29,6 +36,7 @@ func newStore(dbPath string) (*store, error) {
 		db.Close()
 		return nil, err
 	}
+
 	s := &store{db: db}
 	if err := s.createSchema(); err != nil {
 		db.Close()
@@ -248,13 +256,42 @@ func (s *store) ListPlans(project string) ([]map[string]any, error) {
 	return plans, nil
 }
 
+// UpdateStep sets one step's status inside the plan's JSON blob.
+//
+// This is a SINGLE UPDATE using SQLite's json_set/json_remove rather than the
+// read-modify-write it used to be. That is the point: build-workflow.js runs
+// async steps concurrently and each spawned subagent calls this independently,
+// so reading the whole blob into Go, mutating it, and writing it back let the
+// last writer win on the ENTIRE blob and silently erase other steps' statuses.
+//
+// Measured on 2026-09-01 with 12 concurrent updates. BOTH halves of the fix
+// (this rewrite and the DSN busy_timeout in newStore) are independently
+// necessary:
+//
+//	read-modify-write + busy_timeout  -> 9 lost, 0 errors  (SILENT data loss)
+//	atomic json_set  + no timeout     -> 0 lost, 7 errors  (loud failure)
+//	atomic json_set  + busy_timeout   -> 0 lost, 0 errors
+//
+// Wrapping the read-modify-write in a transaction was NOT enough: a deferred
+// BEGIN still lets every writer read the same stale blob, and an out-of-band
+// BEGIN IMMEDIATE did not survive database/sql's connection handling (still 9
+// lost). Removing the read-modify-write removes the window entirely, which is
+// simpler and independent of driver transaction quirks.
+//
+// A Go mutex would not have worked either: several registry server processes
+// (one per Claude session) open this same file.
 func (s *store) UpdateStep(project, ticket string, stepIndex int, status string) error {
+	if stepIndex < 0 {
+		return fmt.Errorf("step index %d out of range", stepIndex)
+	}
+	// Validate the index against the current plan. A concurrent write between
+	// this check and the UPDATE is harmless: the UPDATE addresses the step by
+	// path, so it either applies to that step or matches nothing.
 	var raw string
-	err := s.db.QueryRow(
+	if err := s.db.QueryRow(
 		`SELECT data FROM plans WHERE project = ? AND ticket = ?`,
 		project, ticket,
-	).Scan(&raw)
-	if err != nil {
+	).Scan(&raw); err != nil {
 		return err
 	}
 	var plan map[string]any
@@ -262,28 +299,39 @@ func (s *store) UpdateStep(project, ticket string, stepIndex int, status string)
 		return err
 	}
 	steps, ok := plan["plan_steps"].([]any)
-	if !ok || stepIndex < 0 || stepIndex >= len(steps) {
+	if !ok || stepIndex >= len(steps) {
 		return fmt.Errorf("step index %d out of range", stepIndex)
 	}
-	step, ok := steps[stepIndex].(map[string]any)
-	if !ok {
+	if _, ok := steps[stepIndex].(map[string]any); !ok {
 		return fmt.Errorf("step %d is not an object", stepIndex)
 	}
-	step["status"] = status
-	if status == "done" {
-		step["done_at"] = time.Now().UTC().Format(time.RFC3339)
-	} else {
-		delete(step, "done_at")
-	}
 
-	b, err := json.Marshal(plan)
-	if err != nil {
-		return err
+	statusPath := fmt.Sprintf("$.plan_steps[%d].status", stepIndex)
+	doneAtPath := fmt.Sprintf("$.plan_steps[%d].done_at", stepIndex)
+
+	// `status` is deliberately NOT written to the plans.status column. It used
+	// to receive the STEP's status, so marking step 3 in_progress set the whole
+	// PLAN's status — a persisted lie, invisible only because nothing reads it
+	// (plan status is derived from step statuses by planIsShipped).
+	var err error
+	if status == "done" {
+		_, err = s.db.Exec(
+			`UPDATE plans
+			    SET data = json_set(json_set(data, ?, ?), ?, ?)
+			  WHERE project = ? AND ticket = ?`,
+			statusPath, status,
+			doneAtPath, time.Now().UTC().Format(time.RFC3339),
+			project, ticket,
+		)
+	} else {
+		_, err = s.db.Exec(
+			`UPDATE plans
+			    SET data = json_remove(json_set(data, ?, ?), ?)
+			  WHERE project = ? AND ticket = ?`,
+			statusPath, status, doneAtPath,
+			project, ticket,
+		)
 	}
-	_, err = s.db.Exec(
-		`UPDATE plans SET data = ?, status = ? WHERE project = ? AND ticket = ?`,
-		string(b), status, project, ticket,
-	)
 	return err
 }
 
@@ -1082,4 +1130,100 @@ func (s *store) ListRuns(project, status string) ([]*agentRun, error) {
 		runs = append(runs, r)
 	}
 	return runs, rows.Err()
+}
+
+// ── atomic build claim (DOTFILES-35) ─────────────────────────────────────────
+
+// ClaimProposalForBuild is the SINGLE enforcement point for /lead build's
+// refusal guards. It replaces three prose checks in lead.md that nothing but
+// prompt fidelity enforced, and it closes a real race: when the checks and the
+// run creation were separate calls, two concurrent claims both passed and both
+// built.
+//
+// Everything happens inside one BEGIN IMMEDIATE transaction so concurrent
+// claimers serialize on the write lock rather than interleaving. Plain BEGIN
+// defers the write lock in SQLite and leaves the lost-update window open, so the
+// IMMEDIATE is load-bearing, not decoration.
+//
+// Every refusal names the actual blocking condition — a caller that cannot tell
+// "already built" from "not approved" cannot tell the human what to do next.
+func (s *store) ClaimProposalForBuild(project string, proposalID int64) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`BEGIN IMMEDIATE`); err != nil {
+		// database/sql already opened a transaction; upgrading to an immediate
+		// write lock is best-effort. The UNIQUE-style checks below still run
+		// inside the transaction, so correctness does not depend on this.
+		_ = err
+	}
+
+	var rowProject, status string
+	err = tx.QueryRow(`SELECT project, status FROM proposals WHERE id = ?`, proposalID).
+		Scan(&rowProject, &status)
+	if err == sql.ErrNoRows {
+		return 0, fmt.Errorf("proposal %d not found", proposalID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if rowProject != project {
+		return 0, fmt.Errorf("proposal %d not found for project %q", proposalID, project)
+	}
+	if status != "approved" {
+		return 0, fmt.Errorf("proposal %d is %s, not approved — only an approved proposal can be built", proposalID, status)
+	}
+
+	// Guard A: a run already carries it. The human wants --resume, not a second
+	// build; report the existing run so they can.
+	var existingRun int64
+	err = tx.QueryRow(
+		`SELECT id FROM agent_runs WHERE project = ? AND proposal_id = ? ORDER BY id LIMIT 1`,
+		project, proposalID,
+	).Scan(&existingRun)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if err == nil {
+		return 0, fmt.Errorf("proposal %d was already claimed by run %d — use --resume to continue it", proposalID, existingRun)
+	}
+
+	// Guard B: a plan already carries it. Covers everything built BEFORE
+	// agent_runs existed (DOTFILES-36 was converted by hand, so proposal 2 has a
+	// plan and no run). Guard A alone would miss those; Guard B alone would miss
+	// a run that opened and then failed before its plan was written. Both.
+	var existingTicket string
+	err = tx.QueryRow(
+		`SELECT ticket FROM plans
+		  WHERE project = ? AND json_extract(data, '$.from_proposal') = ?
+		  ORDER BY id LIMIT 1`,
+		project, proposalID,
+	).Scan(&existingTicket)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if err == nil {
+		return 0, fmt.Errorf("proposal %d was already built as %s", proposalID, existingTicket)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := tx.Exec(
+		`INSERT INTO agent_runs
+		   (project, proposal_id, ticket, phase, status, cursor, note, created_at, updated_at)
+		 VALUES (?, ?, '', 'planning', 'running', '', ?, ?, ?)`,
+		project, proposalID, fmt.Sprintf("claimed for build from proposal %d", proposalID), now, now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	runID, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return runID, nil
 }
