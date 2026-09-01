@@ -580,3 +580,223 @@ func TestListIndex_PayloadCarriesNoHeavySubtrees(t *testing.T) {
 		}
 	}
 }
+
+// ── agent_runs (DOTFILES-38) ─────────────────────────────────────────────────
+
+func sampleRun() *agentRun {
+	pid := int64(7)
+	return &agentRun{
+		Project:    "private-dotfiles",
+		ProposalID: &pid,
+		Ticket:     "DOTFILES-99",
+		Phase:      "planning",
+		Status:     "running",
+		Cursor:     map[string]any{"branch": "feat/x", "last_step": float64(0)},
+	}
+}
+
+func TestCreateRun_GetRoundtrip(t *testing.T) {
+	s := newTestStore(t)
+
+	in := sampleRun()
+	id, err := s.CreateRun(in)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("want non-zero id")
+	}
+
+	got, err := s.GetRun(id)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Project != "private-dotfiles" || got.Ticket != "DOTFILES-99" {
+		t.Errorf("project/ticket: got %q/%q", got.Project, got.Ticket)
+	}
+	if got.ProposalID == nil || *got.ProposalID != 7 {
+		t.Errorf("proposal_id: want 7, got %v", got.ProposalID)
+	}
+	if got.Phase != "planning" || got.Status != "running" {
+		t.Errorf("phase/status: got %q/%q", got.Phase, got.Status)
+	}
+	if got.Cursor["branch"] != "feat/x" {
+		t.Errorf("cursor did not round-trip: %v", got.Cursor)
+	}
+	if got.CreatedAt == "" || got.UpdatedAt == "" {
+		t.Error("want created_at and updated_at stamped")
+	}
+}
+
+// A hand-started run (not from a proposal) is legitimate.
+func TestCreateRun_WithoutProposalID(t *testing.T) {
+	s := newTestStore(t)
+	r := sampleRun()
+	r.ProposalID = nil
+	r.Ticket = ""
+	id, err := s.CreateRun(r)
+	if err != nil {
+		t.Fatalf("CreateRun without proposal: %v", err)
+	}
+	got, err := s.GetRun(id)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.ProposalID != nil {
+		t.Errorf("proposal_id: want NULL, got %d", *got.ProposalID)
+	}
+}
+
+func TestCreateRun_RejectsBadPhaseAndStatus(t *testing.T) {
+	s := newTestStore(t)
+
+	bad := sampleRun()
+	bad.Phase = "hammering"
+	if _, err := s.CreateRun(bad); err == nil {
+		t.Error("want error for invalid phase, got nil")
+	}
+
+	bad2 := sampleRun()
+	bad2.Status = "vibing"
+	if _, err := s.CreateRun(bad2); err == nil {
+		t.Error("want error for invalid status, got nil")
+	}
+}
+
+func TestGetRun_UnknownID(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.GetRun(4242); err == nil {
+		t.Fatal("want error for unknown run id, got nil")
+	}
+}
+
+// UpdateRun is the resume spine: it must advance phase, status, cursor and note
+// in ONE statement and restamp updated_at. Deliberately not the UpdateStep
+// read-modify-write shape.
+func TestUpdateRun_AdvancesCursorAtomically(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.CreateRun(sampleRun())
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	before, err := s.GetRun(id)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+
+	newCursor := map[string]any{"branch": "feat/x", "last_step": float64(3), "pr_url": ""}
+	if err := s.UpdateRun(id, "building", "running", newCursor, "step 3 done"); err != nil {
+		t.Fatalf("UpdateRun: %v", err)
+	}
+
+	got, err := s.GetRun(id)
+	if err != nil {
+		t.Fatalf("GetRun after update: %v", err)
+	}
+	if got.Phase != "building" || got.Status != "running" {
+		t.Errorf("phase/status: got %q/%q", got.Phase, got.Status)
+	}
+	if got.Cursor["last_step"] != float64(3) {
+		t.Errorf("cursor.last_step: want 3, got %v", got.Cursor["last_step"])
+	}
+	if got.Note != "step 3 done" {
+		t.Errorf("note: got %q", got.Note)
+	}
+	if got.CreatedAt != before.CreatedAt {
+		t.Error("created_at must not move on update")
+	}
+	if got.UpdatedAt == "" {
+		t.Error("updated_at must be restamped")
+	}
+}
+
+func TestUpdateRun_RejectsBadInputAndUnknownID(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.CreateRun(sampleRun())
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if err := s.UpdateRun(id, "hammering", "running", nil, ""); err == nil {
+		t.Error("want error for invalid phase")
+	}
+	if err := s.UpdateRun(id, "building", "vibing", nil, ""); err == nil {
+		t.Error("want error for invalid status")
+	}
+	if err := s.UpdateRun(999999, "building", "running", nil, ""); err == nil {
+		t.Error("want error for unknown run id")
+	}
+}
+
+func TestListRuns_FiltersByStatusAndProject(t *testing.T) {
+	s := newTestStore(t)
+
+	running, err := s.CreateRun(sampleRun())
+	if err != nil {
+		t.Fatalf("CreateRun running: %v", err)
+	}
+	paused := sampleRun()
+	pausedID, err := s.CreateRun(paused)
+	if err != nil {
+		t.Fatalf("CreateRun paused: %v", err)
+	}
+	if err := s.UpdateRun(pausedID, "building", "paused", nil, "needs an answer"); err != nil {
+		t.Fatalf("UpdateRun: %v", err)
+	}
+	other := sampleRun()
+	other.Project = "emily"
+	if _, err := s.CreateRun(other); err != nil {
+		t.Fatalf("CreateRun other: %v", err)
+	}
+
+	all, err := s.ListRuns("private-dotfiles", "")
+	if err != nil {
+		t.Fatalf("ListRuns all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all for project: want 2, got %d", len(all))
+	}
+
+	onlyPaused, err := s.ListRuns("private-dotfiles", "paused")
+	if err != nil {
+		t.Fatalf("ListRuns paused: %v", err)
+	}
+	if len(onlyPaused) != 1 || onlyPaused[0].ID != pausedID {
+		t.Fatalf("paused: want [%d], got %+v", pausedID, onlyPaused)
+	}
+	if onlyPaused[0].Note != "needs an answer" {
+		t.Errorf("note: got %q", onlyPaused[0].Note)
+	}
+
+	onlyRunning, err := s.ListRuns("private-dotfiles", "running")
+	if err != nil {
+		t.Fatalf("ListRuns running: %v", err)
+	}
+	if len(onlyRunning) != 1 || onlyRunning[0].ID != running {
+		t.Fatalf("running: want [%d], got %+v", running, onlyRunning)
+	}
+
+	if _, err := s.ListRuns("private-dotfiles", "bogus"); err == nil {
+		t.Error("want error for invalid status filter")
+	}
+}
+
+// The double-build guard depends on finding an existing run for a proposal.
+func TestListRuns_FindsRunByProposal(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.CreateRun(sampleRun()); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	runs, err := s.ListRuns("private-dotfiles", "")
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	found := false
+	for _, r := range runs {
+		if r.ProposalID != nil && *r.ProposalID == 7 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("want a run discoverable by its proposal_id — the double-build guard depends on it")
+	}
+}

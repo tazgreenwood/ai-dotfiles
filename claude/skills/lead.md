@@ -6,10 +6,12 @@ Someone hands you a request in prose — often relayed ("so-and-so asked for X")
 
 **You are a lead, not an assistant.** If a request is a bad idea, says so in the proposal — the wrong approach, a cheaper path, a thing that should not be built at all. A proposal that says "this is the wrong problem, here's the right one" is more valuable than a competent plan for the wrong work. Deference is the failure mode; you are the last judgment before a human's.
 
-**Hard limits:**
+**Hard limits — propose and check modes:**
 - **Do not write code.** Produce the plan only.
 - **Do not call `registry_write_plan`.** A proposal is not an approved plan. Writing one would make unapproved work indistinguishable from approved work in `registry_list_plans`.
-- **Never execute.** This skill ends at "a human has been notified" or "a decision was recorded."
+- **Never execute.** These modes end at "a human has been notified" or "a decision was recorded."
+
+**Build mode is the single exception**, and only under its own conditions: a human types `/lead build` for a proposal a human already approved. It is the only path that may write a plan or run `/build`. It never triggers itself, approval alone never starts it, and it may not relax any gate `/build` or `/ship` enforces. See STEP 8.
 
 ## Invocation
 
@@ -17,8 +19,9 @@ Someone hands you a request in prose — often relayed ("so-and-so asked for X")
 |---|---|---|
 | `/lead <request text>` | **propose** | Plan the request, post it to Slack, persist the proposal. |
 | `/lead check` (or `/lead` with no args) | **check** | Sweep Slack for new requests and for replies on pending proposals. |
+| `/lead build [<proposal-id>]` | **build** | Turn an approved proposal into a real plan and run it through `/build` and `/ship` to a PR. |
 
-There is no unattended poller. A human runs this. If `ARGUMENTS` is empty or is exactly `check`, run **check** mode; anything else is the request text for **propose** mode. Never treat a bare mode word as a request to plan — a proposal about the word "check" is a bug, not a proposal.
+There is no unattended poller. A human runs this. Dispatch on `ARGUMENTS`: empty or exactly `check` → **check** mode; starts with `build` → **build** mode (STEP 8); anything else is the request text for **propose** mode. Never treat a bare mode word as a request to plan — a proposal about the word "check" or "build" is a bug, not a proposal.
 
 ---
 
@@ -214,7 +217,7 @@ Print, in chat:
 - The count of assumptions and open questions
 - Any pushback you gave on the request itself
 
-Then **stop**. Do not start a build, do not create a branch, do not call `registry_write_plan`.
+Then **stop**. Do not start a build, do not create a branch, do not call `registry_write_plan` — building is a separate, human-typed `/lead build` (STEP 8).
 
 ---
 
@@ -230,10 +233,10 @@ Two things the workflow guarantees, which you rely on:
 
 Already persisted by the workflow (`status: "approved"`). **Do nothing else.** Report it and move on:
 
-- Do **not** start a build, invoke `/build`, create a branch, check out a worktree, or edit any file.
-- Do **not** call `registry_write_plan`. An approved proposal is still not a plan; converting one is a later, explicitly out-of-scope phase.
+- Do **not** start a build, invoke `/build`, create a branch, check out a worktree, or edit any file **from this step**.
+- Do **not** call `registry_write_plan` here.
 
-Approval records that a human said yes. That is the entire effect.
+Approval records that a human said yes. That is its entire effect *in this mode*. Converting an approved proposal into a plan and running it happens only when a human separately types `/lead build` (STEP 8) — never automatically, and never as a continuation of this sweep. Report the approval and stop; if the human wants it built, they will say so.
 
 ### `rejected`
 
@@ -317,6 +320,54 @@ A correct check run leaves:
 - Reply with a substantive change request → a second bot-authored message in the **same** thread; the old row `superseded` with `superseded_by` = the new id and the note in `decision_note`; the new row `pending`; `registry_get_proposals(project)` returning **both**
 - A Stuart reply in a thread → classified as nothing; the row stays `pending`
 - Re-running check after a revision → no second re-plan of the same reply
+
+---
+
+## STEP 8: BUILD MODE — APPROVED PROPOSAL → PLAN → /build → /ship
+
+`/lead build [<proposal-id>]`. This is the only place in this skill where approval causes execution. Everything here is about doing that without becoming a way around the gates.
+
+### 8a. Resolve and guard
+
+With no id, take the **newest `approved` proposal for the routed project**. Then check, in order — every one is a hard stop that changes nothing:
+
+1. The proposal exists and `project` matches the routed project.
+2. Its status is exactly **`approved`**. A `pending` proposal has no decision; a `rejected` one was declined; a `superseded` one was replaced. Refuse and name the actual status.
+3. **No run already exists for it.** Call `registry_get_runs(project)` and refuse if any run carries this `proposal_id`. Report that run's id, phase and status instead — the human wants `--resume`, not a second build.
+
+### 8b. Open the run, allocate the ticket, write the plan
+
+1. `registry_write_run(project, proposal_id, phase="planning", status="running")` → keep the run id. **Open the run first**, so a crash between here and the plan write leaves a visible `planning` run rather than silence.
+2. Allocate a ticket key: read `ticket_counter` via `registry_get_project`, increment it with `registry_set`, and form the key from the project's prefix.
+3. `registry_derive_branch_name(ticket, ticket_type, description)`.
+4. Take `payload` as the plan body. **If it has no end-to-end integration step, append one** per `plan.md` STEP 5c — proposals written before that rule exists, or by an older Stuart, must not skip it.
+5. `registry_write_plan(project, ticket, plan)` with `from_proposal: <id>` and the branch.
+6. `registry_update_run(project, run_id, phase="building", status="running", cursor={ticket, branch, last_step: 0})`.
+
+### 8c. Chain into /build and /ship — WITHOUT weakening either gate
+
+Invoke the **existing** skills. Do not reimplement `build-workflow.js` or `ship-review-workflow.js`, do not inline their logic, and **do not pass any flag, argument or instruction that relaxes them.**
+
+1. Run `/build` for the ticket. After each completed step, advance the cursor: `registry_update_run(..., phase="building", status="running", cursor={..., last_step: N})`. This is what makes a resume skip finished work.
+2. Run `/ship` for the ticket. On entering it, `registry_update_run(..., phase="shipping", status="running")`.
+3. On success, `registry_update_run(..., phase="done", status="done", cursor={..., pr_url})`.
+
+**Every stop below halts the chain. Record it on the run and report it. There is no override, and you must never offer one:**
+
+| Condition | Run state | Then |
+|---|---|---|
+| A step goes `blocked` | `phase="building"`, `status="failed"` | Report the step and the error. |
+| A step goes `awaiting_human` | `phase="building"`, `status="paused"` | Report what is needed. (Full pause/resume is DOTFILES-38 step 4 — until then, stop and say so.) |
+| `SECURITY STATUS: BLOCK` | `phase="shipping"`, `status="failed"` | Surface the findings. **Do not open a PR.** |
+| `REVIEWER STATUS: REJECTED` | `phase="shipping"`, `status="failed"` | Surface the full reviewer output and ask the human whether to fix or ship anyway — exactly as `/ship` does. Do not decide this yourself. |
+
+Put the reason in the run's `note` in every case, so `registry_get_runs(project, "failed")` and `(project, "paused")` answer "what is stuck and why" without re-reading a transcript.
+
+### 8d. Report
+
+On success print: ticket, PR URL, AC coverage, files changed, security verdict, every MINOR/NIT the reviewer raised, and **what to look at first** (name the highest-risk step's diff). A PR link alone hands the work back — the point is that the human can review without reconstructing intent from a diff.
+
+On a halt print: the phase it stopped in, the run id, the reason, and what would unblock it.
 
 ---
 

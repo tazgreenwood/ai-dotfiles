@@ -87,6 +87,19 @@ func (s *store) createSchema() error {
 			tags TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_project_type_occurred ON events(project, type, occurred_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			proposal_id INTEGER,
+			ticket TEXT,
+			phase TEXT NOT NULL,
+			status TEXT NOT NULL,
+			cursor TEXT,
+			note TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_runs_project_status ON agent_runs(project, status)`,
 		`CREATE TABLE IF NOT EXISTS proposals (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			project TEXT NOT NULL,
@@ -878,4 +891,183 @@ func (s *store) ListIndex() ([]projectIndexEntry, error) {
 		entries[idx].ActivePlan = &activePlanRef{Ticket: ticket, Summary: summary}
 	}
 	return entries, planRows.Err()
+}
+
+// ── agent runs (DOTFILES-38) ─────────────────────────────────────────────────
+//
+// The resume spine for `/lead build`. Plans already track per-step status and
+// build-workflow.js already checkpoints steps, but nothing tied
+// proposal -> plan -> build -> ship -> PR together, so an interrupted chain
+// could only be restarted, never resumed. A chain that cannot resume cannot run
+// unattended: a crash, a rate limit, a sleeping laptop or a mid-build question
+// all strand the work. Every transition is committed here before the next
+// begins, so any later session can re-enter at `cursor`.
+
+type agentRun struct {
+	Project    string         `json:"project"`
+	ProposalID *int64         `json:"proposal_id"`
+	Ticket     string         `json:"ticket"`
+	Phase      string         `json:"phase"`
+	Status     string         `json:"status"`
+	Cursor     map[string]any `json:"cursor,omitempty"`
+	Note       string         `json:"note"`
+	ID         int64          `json:"id"`
+	CreatedAt  string         `json:"created_at"`
+	UpdatedAt  string         `json:"updated_at"`
+}
+
+var (
+	runPhases = map[string]bool{
+		"planning": true, "building": true, "shipping": true, "done": true, "blocked": true,
+	}
+	runStatuses = map[string]bool{
+		"running": true, "paused": true, "done": true, "failed": true,
+	}
+)
+
+const runColumns = `id, project, proposal_id, ticket, phase, status, cursor, note,
+	created_at, updated_at`
+
+func validateRunPhaseStatus(phase, status string) error {
+	if !runPhases[phase] {
+		return fmt.Errorf("invalid run phase %q", phase)
+	}
+	if !runStatuses[status] {
+		return fmt.Errorf("invalid run status %q", status)
+	}
+	return nil
+}
+
+func scanRun(sc interface{ Scan(...any) error }) (*agentRun, error) {
+	var r agentRun
+	var cursor sql.NullString
+	var note sql.NullString
+	var ticket sql.NullString
+	if err := sc.Scan(
+		&r.ID, &r.Project, &r.ProposalID, &ticket, &r.Phase, &r.Status,
+		&cursor, &note, &r.CreatedAt, &r.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	r.Ticket = ticket.String
+	r.Note = note.String
+	if cursor.String != "" {
+		if err := json.Unmarshal([]byte(cursor.String), &r.Cursor); err != nil {
+			return nil, fmt.Errorf("run %d cursor: %w", r.ID, err)
+		}
+	}
+	return &r, nil
+}
+
+func (s *store) CreateRun(r *agentRun) (int64, error) {
+	if r == nil || r.Project == "" {
+		return 0, fmt.Errorf("run requires a project")
+	}
+	if r.Phase == "" {
+		r.Phase = "planning"
+	}
+	if r.Status == "" {
+		r.Status = "running"
+	}
+	if err := validateRunPhaseStatus(r.Phase, r.Status); err != nil {
+		return 0, err
+	}
+	cursor := ""
+	if r.Cursor != nil {
+		b, err := json.Marshal(r.Cursor)
+		if err != nil {
+			return 0, err
+		}
+		cursor = string(b)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.db.Exec(
+		`INSERT INTO agent_runs
+		   (project, proposal_id, ticket, phase, status, cursor, note, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.Project, r.ProposalID, r.Ticket, r.Phase, r.Status, cursor, r.Note, now, now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *store) GetRun(id int64) (*agentRun, error) {
+	row := s.db.QueryRow(`SELECT `+runColumns+` FROM agent_runs WHERE id = ?`, id)
+	r, err := scanRun(row)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("run %d not found", id)
+	}
+	return r, err
+}
+
+// UpdateRun advances the run in a SINGLE statement — phase, status, cursor and
+// note move together and updated_at is restamped. Deliberately NOT the
+// read-modify-write shape used by UpdateStep: this is the record a concurrent
+// resume reads to decide where to re-enter.
+func (s *store) UpdateRun(id int64, phase, status string, cursor map[string]any, note string) error {
+	if err := validateRunPhaseStatus(phase, status); err != nil {
+		return err
+	}
+	cursorJSON := ""
+	if cursor != nil {
+		b, err := json.Marshal(cursor)
+		if err != nil {
+			return err
+		}
+		cursorJSON = string(b)
+	}
+	// A nil cursor means "leave the existing cursor alone" — an advance that
+	// only changes phase must not silently erase where the chain got to.
+	res, err := s.db.Exec(
+		`UPDATE agent_runs
+		    SET phase = ?, status = ?,
+		        cursor = CASE WHEN ? = '' THEN cursor ELSE ? END,
+		        note = ?, updated_at = ?
+		  WHERE id = ?`,
+		phase, status, cursorJSON, cursorJSON, note,
+		time.Now().UTC().Format(time.RFC3339), id,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("run %d not found", id)
+	}
+	return nil
+}
+
+// ListRuns returns a project's runs, newest first. An empty status returns all.
+func (s *store) ListRuns(project, status string) ([]*agentRun, error) {
+	query := `SELECT ` + runColumns + ` FROM agent_runs WHERE project = ?`
+	args := []any{project}
+	if status != "" {
+		if !runStatuses[status] {
+			return nil, fmt.Errorf("invalid run status filter %q", status)
+		}
+		query += ` AND status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY id DESC`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []*agentRun
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
 }
