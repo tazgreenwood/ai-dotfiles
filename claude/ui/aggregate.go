@@ -72,6 +72,115 @@ func AggregateKanban(doneCutoff time.Time) (cards []KanbanCard, hiddenOlder int)
 	return cards, hiddenOlder
 }
 
+// PlanCard is a single plan flattened for the global Kanban board (one card
+// per plan, not per step — DOTFILES-39), tagged with the project it belongs
+// to and its overall progress/status derived from its steps.
+type PlanCard struct {
+	Project      string `json:"project"`
+	Ticket       string `json:"ticket"`
+	Title        string `json:"title,omitempty"`
+	DoneSteps    int    `json:"done_steps"`
+	TotalSteps   int    `json:"total_steps"`
+	Status       string `json:"status"`
+	LatestDoneAt string `json:"latest_done_at,omitempty"`
+}
+
+// derivePlanStatus buckets a plan's overall Kanban column from its steps:
+// blocked (any step blocked) beats in_progress (any step in_progress, or the
+// plan is partially done) beats done (every step done) beats pending
+// (the default — no step is done, blocked, or in_progress).
+func derivePlanStatus(steps []PlanStep) string {
+	anyBlocked := false
+	anyInProgress := false
+	anyDone := false
+	allDone := len(steps) > 0
+	for _, s := range steps {
+		switch s.Status {
+		case "blocked":
+			anyBlocked = true
+		case "in_progress":
+			anyInProgress = true
+		case "done":
+			anyDone = true
+		}
+		if s.Status != "done" {
+			allDone = false
+		}
+	}
+	switch {
+	case anyBlocked:
+		return "blocked"
+	case anyInProgress || (anyDone && !allDone):
+		return "in_progress"
+	case allDone:
+		return "done"
+	default:
+		return "pending"
+	}
+}
+
+// AggregatePlanKanban walks every project's plans and produces one PlanCard
+// per plan (rather than AggregateKanban's one card per step) for the global
+// Kanban board. A fully-done plan whose latest step done_at predates
+// doneCutoff is excluded from the returned cards — kept out of the visible
+// Done column — but is still tallied and reported via hiddenOlder, so
+// callers can render a "+N older, hidden" indicator, mirroring
+// AggregateKanban's per-step cutoff exactly but applied once per plan using
+// its latest done_at. A fully-done plan whose steps carry no done_at
+// (recorded before this field existed) is never excluded, since its age
+// can't be determined.
+func AggregatePlanKanban(doneCutoff time.Time) (cards []PlanCard, hiddenOlder int) {
+	projects, err := ReadProjects()
+	if err != nil {
+		return nil, 0
+	}
+	for _, p := range projects {
+		metas, err := ReadPlans(p.Name)
+		if err != nil {
+			continue
+		}
+		for _, m := range metas {
+			plan, err := ReadPlan(p.Name, m.Ticket)
+			if err != nil {
+				continue
+			}
+			status := derivePlanStatus(plan.PlanSteps)
+			doneSteps := 0
+			var latestDoneAt string
+			var latestDoneAtParsed time.Time
+			for _, s := range plan.PlanSteps {
+				if s.Status != "done" {
+					continue
+				}
+				doneSteps++
+				if s.DoneAt == "" {
+					continue
+				}
+				if t, err := time.Parse(time.RFC3339, s.DoneAt); err == nil {
+					if t.After(latestDoneAtParsed) {
+						latestDoneAtParsed = t
+						latestDoneAt = s.DoneAt
+					}
+				}
+			}
+			if status == "done" && latestDoneAt != "" && latestDoneAtParsed.Before(doneCutoff) {
+				hiddenOlder++
+				continue
+			}
+			cards = append(cards, PlanCard{
+				Project:      p.Name,
+				Ticket:       m.Ticket,
+				Title:        plan.Summary,
+				DoneSteps:    doneSteps,
+				TotalSteps:   len(plan.PlanSteps),
+				Status:       status,
+				LatestDoneAt: latestDoneAt,
+			})
+		}
+	}
+	return cards, hiddenOlder
+}
+
 // EventWithProject tags an EventEntry with its owning project, for the
 // global Reviews (and any future event-type) tab.
 type EventWithProject struct {
