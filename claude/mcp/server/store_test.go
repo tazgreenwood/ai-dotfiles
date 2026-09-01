@@ -836,3 +836,70 @@ func TestListRuns_FindsRunByProposal(t *testing.T) {
 		t.Error("want a run discoverable by its proposal_id — the double-build guard depends on it")
 	}
 }
+
+// ── session-sourced proposals (DOTFILES-38 step 5) ───────────────────────────
+
+// An in-session proposal has no originating Slack message, so it has no
+// permalink. The NOT-EMPTY check must relax for source='session' ONLY —
+// widening it to slack would reintroduce queue rows with no way back to the
+// conversation, which is the reason the check exists.
+func TestCreateProposal_SessionSourceAllowsEmptyPermalink(t *testing.T) {
+	s := newTestStore(t)
+
+	p := sampleProposal("planned in session")
+	p.Source = "session"
+	p.SourceChannel = ""
+	p.SourcePermalink = ""
+	p.SourceRef = "2026-09-01T22:00:00Z"
+
+	id, err := s.CreateProposal(p)
+	if err != nil {
+		t.Fatalf("session proposal with no permalink must be accepted: %v", err)
+	}
+	got, err := s.GetProposal(id)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if got.Source != "session" || got.SourcePermalink != "" {
+		t.Errorf("round-trip: source=%q permalink=%q", got.Source, got.SourcePermalink)
+	}
+}
+
+func TestCreateProposal_SlackSourceStillRequiresPermalink(t *testing.T) {
+	s := newTestStore(t)
+
+	noLink := sampleProposal("slack with no permalink")
+	noLink.SourceRef = "1756600000.000501"
+	noLink.SourcePermalink = ""
+	if _, err := s.CreateProposal(noLink); err == nil {
+		t.Error("want error: a slack proposal with no permalink is a queue row with no way back")
+	}
+
+	noChannel := sampleProposal("slack with no channel")
+	noChannel.SourceRef = "1756600000.000502"
+	noChannel.SourceChannel = ""
+	if _, err := s.CreateProposal(noChannel); err == nil {
+		t.Error("want error: a slack proposal with no channel")
+	}
+}
+
+// Dedup must keep working across sources — two session proposals stamped at the
+// same instant are the same request claimed twice.
+func TestCreateProposal_SessionSourceStillDedups(t *testing.T) {
+	s := newTestStore(t)
+
+	mk := func() *proposal {
+		p := sampleProposal("session dup")
+		p.Source = "session"
+		p.SourceChannel = ""
+		p.SourcePermalink = ""
+		p.SourceRef = "2026-09-01T22:05:00Z"
+		return p
+	}
+	if _, err := s.CreateProposal(mk()); err != nil {
+		t.Fatalf("first session proposal: %v", err)
+	}
+	if _, err := s.CreateProposal(mk()); err == nil {
+		t.Fatal("want UNIQUE(source, source_ref) to still reject a duplicate session proposal")
+	}
+}

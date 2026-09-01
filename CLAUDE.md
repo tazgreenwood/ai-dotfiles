@@ -206,6 +206,13 @@ Thin cross-project index backing `/lead`'s routing decision (STEP 1a). One row p
 
 `purpose` is a one-line project description stored in project metadata via `registry_set(name, "purpose", ...)`. It is the entire routing signal, so a vague one degrades routing silently. Near-identical names must be distinguishable from their purpose lines alone — `mapi` (local dev orchestrator, no product code) vs `mapi-server` (the Laravel API) vs `mapi-js` (the browser SDK) is the known collision.
 
+#### `registry_write_run(name, proposal_id?, ticket?, phase?, status?, cursor?, note?) -> {ok, id}`
+#### `registry_get_runs(name, status?, id?) -> {runs: [...]}`
+#### `registry_update_run(name, id, phase, status, cursor?, note?, ticket?) -> {ok}`
+The `agent_runs` resume spine behind `/lead build`. One row ties proposal → plan → build → ship → PR so an interrupted chain can be **resumed** rather than restarted. `phase` is `planning|building|shipping|done|blocked`; `status` is `running|paused|done|failed`; `cursor` is free-form JSON (in practice `{ticket, branch, last_step, pr_url}`).
+
+`registry_update_run` writes phase, status, cursor, note and ticket in a **single statement** — deliberately not the `UpdateStep` read-modify-write, since this is the row a concurrent resume reads. **Omitting `cursor` or `ticket` leaves the stored value unchanged**: a phase-only advance that blanked the cursor would make a resume re-run completed steps, and the ticket can only ever arrive on a later advance because the run is opened *before* the key is allocated. Writes are scoped to the caller's project.
+
 #### `registry_write_proposal(name: string, proposal: map[string]any) -> {ok: bool, id: int} | error`
 Creates a proposal — a unit of work awaiting a human decision. Caller supplies `source`, `source_channel`, `source_ref`, `source_permalink` (all required, non-empty), `kind` (`plan|fix|review|improvement`), `summary`, `payload` (the full plan JSON), and optionally `notified_at` (RFC3339).
 
@@ -234,7 +241,7 @@ The supersede path writes `status`, `superseded_by` and `decision_note` in a **s
 | plan | `/plan` or `/plan ONE-XXXX` | ✓ Shipped | registry, jira (optional) |
 | ship | `/ship` or `/ship ONE-XXXX` | ✓ Shipped | registry, bitbucket, jira, security, reviewer, documenter, handover |
 | idea-validation | `/idea-validation` | ✓ Shipped | WebSearch, WebFetch, general-purpose agent |
-| lead (Stuart) | `/lead <request>` or `/lead check` | ✓ Shipped | registry, slack (bot token), lead-workflow.js |
+| lead (Stuart) | `/lead <request>` · `/lead check` · `/lead build [id]` · `--resume <run>` · `--in-session` | ✓ Shipped | registry, slack (bot token), lead-workflow.js, build, ship |
 
 ---
 
@@ -252,6 +259,8 @@ Full architecture-decision history lives in the registry event log, not here —
 - **Audit entry**: Metadata about shipped work (ticket, type, impact, PR URL, files changed, story points, labels, date).
 - **Registry**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db` w/ project metadata, plans, audit trails, issues, deploy checks, events, proposals. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`) hard-dependent on registry uptime (no local fallback).
 - **Stuart**: The team lead persona (`claude/skills/lead.md`, invoked `/lead`). Takes a prose request, produces a plan proposal, notifies a human, and records their decision. Named a lead rather than an assistant on purpose: the prompt requires it to push back when a request is the wrong work, since deference is the failure mode that produces plausible plans for bad ideas. Renamed from "Jarvis" on 2026-09-01 along with the removal of the unattended poller.
+- **Agent run**: A row in `agent_runs` — the resumable record of one `/lead build` chain (proposal → plan → build → ship → PR). Carries a `cursor` so `/lead build --resume <id>` re-enters where the chain stopped instead of restarting; a chain that cannot resume cannot survive a crash, a rate limit, a sleeping laptop, or a mid-build question. Query stuck work with `registry_get_runs(project, "paused"|"failed")` — the reason is in `note`.
+- **Question-pause**: When a `/lead build` step hits genuine mid-build ambiguity it commits what is done, sets the run `paused` with the question in `note`, asks in the proposal's Slack thread, and stops — never guessing, never hanging. The next `--resume` reads the reply via `lead-workflow` `mode: "answers"` and continues. Foreseeable ambiguity belongs in the proposal's `assumptions`, where the human sees it before approving.
 - **Project index**: The `registry_index()` view — name, one-line `purpose`, repo, `local_path` and active plan per project. Read by `/lead` STEP 1a to route a request to the right project without opening any other project's context. Ambiguity stops and asks rather than guessing; a mis-route is always visible because the proposal names its project.
 - **Proposal**: A row in the `proposals` table — work awaiting a human decision, distinct from a plan (approved work) and an audit entry (shipped work). Statuses: `pending`, `approved`, `rejected`, `superseded`. Approval sets status **only**; wiring approval to `/build` is a deliberate later phase. Viewable at `/proposals` in registry-ui.
 - **Supersede chain**: A proposal revised after human pushback is never overwritten — a new row is written and the old one moves to `superseded` with `superseded_by` pointing at the successor and the human's note stored as `decision_note`. All three fields move in one transaction, and only a `pending` row can be superseded. Preserves *why* a revision happened, which is the point of the chain.
