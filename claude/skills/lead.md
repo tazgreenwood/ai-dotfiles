@@ -333,7 +333,11 @@ With no id, take the **newest `approved` proposal for the routed project**. Then
 
 1. The proposal exists and `project` matches the routed project.
 2. Its status is exactly **`approved`**. A `pending` proposal has no decision; a `rejected` one was declined; a `superseded` one was replaced. Refuse and name the actual status.
-3. **No run already exists for it.** Call `registry_get_runs(project)` and refuse if any run carries this `proposal_id`. Report that run's id, phase and status instead — the human wants `--resume`, not a second build.
+3. **It has not already been built.** Check **both**, because they cover different eras and either alone has a hole:
+   - `registry_get_runs(project)` — refuse if any run carries this `proposal_id`. Report that run's id, phase and status; the human wants `--resume`, not a second build.
+   - `registry_list_plans(project)` + `registry_get_plan` — refuse if any plan carries `from_proposal: <id>`.
+
+   The run check alone misses anything built before `agent_runs` existed (DOTFILES-36 was converted by hand, so proposal 2 has a plan and no run — `/lead build 2` would cheerfully rebuild it). The plan check alone misses a run that opened and then failed before its plan was written. Check both.
 
 ### 8b. Open the run, allocate the ticket, write the plan
 
