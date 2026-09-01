@@ -253,9 +253,13 @@ type ProposalRow struct {
 	SourceChannel   string `json:"source_channel"`
 	SourcePermalink string `json:"source_permalink"`
 	// NotifiedAt is empty when the DB column is NULL — i.e. the proposal was
-	// recorded but never actually delivered to Slack. The template renders
-	// that as "Not sent" rather than an anchor, so the queue never offers a
-	// dead exit.
+	// recorded but never actually delivered to Slack.
+	//
+	// Delivery status and link availability are INDEPENDENT (DOTFILES-39). The
+	// template gates the "Open in Slack" anchor on SourcePermalink alone and
+	// shows a "Not sent" badge alongside it when NotifiedAt is empty. Do NOT
+	// re-gate the anchor on NotifiedAt: a row whose Slack post failed still
+	// carries a valid permalink, and hiding it was the bug.
 	NotifiedAt   string `json:"notified_at,omitempty"`
 	DecisionNote string `json:"decision_note,omitempty"`
 	CreatedAt    string `json:"created_at"`
