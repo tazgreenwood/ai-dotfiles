@@ -27,7 +27,8 @@ func setupFixtureDir(t *testing.T) (dataDir string, cleanup func()) {
 }
 
 // openFixtureDB opens (creating if needed) the registry.db under dir and
-// ensures the schema mirrors claude/mcp/server/store.go's createSchema.
+// ensures the schema mirrors claude/mcp/server/store.go's createSchema
+// (projects/plans/audit/issues/proposals/deploy_checks).
 func openFixtureDB(t *testing.T, dir string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "registry.db"))
@@ -59,6 +60,23 @@ func openFixtureDB(t *testing.T, dir string) *sql.DB {
 			project TEXT NOT NULL,
 			reported_at TEXT NOT NULL,
 			data TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS proposals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			source TEXT NOT NULL,
+			source_channel TEXT NOT NULL,
+			source_permalink TEXT NOT NULL,
+			source_ref TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			status TEXT NOT NULL,
+			superseded_by INTEGER,
+			decision_note TEXT NOT NULL DEFAULT '',
+			notified_at TEXT,
+			decided_at TEXT,
+			created_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS deploy_checks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

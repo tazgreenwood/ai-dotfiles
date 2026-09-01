@@ -1,0 +1,100 @@
+{{define "content"}}
+<div class="mb-6 flex items-end justify-between gap-4 flex-wrap" data-global>
+  <div>
+    <h1 class="text-2xl font-bold text-zinc-900 dark:text-zinc-50">Proposals</h1>
+    <p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Work awaiting your decision. Read-only &mdash; approve or push back in the Slack thread.</p>
+  </div>
+  <form method="GET" class="flex items-center gap-2">
+    <label for="project-filter" class="sr-only">Filter by project</label>
+    <select
+      id="project-filter"
+      name="project"
+      onchange="this.form.submit()"
+      class="border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 rounded-md px-2 py-1.5 text-sm"
+    >
+      <option value=""{{if eq .Selected ""}} selected{{end}}>All projects</option>
+      {{range .Projects}}
+      <option value="{{.}}"{{if eq . $.Selected}} selected{{end}}>{{.}}</option>
+      {{end}}
+    </select>
+    <label for="status-filter" class="sr-only">Filter by status</label>
+    <select
+      id="status-filter"
+      name="status"
+      onchange="this.form.submit()"
+      class="border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 rounded-md px-2 py-1.5 text-sm"
+    >
+      <option value=""{{if eq .Status ""}} selected{{end}}>All statuses</option>
+      {{range .Statuses}}
+      <option value="{{.}}"{{if eq . $.Status}} selected{{end}}>{{.}}</option>
+      {{end}}
+    </select>
+  </form>
+</div>
+
+<div class="rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+<div class="overflow-x-auto">
+<table class="w-full text-sm border-collapse">
+  <thead>
+    <tr class="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 text-left text-zinc-500 dark:text-zinc-400">
+      <th class="py-2 pl-4 pr-4 font-medium">Project</th>
+      <th class="py-2 pr-4 font-medium">Waiting</th>
+      <th class="py-2 pr-4 font-medium">Status</th>
+      <th class="py-2 pr-4 font-medium">Summary</th>
+      <th class="py-2 pr-4 font-medium">Slack</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{if .Entries}}
+      {{range .Entries}}
+      <tr class="border-b border-zinc-100 dark:border-zinc-800/60 hover:bg-zinc-50 dark:hover:bg-zinc-900/60">
+        <td class="py-2 pl-4 pr-4">
+          <a href="/projects/{{.Project}}" class="text-zinc-600 dark:text-zinc-300 hover:underline">{{.Project}}</a>
+        </td>
+        <td class="py-2 pr-4 text-zinc-500 dark:text-zinc-400 font-mono text-xs">{{with relAge .CreatedAt}}{{.}}{{else}}&mdash;{{end}}</td>
+        <td class="py-2 pr-4">
+          {{if eq .Status "pending"}}
+          <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-500/10 text-amber-700 dark:text-amber-400 ring-1 ring-inset ring-amber-500/20">pending</span>
+          {{else if eq .Status "approved"}}
+          <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 ring-1 ring-inset ring-emerald-500/20">approved</span>
+          {{else if eq .Status "rejected"}}
+          <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-red-500/10 text-red-700 dark:text-red-400 ring-1 ring-inset ring-red-500/20">rejected</span>
+          {{else}}
+          <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 ring-1 ring-inset ring-zinc-500/20">{{.Status}}</span>
+          {{end}}
+        </td>
+        <td class="py-2 pr-4 text-zinc-800 dark:text-zinc-200">
+          <span>{{.Summary}}</span>
+          {{if gt .Revision 1}}
+          <span class="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 ring-1 ring-inset ring-zinc-500/20">
+            rev {{.Revision}}<span class="sr-only"> revision {{.Revision}} &mdash; earlier revisions in the Slack thread</span>
+          </span>
+          {{end}}
+          {{if .Kind}}<span class="ml-1.5 text-xs text-zinc-500 dark:text-zinc-400">{{.Kind}}</span>{{end}}
+        </td>
+        <td class="py-2 pr-4">
+          {{if .NotifiedAt}}
+            {{if .SourcePermalink}}
+            <a href="{{.SourcePermalink}}" rel="noopener noreferrer" class="text-zinc-600 dark:text-zinc-300 hover:underline">Open in Slack &rarr;</a>
+            {{else}}
+            <span class="text-zinc-500 dark:text-zinc-400">Sent &mdash; open your Slack DMs</span>
+            {{end}}
+          {{else}}
+          <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 ring-1 ring-inset ring-zinc-500/20">Not sent</span>
+          <div class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Recorded but never delivered to Slack.</div>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    {{else}}
+      <tr>
+        <td colspan="5" class="py-4 text-center text-zinc-500 dark:text-zinc-400">
+          {{if eq .Status "pending"}}Nothing awaiting your approval.{{else}}No proposals yet &mdash; the agent will DM you when it has one.{{end}}
+        </td>
+      </tr>
+    {{end}}
+  </tbody>
+</table>
+</div>
+</div>
+{{end}}

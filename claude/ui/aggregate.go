@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"sort"
 	"time"
 )
@@ -222,4 +223,159 @@ func AggregateDeployChecks(projectFilter string) []DeployCheckWithProject {
 		return deployCheckSortKey(out[i].DeployCheckEntry) > deployCheckSortKey(out[j].DeployCheckEntry)
 	})
 	return out
+}
+
+// ── proposals (DOTFILES-34) ──────────────────────────────────────────────────
+//
+// The Proposals tab is a QUEUE, not a record: it answers "what is waiting on
+// me?" rather than "what happened recently?". That inverts two conventions the
+// tabs above deliberately share, and both inversions are intentional:
+//
+//  1. Sort. Every Aggregate* above returns newest-first. Here pending
+//     proposals come first and OLDEST-first inside that group, because the
+//     thing that has been waiting on a human the longest is the thing most at
+//     risk of being forgotten. Non-pending rows keep the newest-first house
+//     convention, since for them the queue framing no longer applies.
+//  2. Row count. One row per revision CHAIN, not per proposal. A pushback
+//     re-plan supersedes the prior revision and both are preserved in the
+//     table, but a queue that lists five revisions of one request as five
+//     things to decide is lying about how much work is waiting. Superseded
+//     revisions stay readable in the Slack thread the row links to.
+
+// ProposalRow is one proposal flattened for the read-only Proposals queue,
+// tagged with its project and its position in its revision chain.
+type ProposalRow struct {
+	Project         string `json:"project"`
+	ID              int64  `json:"id"`
+	Kind            string `json:"kind"`
+	Summary         string `json:"summary"`
+	Status          string `json:"status"`
+	SourceChannel   string `json:"source_channel"`
+	SourcePermalink string `json:"source_permalink"`
+	// NotifiedAt is empty when the DB column is NULL — i.e. the proposal was
+	// recorded but never actually delivered to Slack. The template renders
+	// that as "Not sent" rather than an anchor, so the queue never offers a
+	// dead exit.
+	NotifiedAt   string `json:"notified_at,omitempty"`
+	DecisionNote string `json:"decision_note,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	// Revision is 1 for a first-cut proposal, N for the head of a chain of N
+	// revisions. Rendered as a static "rev N" badge.
+	Revision int `json:"revision"`
+}
+
+// ReadProposals reads every proposal row across all projects (or one project
+// when projectFilter is non-empty), unfiltered by status. Callers filter and
+// sort; the chain walk in AggregateProposals needs the superseded rows even
+// when it won't render them.
+func ReadProposals(projectFilter string) ([]ProposalRow, map[int64]int64, error) {
+	db, err := openDB()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer db.Close()
+
+	query := `SELECT id, project, kind, summary, status, source_channel,
+		source_permalink, notified_at, decision_note, created_at, superseded_by
+		FROM proposals`
+	var args []any
+	if projectFilter != "" {
+		query += ` WHERE project = ?`
+		args = append(args, projectFilter)
+	}
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var out []ProposalRow
+	// predecessor maps a proposal id to the revision it superseded, so a
+	// chain can be walked backwards from its head to count revisions.
+	predecessor := map[int64]int64{}
+	for rows.Next() {
+		var p ProposalRow
+		var notifiedAt, decisionNote sql.NullString
+		var supersededBy sql.NullInt64
+		if err := rows.Scan(
+			&p.ID, &p.Project, &p.Kind, &p.Summary, &p.Status, &p.SourceChannel,
+			&p.SourcePermalink, &notifiedAt, &decisionNote, &p.CreatedAt, &supersededBy,
+		); err != nil {
+			return nil, nil, err
+		}
+		p.NotifiedAt = notifiedAt.String
+		p.DecisionNote = decisionNote.String
+		if supersededBy.Valid {
+			predecessor[supersededBy.Int64] = p.ID
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return out, predecessor, nil
+}
+
+// AggregateProposals returns the Proposals queue: one row per revision chain
+// (superseded revisions are never listed), optionally narrowed to one project
+// and/or one status, sorted pending-first / oldest-first within pending.
+//
+// An empty status means "every non-superseded status". Passing status
+// "superseded" explicitly is honoured, for completeness — it is not offered in
+// the UI filter.
+func AggregateProposals(projectFilter, status string) []ProposalRow {
+	all, predecessor, err := ReadProposals(projectFilter)
+	if err != nil {
+		return nil
+	}
+
+	var out []ProposalRow
+	for _, p := range all {
+		if status == "" {
+			if p.Status == "superseded" {
+				continue
+			}
+		} else if p.Status != status {
+			continue
+		}
+		p.Revision = revisionDepth(p.ID, predecessor)
+		out = append(out, p)
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		pi, pj := out[i].Status == "pending", out[j].Status == "pending"
+		if pi != pj {
+			return pi
+		}
+		if pi {
+			// Oldest first: longest-waiting decision at the top.
+			if out[i].CreatedAt != out[j].CreatedAt {
+				return out[i].CreatedAt < out[j].CreatedAt
+			}
+			return out[i].ID < out[j].ID
+		}
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt > out[j].CreatedAt
+		}
+		return out[i].ID > out[j].ID
+	})
+	return out
+}
+
+// revisionDepth counts how many revisions precede id in its chain, returning
+// 1 for a proposal that superseded nothing. The visited set guards against a
+// cycle in the chain (which the transactional SupersedeProposal writer should
+// make impossible) rather than hanging the request.
+func revisionDepth(id int64, predecessor map[int64]int64) int {
+	depth := 1
+	visited := map[int64]bool{id: true}
+	for {
+		prev, ok := predecessor[id]
+		if !ok || visited[prev] {
+			return depth
+		}
+		visited[prev] = true
+		id = prev
+		depth++
+	}
 }
