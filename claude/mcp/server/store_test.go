@@ -685,7 +685,7 @@ func TestUpdateRun_AdvancesCursorAtomically(t *testing.T) {
 	}
 
 	newCursor := map[string]any{"branch": "feat/x", "last_step": float64(3), "pr_url": ""}
-	if err := s.UpdateRun(id, "building", "running", newCursor, "step 3 done"); err != nil {
+	if err := s.UpdateRun(id, "building", "running", newCursor, "step 3 done", "DOTFILES-77"); err != nil {
 		t.Fatalf("UpdateRun: %v", err)
 	}
 
@@ -710,19 +710,55 @@ func TestUpdateRun_AdvancesCursorAtomically(t *testing.T) {
 	}
 }
 
+// The run opens before the ticket key exists, so the ticket can only arrive on
+// a later advance. The first real /lead build finished with an empty ticket
+// column because UpdateRun had no way to set it.
+func TestUpdateRun_SetsTicketLaterAndPreservesItWhenOmitted(t *testing.T) {
+	s := newTestStore(t)
+	r := sampleRun()
+	r.Ticket = "" // opened before allocation, as /lead build STEP 8b does
+	id, err := s.CreateRun(r)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	if err := s.UpdateRun(id, "building", "running", nil, "plan written", "DOTFILES-42"); err != nil {
+		t.Fatalf("UpdateRun with ticket: %v", err)
+	}
+	got, err := s.GetRun(id)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Ticket != "DOTFILES-42" {
+		t.Fatalf("ticket: want DOTFILES-42 set on advance, got %q", got.Ticket)
+	}
+
+	// A later advance that omits the ticket must not blank it.
+	if err := s.UpdateRun(id, "shipping", "running", nil, "entering ship", ""); err != nil {
+		t.Fatalf("UpdateRun without ticket: %v", err)
+	}
+	got, err = s.GetRun(id)
+	if err != nil {
+		t.Fatalf("GetRun after second advance: %v", err)
+	}
+	if got.Ticket != "DOTFILES-42" {
+		t.Errorf("ticket must survive an advance that omits it, got %q", got.Ticket)
+	}
+}
+
 func TestUpdateRun_RejectsBadInputAndUnknownID(t *testing.T) {
 	s := newTestStore(t)
 	id, err := s.CreateRun(sampleRun())
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	if err := s.UpdateRun(id, "hammering", "running", nil, ""); err == nil {
+	if err := s.UpdateRun(id, "hammering", "running", nil, "", ""); err == nil {
 		t.Error("want error for invalid phase")
 	}
-	if err := s.UpdateRun(id, "building", "vibing", nil, ""); err == nil {
+	if err := s.UpdateRun(id, "building", "vibing", nil, "", ""); err == nil {
 		t.Error("want error for invalid status")
 	}
-	if err := s.UpdateRun(999999, "building", "running", nil, ""); err == nil {
+	if err := s.UpdateRun(999999, "building", "running", nil, "", ""); err == nil {
 		t.Error("want error for unknown run id")
 	}
 }
@@ -739,7 +775,7 @@ func TestListRuns_FiltersByStatusAndProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun paused: %v", err)
 	}
-	if err := s.UpdateRun(pausedID, "building", "paused", nil, "needs an answer"); err != nil {
+	if err := s.UpdateRun(pausedID, "building", "paused", nil, "needs an answer", ""); err != nil {
 		t.Fatalf("UpdateRun: %v", err)
 	}
 	other := sampleRun()

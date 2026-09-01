@@ -1006,7 +1006,7 @@ func (s *store) GetRun(id int64) (*agentRun, error) {
 // note move together and updated_at is restamped. Deliberately NOT the
 // read-modify-write shape used by UpdateStep: this is the record a concurrent
 // resume reads to decide where to re-enter.
-func (s *store) UpdateRun(id int64, phase, status string, cursor map[string]any, note string) error {
+func (s *store) UpdateRun(id int64, phase, status string, cursor map[string]any, note, ticket string) error {
 	if err := validateRunPhaseStatus(phase, status); err != nil {
 		return err
 	}
@@ -1020,13 +1020,19 @@ func (s *store) UpdateRun(id int64, phase, status string, cursor map[string]any,
 	}
 	// A nil cursor means "leave the existing cursor alone" — an advance that
 	// only changes phase must not silently erase where the chain got to.
+	// An empty ticket means the same as a nil cursor: leave it alone. The run is
+	// opened BEFORE the ticket key is allocated (so a crash in between leaves a
+	// visible `planning` run rather than silence), so the ticket can only ever
+	// arrive on a later advance. Without this the column was unfillable — caught
+	// by the first real /lead build run, where run 2 finished with no ticket.
 	res, err := s.db.Exec(
 		`UPDATE agent_runs
 		    SET phase = ?, status = ?,
 		        cursor = CASE WHEN ? = '' THEN cursor ELSE ? END,
+		        ticket = CASE WHEN ? = '' THEN ticket ELSE ? END,
 		        note = ?, updated_at = ?
 		  WHERE id = ?`,
-		phase, status, cursorJSON, cursorJSON, note,
+		phase, status, cursorJSON, cursorJSON, ticket, ticket, note,
 		time.Now().UTC().Format(time.RFC3339), id,
 	)
 	if err != nil {

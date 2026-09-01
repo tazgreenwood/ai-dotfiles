@@ -272,7 +272,7 @@ func registryUpdateRun(args map[string]any) ToolResult {
 	if c, ok := args["cursor"].(map[string]any); ok {
 		cursor = c
 	}
-	if err := s.UpdateRun(id, phase, status, cursor, str(args, "note")); err != nil {
+	if err := s.UpdateRun(id, phase, status, cursor, str(args, "note"), str(args, "ticket")); err != nil {
 		return toolErr(err.Error())
 	}
 	return toolOK(map[string]any{"ok": true})
@@ -805,6 +805,7 @@ func registryTools() []Tool {
 					"status": map[string]any{"type": "string"},
 					"cursor": map[string]any{"type": "object"},
 					"note":   map[string]any{"type": "string"},
+					"ticket": map[string]any{"type": "string"},
 				},
 				"required": []string{"name", "id", "phase", "status"},
 			},

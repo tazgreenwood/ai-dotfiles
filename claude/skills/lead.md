@@ -346,7 +346,7 @@ With no id, take the **newest `approved` proposal for the routed project**. Then
 3. `registry_derive_branch_name(ticket, ticket_type, description)`.
 4. Take `payload` as the plan body. **If it has no end-to-end integration step, append one** per `plan.md` STEP 5c — proposals written before that rule exists, or by an older Stuart, must not skip it.
 5. `registry_write_plan(project, ticket, plan)` with `from_proposal: <id>` and the branch.
-6. `registry_update_run(project, run_id, phase="building", status="running", cursor={ticket, branch, last_step: 0})`.
+6. `registry_update_run(project, run_id, phase="building", status="running", ticket=<the allocated key>, cursor={ticket, branch, last_step: 0})`. **Pass `ticket` here** — the run was opened before the key existed, so this advance is the only place it can be recorded. Omitting it leaves the run unfindable by ticket.
 
 ### 8c. Chain into /build and /ship — WITHOUT weakening either gate
 
