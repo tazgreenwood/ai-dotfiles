@@ -115,6 +115,22 @@ if [ -f "$BINARY" ]; then
   fi
 fi
 
+# ── Bitbucket MCP Server ───────────────────────────────────────────────────────
+# Built from source like the registry server above. ~/.claude.json points the
+# bitbucket MCP server at this path, and the binary is gitignored, so a fresh
+# clone has nothing here until this runs.
+BB_DIR="$DOTFILES/claude/mcp/bitbucket"
+BB_BINARY="$BB_DIR/bitbucket"
+
+if [ -f "$BB_DIR/main.go" ]; then
+  echo "Building bitbucket MCP server..."
+  if command -v go &>/dev/null; then
+    (cd "$BB_DIR" && go build -o bitbucket .) && echo "  ✓ built $BB_BINARY"
+  else
+    echo "  ⚠ Go not found — install Go then re-run install.sh"
+  fi
+fi
+
 # ── Claude Desktop MCP servers ──────────────────────────────────────────────────
 # Claude Desktop reads its own config, separate from ~/.claude.json (CLI-only).
 # Mirror the registry + bitbucket servers already configured for the CLI so both
