@@ -149,6 +149,8 @@ Reply "approve" to register it and plan the request, or reply with a corrected p
 
 Then STEP 6 reports as usual and **stops**. Approving a registration is handled in STEP 7; nothing is written to the registry here.
 
+**`--in-session` on a registration.** STEP 3's in-session path takes the decision right there, and STEP 7 is check-mode only — so an in-session `approve` would otherwise mark the row `approved` and stop, registering nothing and planning nothing, which is precisely the acceptance criterion ("approving a registration registers the project AND plans the original request") failing on a route nobody walked. So: when the human approves a `kind: "registration"` proposal **in session**, run **B, C, D and E of STEP 7's approved-registration branch**, unchanged, with the one substitution that D posts nothing to Slack — the follow-up `kind: "plan"` proposal is printed in full and persisted with `source: "session"`, a fresh RFC3339 `source_ref`, and `source_channel`/`source_permalink` as empty strings. Every other guard in B–E applies identically, including E: the follow-up proposal is `pending` and is never approved, built, or written as a plan row by this step. An in-session **rejection** records the rejection and registers nothing.
+
 ---
 
 ## STEP 1b: CHECK MODE — RUN THE WORKFLOW
@@ -212,7 +214,17 @@ registry_init_project(name=<name>, localPath=<resolved path>)
 registry_set(<name>, "purpose", <the confirmed purpose>)
 ```
 
-Pass `workspace` only if the remote makes it unambiguous (e.g. a `github.com/<workspace>/<repo>` remote); otherwise omit it — a wrong workspace is worse than a missing one. Do not invent `base`, `prTarget`, `cluster` or any other field: Taz confirmed a name, a path and a purpose, and nothing else.
+Pass `workspace` only if the remote makes it unambiguous (e.g. a `github.com/<workspace>/<repo>` remote); otherwise omit it — a wrong workspace is worse than a missing one.
+
+**Pass `base` and `prTarget` explicitly, read from the repo.** `registry_init_project` does not leave omitted fields unset — it stamps its own defaults (`base: "production"`, `prTarget: "staging"`, plus a whole `deploy` block). Those defaults are silently wrong for any repo that does not use them: a repo whose default branch is `master` gets `base: "production"`, and every later `/plan`, `/build` and `/ship` then branches from and targets a branch that does not exist. So resolve the real default branch first:
+
+```
+git -C <path> symbolic-ref --short refs/remotes/origin/HEAD   # e.g. origin/master → master
+```
+
+Pass that as `base`. For `prTarget`, use the repo's integration branch when the remote clearly has one (`staging`, `develop`); otherwise pass the same default branch — a `prTarget` equal to `base` is honest, a nonexistent one is not. If the default branch cannot be resolved, omit both, and **say in the report that `base`/`prTarget` were left at the tool's defaults and need checking**.
+
+Do not invent `cluster`, `profile`, `logGroup` or any other field: Taz confirmed a name, a path and a purpose, and nothing else. `registry_init_project` writes a `deploy` block regardless — mention in the report that it is defaulted, not configured.
 
 If `registry_init_project` fails, report the error and stop. If it succeeds but `registry_set` fails, **say so loudly** — the project is registered with no `purpose`, which degrades all future routing silently, and Taz must set it.
 
@@ -242,7 +254,7 @@ If the request is too vague to plan, produce a proposal whose `summary` says wha
 
 The push notification is the whole point, so the delivery constraint is not negotiable:
 
-**`--in-session` skips this step entirely.** When the human passed it, print the proposal in full — summary, every step, risk, assumptions, and any pushback you have on the request — and take the decision right there. Approving in-session persists the proposal and immediately records `registry_update_proposal(status="approved", decision_note="approved in session")`. Use `source: "session"`, `source_ref` = an RFC3339 UTC stamp, and omit `source_channel`/`source_permalink` (the store accepts empty ones for this source only). Print it in full, never summarized: with build mode one command away, the proposal review is the human's main checkpoint.
+**`--in-session` skips this step entirely.** When the human passed it, print the proposal in full — summary, every step, risk, assumptions, and any pushback you have on the request — and take the decision right there. Approving in-session persists the proposal and immediately records `registry_update_proposal(status="approved", decision_note="approved in session")`. Use `source: "session"`, `source_ref` = an RFC3339 UTC stamp, and pass `source_channel` and `source_permalink` as **empty strings** — the store accepts empty ones for this source only, but `registry_write_proposal`'s tool schema lists both as **required**, so *omitting* them is an input-validation error, not a permitted shortcut. Send `""`, never nothing. Print it in full, never summarized: with build mode one command away, the proposal review is the human's main checkpoint.
 
 Otherwise, Slack is the default surface:
 
@@ -299,7 +311,7 @@ Parse `.ok`, `.error` and `.ts` from the JSON response.
 
 Use the shape in `resources.slack.stuart_permalink_command`, with `channel` = `resources.slack.stuart_channel` and `message_ts` = `source_ref`. Needs no read scopes.
 
-- **`--in-session` skips this step entirely** — there is no Slack message to link to. Leave `source_permalink` empty; the store accepts that for `source: "session"` only, and the UI renders the row without a Slack exit rather than with a dead one.
+- **`--in-session` skips this step entirely** — there is no Slack message to link to. Pass `source_permalink` as an **empty string** (`""`), not omitted: the store accepts empty for `source: "session"` only, but the tool schema still requires the key. The UI renders the row without a Slack exit rather than with a dead one.
 - If `source_ref` is unknown (a hand-run `/lead <request>` that still posted to Slack), use the ts of the message you just posted in STEP 3 as both `source_ref` and the permalink target. The thread is then still reachable from the queue.
 - If the permalink call fails and STEP 3 succeeded, fall back to the permalink of your own posted message. If both are unavailable, **STOP** and report — `registry_write_proposal` requires a non-empty `source_permalink`, and a queue row with no way back to the conversation is not actionable.
 
@@ -388,7 +400,11 @@ registry_init_project(name=<payload.name>, localPath=<payload.local_path>)
 registry_set(<payload.name>, "purpose", <the purpose from A>)
 ```
 
-Pass `workspace` only if `payload.remote` makes it unambiguous (e.g. a `github.com/<workspace>/<repo>` remote); otherwise omit it and let the defaults stand — a wrong workspace is worse than a missing one. Do not invent `base`, `prTarget`, `cluster` or any other field: they are not in the payload, so they were not approved.
+Pass `workspace` only if `payload.remote` makes it unambiguous (e.g. a `github.com/<workspace>/<repo>` remote); otherwise omit it and let the defaults stand — a wrong workspace is worse than a missing one.
+
+**Pass `base` and `prTarget` explicitly, resolved from `payload.local_path`, exactly as STEP 1c step 5 describes.** "Letting the defaults stand" is not an option for these two: `registry_init_project` stamps `base: "production"` / `prTarget: "staging"` on every project, and a repo whose default branch is `master` is then registered pointing at branches that do not exist — which breaks every later `/plan`, `/build` and `/ship` against it. Read `git -C <payload.local_path> symbolic-ref --short refs/remotes/origin/HEAD` and pass the result as `base`; if it cannot be resolved, omit both and say so in the report.
+
+Do not invent `cluster`, `profile`, `logGroup` or any other field: they are not in the payload, so they were not approved.
 
 If `registry_init_project` fails, **stop this entry** and report the error. Do not proceed to C: planning against a project that does not exist repeats the mis-route this whole branch exists to prevent. If `registry_init_project` succeeds but `registry_set` fails, report loudly — the project is registered with **no** `purpose`, which silently degrades all future routing, and Taz must set it.
 
@@ -511,6 +527,7 @@ A correct `/lead register <name-or-path>` run leaves:
 - **No** Slack message and **no** row in `registry_get_proposals(project)` — this mode never proposes
 - On a yes: the project in `registry_index()` with its `local_path` and the confirmed `purpose`; **no** plan row, **no** proposal, **no** branch, no file in any repo modified
 - On a corrected purpose: the same, with **the corrected** line stored, not the drafted one
+- In both cases, `registry_get_project(name).repo.base` matching the repo's **actual** default branch (`git -C <path> symbolic-ref --short refs/remotes/origin/HEAD`), not the `production`/`staging` pair `registry_init_project` stamps by default
 - Re-running it for an already-registered name or path → an `already registered` report naming the existing row; that row's `purpose` and `local_path` unchanged
 - An ambiguous bare name → the candidates listed with their paths and a question; nothing registered
 
