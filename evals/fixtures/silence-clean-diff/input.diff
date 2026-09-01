@@ -1,0 +1,16 @@
+--- a/claude/mcp/server/store.go
++++ b/claude/mcp/server/store.go
+@@ -140,7 +140,11 @@ func (s *store) ListProjects() ([]string, error) {
+ 	var names []string
+ 	for rows.Next() {
+ 		var name string
+ 		if err := rows.Scan(&name); err != nil {
+ 			return nil, err
+ 		}
+ 		names = append(names, name)
+ 	}
++	if err := rows.Err(); err != nil {
++		return nil, err
++	}
+ 	return names, nil
+ }

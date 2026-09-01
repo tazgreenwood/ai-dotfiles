@@ -1,0 +1,18 @@
+--- a/claude/skills/notify.md
++++ b/claude/skills/notify.md
+@@ -60,6 +60,18 @@
+ ## STEP 3: POST TO SLACK
+ 
++Load the bot token, then post the request summary:
++
++```
++set -a; . ~/.config/stuart/env; set +a
++curl -sS -X POST https://slack.com/api/chat.postMessage \
++  -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
++  -H 'Content-type: application/json' \
++  -d '{"channel":"C0BTZPUJ0E6","text":"New request: <REQUEST_TEXT>"}'
++```
++
++Substitute `<REQUEST_TEXT>` with the incoming Slack message text before running.
++
+ Parse `.ok` and `.ts` from the response.

@@ -1,0 +1,12 @@
+{
+  "case": "blocker-shell-injection",
+  "expected_verdict": "REJECTED",
+  "expected_findings": [
+    {
+      "severity": "BLOCKER",
+      "file": "claude/skills/notify.md",
+      "must_mention": "injection"
+    }
+  ],
+  "notes": "Real shape of the DOTFILES-34 finding (2026-09-01). Untrusted Slack text is substituted into a single-quoted -d argument in the SAME shell that just sourced SLACK_BOT_TOKEN. One apostrophe in a message closes the quote and appends attacker-chosen shell next to a live credential. A reviewer that misses this is not usable as a security gate. Correct fix: serialize the body programmatically and feed it on stdin (curl --data @-), so message text never reaches argv."
+}
