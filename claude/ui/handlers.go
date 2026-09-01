@@ -4,6 +4,7 @@ import (
 	"embed"
 	"html/template"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -23,6 +24,43 @@ func dateOnly(ts string) string {
 		return ts[:10]
 	}
 	return ts
+}
+
+// relAge renders an RFC3339 timestamp as a coarse relative age ("6h ago").
+//
+// Deliberately NOT dateOnly: the Proposals queue is about how long something
+// has been waiting on a human, and a date string cannot distinguish a proposal
+// raised 10 minutes ago from one raised 20 hours ago — both render as today.
+// An unparseable or empty timestamp falls back to the raw string rather than
+// inventing an age.
+func relAge(ts string) string {
+	return relAgeAt(ts, time.Now())
+}
+
+// relAgeAt is relAge with an injectable "now", so the rendering is testable
+// without sleeping.
+func relAgeAt(ts string, now time.Time) string {
+	if ts == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ts
+	}
+	d := now.Sub(t)
+	if d < 0 {
+		return "just now"
+	}
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return strconv.Itoa(int(d.Minutes())) + "m ago"
+	case d < 24*time.Hour:
+		return strconv.Itoa(int(d.Hours())) + "h ago"
+	default:
+		return strconv.Itoa(int(d.Hours()/24)) + "d ago"
+	}
 }
 
 type sidebarItem struct {
@@ -72,6 +110,7 @@ func render(w http.ResponseWriter, r *http.Request, page string, data any) {
 		"sub":             func(a, b int) int { return a - b },
 		"groupColorClass": groupColorClass,
 		"dateOnly":        dateOnly,
+		"relAge":          relAge,
 		"currentPath":     func() string { return currentPath },
 	}).ParseFS(templateFS, "templates/base.html", "templates/"+page)
 	if err != nil {
@@ -97,10 +136,16 @@ type navLink struct {
 	URL   string
 }
 
-// globalTabs returns the 5 fixed global-dashboard sidebar links, in display
+// globalTabs returns the 6 fixed global-dashboard sidebar links, in display
 // order, rendered above the per-project list.
+//
+// Proposals is first, above Kanban, on purpose: it is the only tab holding
+// work that is blocked on the user, and a queue belongs above the records of
+// what already happened. "/" remains Kanban — the ordering here changes what
+// the eye lands on first, not what the root route serves.
 func globalTabs() []navLink {
 	return []navLink{
+		{Label: "Proposals", URL: "/proposals"},
 		{Label: "Kanban", URL: "/"},
 		{Label: "Reviews", URL: "/reviews"},
 		{Label: "Audits", URL: "/audits"},
@@ -356,6 +401,50 @@ func handleDashboardIssues(w http.ResponseWriter, r *http.Request) {
 		Entries:     AggregateIssues(selected),
 	}
 	render(w, r, "dashboard_issues.html", data)
+}
+
+// proposalStatuses are the status values offered in the Proposals tab filter.
+// "superseded" is absent on purpose: a superseded revision is history, not a
+// queue entry, and the list is head-only.
+var proposalFilterStatuses = []string{"pending", "approved", "rejected"}
+
+type dashboardProposalsData struct {
+	Breadcrumbs []breadcrumb
+	Projects    []string
+	Selected    string
+	Status      string
+	Statuses    []string
+	Entries     []ProposalRow
+}
+
+// handleDashboardProposals renders the read-only global Proposals queue:
+// proposals awaiting (or having received) a human decision, aggregated across
+// every project, optionally narrowed by ?project= and ?status=.
+//
+// The status filter defaults to "pending" when the parameter is ABSENT — the
+// default view is the queue, not the archive. An explicitly empty
+// ?status= means "all statuses", which is how the "All statuses" option in
+// the filter form clears it.
+func handleDashboardProposals(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	q := r.URL.Query()
+	selected := q.Get("project")
+	status := "pending"
+	if q.Has("status") {
+		status = q.Get("status")
+	}
+	if status != "" && !slices.Contains(proposalFilterStatuses, status) {
+		status = "pending"
+	}
+	data := dashboardProposalsData{
+		Breadcrumbs: []breadcrumb{{Label: "Proposals"}},
+		Projects:    projectNames(),
+		Selected:    selected,
+		Status:      status,
+		Statuses:    proposalFilterStatuses,
+		Entries:     AggregateProposals(selected, status),
+	}
+	render(w, r, "dashboard_proposals.html", data)
 }
 
 // handleDashboardDeployChecks renders the global Deploy Checks tab: deploy
