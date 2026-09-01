@@ -124,6 +124,12 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryListProjects(args)
 	case "registry_index":
 		return registryIndex(args)
+	case "registry_write_run":
+		return registryWriteRun(args)
+	case "registry_get_runs":
+		return registryGetRuns(args)
+	case "registry_update_run":
+		return registryUpdateRun(args)
 	case "registry_list_plans":
 		return registryListPlans(args)
 	case "registry_get_plan":

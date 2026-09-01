@@ -1594,3 +1594,133 @@ func TestRegistryIndex_EmptyRegistryReturnsEmptyListNotNull(t *testing.T) {
 		t.Errorf("want 0 rows on an empty registry, got %d", len(projects))
 	}
 }
+
+// ── agent runs (DOTFILES-38) ─────────────────────────────────────────────────
+
+func decodeRuns(t *testing.T, result ToolResult) []map[string]any {
+	t.Helper()
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var body struct {
+		Runs []map[string]any `json:"runs"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &body); err != nil {
+		t.Fatalf("unmarshal runs: %v (body: %s)", err, result.Content[0].Text)
+	}
+	return body.Runs
+}
+
+func writeTestRun(t *testing.T, args map[string]any) int64 {
+	t.Helper()
+	result := registryWriteRun(args)
+	if result.IsError {
+		t.Fatalf("registryWriteRun: %s", result.Content[0].Text)
+	}
+	var body struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &body); err != nil {
+		t.Fatalf("unmarshal id: %v", err)
+	}
+	return body.ID
+}
+
+func TestRegistryRun_WriteGetUpdateCycle(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	id := writeTestRun(t, map[string]any{
+		"name":        "private-dotfiles",
+		"proposal_id": float64(12),
+		"ticket":      "DOTFILES-99",
+		"cursor":      map[string]any{"branch": "feat/x", "last_step": float64(0)},
+	})
+
+	runs := decodeRuns(t, registryGetRuns(map[string]any{"name": "private-dotfiles", "id": float64(id)}))
+	if len(runs) != 1 {
+		t.Fatalf("want 1 run by id, got %d", len(runs))
+	}
+	if runs[0]["phase"] != "planning" || runs[0]["status"] != "running" {
+		t.Errorf("defaults: got phase=%v status=%v", runs[0]["phase"], runs[0]["status"])
+	}
+
+	upd := registryUpdateRun(map[string]any{
+		"name": "private-dotfiles", "id": float64(id),
+		"phase": "building", "status": "running",
+		"cursor": map[string]any{"branch": "feat/x", "last_step": float64(2)},
+		"note":   "step 2 done",
+	})
+	if upd.IsError {
+		t.Fatalf("registryUpdateRun: %s", upd.Content[0].Text)
+	}
+
+	runs = decodeRuns(t, registryGetRuns(map[string]any{"name": "private-dotfiles", "id": float64(id)}))
+	cursor, _ := runs[0]["cursor"].(map[string]any)
+	if runs[0]["phase"] != "building" || cursor["last_step"] != float64(2) {
+		t.Errorf("advance did not persist: %v", runs[0])
+	}
+}
+
+// Omitting cursor must not erase where the chain got to — a phase-only advance
+// that wiped the cursor would make resume re-run completed steps.
+func TestRegistryUpdateRun_OmittedCursorIsPreserved(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	id := writeTestRun(t, map[string]any{
+		"name":   "private-dotfiles",
+		"cursor": map[string]any{"last_step": float64(4)},
+	})
+	if r := registryUpdateRun(map[string]any{
+		"name": "private-dotfiles", "id": float64(id),
+		"phase": "shipping", "status": "running",
+	}); r.IsError {
+		t.Fatalf("update: %s", r.Content[0].Text)
+	}
+
+	runs := decodeRuns(t, registryGetRuns(map[string]any{"name": "private-dotfiles", "id": float64(id)}))
+	cursor, _ := runs[0]["cursor"].(map[string]any)
+	if cursor["last_step"] != float64(4) {
+		t.Errorf("cursor must survive a phase-only advance, got %v", runs[0]["cursor"])
+	}
+}
+
+func TestRegistryRun_ScopedToProjectAndValidated(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	id := writeTestRun(t, map[string]any{"name": "private-dotfiles"})
+
+	// A caller scoped to another project must not see or advance this run.
+	if r := registryGetRuns(map[string]any{"name": "emily", "id": float64(id)}); !r.IsError {
+		t.Error("want error reading another project's run by id")
+	}
+	if r := registryUpdateRun(map[string]any{
+		"name": "emily", "id": float64(id), "phase": "building", "status": "running",
+	}); !r.IsError {
+		t.Error("want error advancing another project's run")
+	}
+
+	if r := registryUpdateRun(map[string]any{
+		"name": "private-dotfiles", "id": float64(id), "phase": "hammering", "status": "running",
+	}); !r.IsError {
+		t.Error("want error for invalid phase")
+	}
+	if r := registryGetRuns(map[string]any{"name": "private-dotfiles", "status": "bogus"}); !r.IsError {
+		t.Error("want error for invalid status filter")
+	}
+}
+
+func TestRegistryGetRuns_EmptyReturnsEmptyListNotNull(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	runs := decodeRuns(t, registryGetRuns(map[string]any{"name": "private-dotfiles"}))
+	if runs == nil {
+		t.Fatal("want an empty array, got JSON null — callers iterate this")
+	}
+	if len(runs) != 0 {
+		t.Errorf("want 0 runs, got %d", len(runs))
+	}
+}

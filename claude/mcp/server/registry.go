@@ -184,6 +184,100 @@ func registryListProjects(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"projects": projects})
 }
 
+// ── agent runs (DOTFILES-38) ─────────────────────────────────────────────────
+//
+// The resume spine for `/lead build`: /lead reaches these only over MCP, so the
+// store funcs are unreachable without them.
+
+func registryWriteRun(args map[string]any) ToolResult {
+	name := str(args, "name")
+	if name == "" {
+		return toolErr("name required")
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	r := &agentRun{
+		Project: name,
+		Ticket:  str(args, "ticket"),
+		Phase:   strOr(args, "phase", "planning"),
+		Status:  strOr(args, "status", "running"),
+		Note:    str(args, "note"),
+	}
+	if pid, ok := int64Arg(args, "proposal_id"); ok {
+		r.ProposalID = &pid
+	}
+	if c, ok := args["cursor"].(map[string]any); ok {
+		r.Cursor = c
+	}
+	id, err := s.CreateRun(r)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "id": id})
+}
+
+func registryGetRuns(args map[string]any) ToolResult {
+	name := str(args, "name")
+	if name == "" {
+		return toolErr("name required")
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	if id, ok := int64Arg(args, "id"); ok {
+		r, err := s.GetRun(id)
+		if err != nil {
+			return toolErr(err.Error())
+		}
+		if r.Project != name {
+			return toolErr(fmt.Sprintf("run %d not found for project '%s'", id, name))
+		}
+		return toolOK(map[string]any{"runs": []*agentRun{r}})
+	}
+	runs, err := s.ListRuns(name, str(args, "status"))
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	if runs == nil {
+		runs = []*agentRun{}
+	}
+	return toolOK(map[string]any{"runs": runs})
+}
+
+func registryUpdateRun(args map[string]any) ToolResult {
+	name := str(args, "name")
+	phase := str(args, "phase")
+	status := str(args, "status")
+	id, hasID := int64Arg(args, "id")
+	if name == "" || !hasID || phase == "" || status == "" {
+		return toolErr("name, id, phase and status required")
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	// Scope the write to the caller's project, as the proposals tools do: a
+	// caller working on one project must not advance another's run.
+	r, err := s.GetRun(id)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	if r.Project != name {
+		return toolErr(fmt.Sprintf("run %d not found for project '%s'", id, name))
+	}
+	var cursor map[string]any
+	if c, ok := args["cursor"].(map[string]any); ok {
+		cursor = c
+	}
+	if err := s.UpdateRun(id, phase, status, cursor, str(args, "note"), str(args, "ticket")); err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true})
+}
+
 // registryIndex backs /lead's routing decision: one thin row per project, so
 // choosing WHICH project a request belongs to never requires loading another
 // project's CLAUDE.md or plan bodies.
@@ -668,6 +762,53 @@ func registryTools() []Tool {
 			Name:        "registry_list_projects",
 			Description: "List all projects in the registry",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "registry_write_run",
+			Description: "Open an agent run — the resumable record tying proposal -> plan -> build -> ship -> PR for /lead build.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":        map[string]any{"type": "string"},
+					"proposal_id": map[string]any{"type": "integer"},
+					"ticket":      map[string]any{"type": "string"},
+					"phase":       map[string]any{"type": "string"},
+					"status":      map[string]any{"type": "string"},
+					"cursor":      map[string]any{"type": "object"},
+					"note":        map[string]any{"type": "string"},
+				},
+				"required": []string{"name"},
+			},
+		},
+		{
+			Name:        "registry_get_runs",
+			Description: "List a project's agent runs (newest first), or one by id. Filter with status: running|paused|done|failed.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":   map[string]any{"type": "string"},
+					"status": map[string]any{"type": "string"},
+					"id":     map[string]any{"type": "integer"},
+				},
+				"required": []string{"name"},
+			},
+		},
+		{
+			Name:        "registry_update_run",
+			Description: "Advance an agent run: phase, status, cursor and note move together in one statement. Omit cursor to leave it unchanged.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":   map[string]any{"type": "string"},
+					"id":     map[string]any{"type": "integer"},
+					"phase":  map[string]any{"type": "string"},
+					"status": map[string]any{"type": "string"},
+					"cursor": map[string]any{"type": "object"},
+					"note":   map[string]any{"type": "string"},
+					"ticket": map[string]any{"type": "string"},
+				},
+				"required": []string{"name", "id", "phase", "status"},
+			},
 		},
 		{
 			Name:        "registry_index",
