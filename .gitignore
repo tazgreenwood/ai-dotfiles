@@ -2,3 +2,6 @@ claude/mcp/data/
 claude/mcp/registry/registry
 .DS_Store
 *.local
+
+# compiled MCP server binaries — build with `go build -o registry`
+claude/mcp/server/registry
