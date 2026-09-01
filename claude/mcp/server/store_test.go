@@ -19,8 +19,8 @@ func sampleProposal(summary string) *proposal {
 	return &proposal{
 		Project:         "private-dotfiles",
 		Source:          "slack",
-		SourceChannel:   "C0JARVIS",
-		SourcePermalink: "https://example.slack.com/archives/C0JARVIS/p1756600000000100",
+		SourceChannel:   "C0STUART",
+		SourcePermalink: "https://example.slack.com/archives/C0STUART/p1756600000000100",
 		SourceRef:       "1756600000.000100",
 		Kind:            "plan",
 		Summary:         summary,
@@ -249,7 +249,7 @@ func TestSupersedeProposal_SetsBothFieldsAtomically(t *testing.T) {
 		t.Fatalf("CreateProposal new: %v", err)
 	}
 
-	if err := s.SupersedeProposal(oldID, newID); err != nil {
+	if err := s.SupersedeProposal(oldID, newID, "use sqlite not postgres"); err != nil {
 		t.Fatalf("SupersedeProposal: %v", err)
 	}
 
@@ -262,6 +262,10 @@ func TestSupersedeProposal_SetsBothFieldsAtomically(t *testing.T) {
 	}
 	if got.SupersededBy == nil || *got.SupersededBy != newID {
 		t.Errorf("superseded_by: want %d, got %v", newID, got.SupersededBy)
+	}
+	// The reason for the revision moves in the same transaction as the status.
+	if got.DecisionNote != "use sqlite not postgres" {
+		t.Errorf("decision_note: want the pushback note, got %q", got.DecisionNote)
 	}
 
 	// Both revisions are preserved.
@@ -292,10 +296,10 @@ func TestSupersedeProposal_MidTransactionFailureAppliesNeither(t *testing.T) {
 		t.Fatalf("CreateProposal: %v", err)
 	}
 
-	// Superseding by a non-existent id fails the in-transaction existence check,
-	// which runs AFTER the UPDATE has already been applied inside the tx. If the
-	// write weren't transactional, status/superseded_by would be left mutated.
-	if err := s.SupersedeProposal(oldID, 999999); err == nil {
+	// Superseding by a non-existent id fails the in-transaction existence check.
+	// If the write weren't transactional, status/superseded_by/decision_note
+	// could be left mutated.
+	if err := s.SupersedeProposal(oldID, 999999, "note that must not land"); err == nil {
 		t.Fatal("want error superseding by a non-existent proposal, got nil")
 	}
 
@@ -318,8 +322,77 @@ func TestSupersedeProposal_UnknownOldID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProposal: %v", err)
 	}
-	if err := s.SupersedeProposal(999999, newID); err == nil {
+	if err := s.SupersedeProposal(999999, newID, ""); err == nil {
 		t.Fatal("want error for unknown old proposal id, got nil")
+	}
+}
+
+// A row that already carries a human's decision must not have it rewritten by a
+// supersede — approval is the containment of the whole propose-only design.
+func TestSupersedeProposal_RefusesAlreadyDecidedRow(t *testing.T) {
+	s := newTestStore(t)
+
+	oldP := sampleProposal("revision 1")
+	oldP.SourceRef = "1756600000.000030"
+	oldID, err := s.CreateProposal(oldP)
+	if err != nil {
+		t.Fatalf("CreateProposal old: %v", err)
+	}
+	newP := sampleProposal("revision 2")
+	newP.SourceRef = "1756600000.000031"
+	newID, err := s.CreateProposal(newP)
+	if err != nil {
+		t.Fatalf("CreateProposal new: %v", err)
+	}
+	if err := s.UpdateProposalStatus(oldID, "approved", "lgtm"); err != nil {
+		t.Fatalf("UpdateProposalStatus: %v", err)
+	}
+
+	if err := s.SupersedeProposal(oldID, newID, "actually change it"); err == nil {
+		t.Fatal("want error superseding an approved proposal, got nil")
+	}
+
+	got, err := s.GetProposal(oldID)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if got.Status != "approved" {
+		t.Errorf("status: want approved preserved, got %q", got.Status)
+	}
+	if got.DecisionNote != "lgtm" {
+		t.Errorf("decision_note: want the human's note preserved, got %q", got.DecisionNote)
+	}
+}
+
+// A caller scoped to one project must not be able to point its revision chain
+// at another project's row.
+func TestSupersedeProposal_RefusesCrossProjectSuccessor(t *testing.T) {
+	s := newTestStore(t)
+
+	oldP := sampleProposal("revision 1")
+	oldP.SourceRef = "1756600000.000040"
+	oldID, err := s.CreateProposal(oldP)
+	if err != nil {
+		t.Fatalf("CreateProposal old: %v", err)
+	}
+	otherP := sampleProposal("other project's proposal")
+	otherP.Project = "emily"
+	otherP.SourceRef = "1756600000.000041"
+	otherID, err := s.CreateProposal(otherP)
+	if err != nil {
+		t.Fatalf("CreateProposal other: %v", err)
+	}
+
+	if err := s.SupersedeProposal(oldID, otherID, "cross-project"); err == nil {
+		t.Fatal("want error superseding across projects, got nil")
+	}
+
+	got, err := s.GetProposal(oldID)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if got.Status != "pending" {
+		t.Errorf("status: want pending after refusal, got %q", got.Status)
 	}
 }
 

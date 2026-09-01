@@ -1135,8 +1135,8 @@ func sampleProposalArgs(sourceRef, summary string) map[string]any {
 		"name": "private-dotfiles",
 		"proposal": map[string]any{
 			"source":           "slack",
-			"source_channel":   "C0JARVIS",
-			"source_permalink": "https://example.slack.com/archives/C0JARVIS/p" + sourceRef,
+			"source_channel":   "C0STUART",
+			"source_permalink": "https://example.slack.com/archives/C0STUART/p" + sourceRef,
 			"source_ref":       sourceRef,
 			"kind":             "plan",
 			"summary":          summary,

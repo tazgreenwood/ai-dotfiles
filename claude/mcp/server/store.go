@@ -709,12 +709,17 @@ func (s *store) UpdateProposalStatus(id int64, status, decisionNote string) erro
 	return nil
 }
 
-// SupersedeProposal marks oldID superseded by newID. Both writes land in one
-// transaction so a proposal can never be left "superseded" with a NULL
-// superseded_by (or vice versa) — a revision chain with a hole in it would lose
-// the history this table exists to preserve. Deliberately NOT the
+// SupersedeProposal marks oldID superseded by newID, storing note as the old
+// row's decision_note. All three writes land in one transaction so a proposal
+// can never be left "superseded" with a NULL superseded_by, or superseded
+// without the reason it was superseded — a revision chain with a hole in it
+// would lose the history this table exists to preserve. Deliberately NOT the
 // read-modify-write shape used by UpdateStep above.
-func (s *store) SupersedeProposal(oldID, newID int64) error {
+//
+// Only a pending proposal can be superseded. Superseding is a revision of work
+// still awaiting a decision; a row that already carries a human's approve or
+// reject must not have that decision silently rewritten.
+func (s *store) SupersedeProposal(oldID, newID int64, note string) error {
 	if oldID == newID {
 		return fmt.Errorf("proposal %d cannot supersede itself", oldID)
 	}
@@ -724,29 +729,41 @@ func (s *store) SupersedeProposal(oldID, newID int64) error {
 	}
 	defer tx.Rollback()
 
-	res, err := tx.Exec(
-		`UPDATE proposals SET status = 'superseded', superseded_by = ? WHERE id = ?`,
-		newID, oldID,
-	)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
+	// Read the old row's project and status inside the transaction: the status
+	// gate and the successor's project check below both depend on them, and
+	// reading them outside would reintroduce the read-modify-write race.
+	var oldProject, oldStatus string
+	err = tx.QueryRow(`SELECT project, status FROM proposals WHERE id = ?`, oldID).
+		Scan(&oldProject, &oldStatus)
+	if err == sql.ErrNoRows {
 		return fmt.Errorf("proposal %d not found", oldID)
 	}
-
-	// The successor must exist, or the chain points at nothing. Checked inside
-	// the transaction so a bad newID rolls the UPDATE above back.
-	var exists int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM proposals WHERE id = ?`, newID).Scan(&exists); err != nil {
+	if err != nil {
 		return err
 	}
-	if exists == 0 {
+	if oldStatus != "pending" {
+		return fmt.Errorf("proposal %d is %s, only a pending proposal can be superseded", oldID, oldStatus)
+	}
+
+	// The successor must exist AND belong to the same project, or a caller
+	// scoped to one project could point its revision chain at another's row.
+	var newProject string
+	err = tx.QueryRow(`SELECT project FROM proposals WHERE id = ?`, newID).Scan(&newProject)
+	if err == sql.ErrNoRows {
 		return fmt.Errorf("superseding proposal %d not found", newID)
+	}
+	if err != nil {
+		return err
+	}
+	if newProject != oldProject {
+		return fmt.Errorf("superseding proposal %d belongs to project %q, not %q", newID, newProject, oldProject)
+	}
+
+	if _, err := tx.Exec(
+		`UPDATE proposals SET status = 'superseded', superseded_by = ?, decision_note = ? WHERE id = ?`,
+		newID, note, oldID,
+	); err != nil {
+		return err
 	}
 
 	return tx.Commit()

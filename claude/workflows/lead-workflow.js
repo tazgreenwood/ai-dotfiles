@@ -1,6 +1,6 @@
 export const meta = {
-  name: 'jarvis-workflow',
-  description: 'Tier-1 Jarvis loop: read the Jarvis Slack channel, deterministically filter out bot posts and thread replies, claim each new request via the proposals UNIQUE(source, source_ref) constraint, then read the threads of pending proposals and classify human replies as approve / reject / pushback — recording the terminal decisions itself and handing pushbacks back to the caller to re-plan',
+  name: 'lead-workflow',
+  description: 'Tier-1 Stuart loop: read the Stuart Slack channel, deterministically filter out bot posts and thread replies, claim each new request via the proposals UNIQUE(source, source_ref) constraint, then read the threads of pending proposals and classify human replies as approve / reject / pushback — recording the terminal decisions itself and handing pushbacks back to the caller to re-plan',
   phases: [
     { title: 'Poll' },
     { title: 'Claim' },
@@ -35,7 +35,7 @@ export const meta = {
 // explicitly. The caller must carry that same treatment forward.
 //
 // No Slack channel or user id is hardcoded. `channel_id` and
-// `jarvis_bot_user_id` are required args, supplied by the caller from
+// `stuart_bot_user_id` are required args, supplied by the caller from
 // registry_get_resources — a hardcoded id already caused a stale-channel
 // failure on this ticket.
 //
@@ -49,8 +49,8 @@ export const meta = {
 // "sounds like approval" path.
 //
 // Bot replies are excluded from decisions for the same reason they are excluded
-// from requests: Jarvis's own revision message is prose in the same thread, and
-// letting it classify would let Jarvis approve itself.
+// from requests: Stuart's own revision message is prose in the same thread, and
+// letting it classify would let Stuart approve itself.
 //
 // Only replies NEWER than the current revision count. A supersede chain shares
 // one Slack thread, so a thread carries the replies that drove every earlier
@@ -64,7 +64,7 @@ export const meta = {
 // pure status writes. Supersede is NOT done here: it needs the successor
 // proposal's id, and producing that successor means re-planning and posting as
 // the bot — the caller's job. So pushbacks are returned, not resolved, and the
-// caller writes the new proposal first and supersedes second (see jarvis.md
+// caller writes the new proposal first and supersedes second (see lead.md
 // STEP 7), so a crash leaves the old row pending rather than superseded with
 // nothing pointing forward.
 //
@@ -278,7 +278,7 @@ function permalinkFor(ctx, msg) {
 // Registry resource values are human-maintained prose as often as bare ids
 // (e.g. "U0BTZJZ51GA (bot_id B0BTVF8P2ER, app 'aiportal')"). Pull the id out
 // rather than trusting an exact match: a bot id that silently fails to match
-// is exactly the failure that lets Jarvis plan its own messages forever.
+// is exactly the failure that lets Stuart plan its own messages forever.
 function normalizeSlackId(value) {
   const text = String(value || '').trim()
   const match = text.match(/\b([UWB][A-Z0-9]{6,})\b/)
@@ -314,7 +314,7 @@ function isSystemSubtype(subtype) {
   return !HUMAN_SUBTYPES.has(subtype)
 }
 
-// The one filter that prevents an infinite self-planning loop: Jarvis's own
+// The one filter that prevents an infinite self-planning loop: Stuart's own
 // posts must never come back as new requests. Anything bot-authored is
 // excluded — matched on the persisted bot user id, on bot_id, and on the
 // bot_message subtype, because Slack does not populate all three consistently.
@@ -337,7 +337,7 @@ function selectCandidates(messages, ctx) {
   for (const msg of messages || []) {
     if (!msg || !msg.ts || !String(msg.text || '').trim()) continue
     if (seen.has(String(msg.ts))) continue // same ts twice in one page
-    if (isBotAuthored(msg, ctx.jarvis_bot_user_id)) continue
+    if (isBotAuthored(msg, ctx.stuart_bot_user_id)) continue
     if (isThreadReply(msg)) continue
     if (isSystemSubtype(msg.subtype)) continue
     if (isJoinLeaveNotice(msg.text)) continue
@@ -429,11 +429,11 @@ function cutoffTsFor(proposal, replies, botUserId) {
 // concatenated into one pushback note so nothing the human said is dropped.
 function decideForProposal(proposal, ctx) {
   const replies = ((proposal && proposal.replies) || []).filter(r => r && r.ts)
-  const cutoff = cutoffTsFor(proposal, replies, ctx.jarvis_bot_user_id)
+  const cutoff = cutoffTsFor(proposal, replies, ctx.stuart_bot_user_id)
   const human = replies
     .filter(r => tsNum(r.ts) > cutoff)
     .filter(r => String(r.text || '').trim())
-    .filter(r => !isBotAuthored(r, ctx.jarvis_bot_user_id))
+    .filter(r => !isBotAuthored(r, ctx.stuart_bot_user_id))
     .filter(r => !isSystemSubtype(r.subtype))
     .filter(r => !isJoinLeaveNotice(r.text))
     .filter(r => !ctx.user_id || r.user === ctx.user_id)
@@ -442,7 +442,7 @@ function decideForProposal(proposal, ctx) {
   if (human.length === 0) return null
 
   for (const r of human) {
-    const verdict = classifyReply(r.text, ctx.jarvis_bot_user_id)
+    const verdict = classifyReply(r.text, ctx.stuart_bot_user_id)
     if (verdict === 'pushback') continue
     return { kind: verdict, reply_ts: String(r.ts), decision_note: String(r.text) }
   }
@@ -457,7 +457,7 @@ const raw = typeof args === 'string' ? JSON.parse(args) : args
 const ctx = {
   project_name: raw && raw.project_name,
   channel_id: normalizeSlackId(raw && raw.channel_id),
-  jarvis_bot_user_id: normalizeSlackId(raw && raw.jarvis_bot_user_id),
+  stuart_bot_user_id: normalizeSlackId(raw && raw.stuart_bot_user_id),
   user_id: normalizeSlackId((raw && raw.user_id) || ''),
   workspace_domain: (raw && raw.workspace_domain) || '',
   kind: (raw && raw.kind) || 'plan',
@@ -470,18 +470,18 @@ const ctx = {
 
 // Fail loudly rather than quietly polling the wrong place. There is no default
 // channel id and no default bot id in this file on purpose.
-const missing = ['project_name', 'channel_id', 'jarvis_bot_user_id'].filter(k => !ctx[k])
+const missing = ['project_name', 'channel_id', 'stuart_bot_user_id'].filter(k => !ctx[k])
 if (missing.length > 0) {
   return {
     status: 'error',
-    error: `jarvis-workflow requires args: ${missing.join(', ')}. Read channel_id from resources.slack.jarvis_channel and jarvis_bot_user_id from resources.slack.jarvis_bot_user_id via registry_get_resources — never hardcode them.`,
+    error: `lead-workflow requires args: ${missing.join(', ')}. Read channel_id from resources.slack.stuart_channel and stuart_bot_user_id from resources.slack.stuart_bot_user_id via registry_get_resources — never hardcode them.`,
     new_requests: [],
   }
 }
 if (!['both', 'poll', 'decisions'].includes(ctx.mode)) {
   return {
     status: 'error',
-    error: `jarvis-workflow: unknown mode "${ctx.mode}". Use "both" (default), "poll", or "decisions".`,
+    error: `lead-workflow: unknown mode "${ctx.mode}". Use "both" (default), "poll", or "decisions".`,
     new_requests: [],
   }
 }
@@ -562,7 +562,7 @@ const decisions = {
   approved: [],
   rejected: [],
   // Returned, not resolved — the caller re-plans, writes the successor
-  // proposal, then supersedes the old row. See jarvis.md STEP 7.
+  // proposal, then supersedes the old row. See lead.md STEP 7.
   pushbacks: [],
   awaiting_reply: [],
   errors: [],

@@ -922,7 +922,7 @@ func registryTools() []Tool {
 
 // ── proposals (DOTFILES-34) ────────────────────────────────────────────────────
 //
-// The /jarvis skill and jarvis-workflow.js reach the registry only through MCP,
+// The /lead skill and lead-workflow.js reach the registry only through MCP,
 // so store.go's proposal funcs need these three wrappers to be usable at all.
 //
 // Everything inside `proposal` (summary, payload, source_*) originates in Slack
@@ -1049,18 +1049,13 @@ func registryUpdateProposal(args map[string]any) ToolResult {
 		if !hasSuperseded {
 			return toolErr("superseded_by required when status is 'superseded'")
 		}
-		// The pushback prose is written first, while the row is still pending,
-		// because SupersedeProposal deliberately takes no note: it owns only the
-		// status/superseded_by pair, which it moves in one transaction so the
-		// revision chain never has a hole in it. Writing the note first means a
-		// failed supersede leaves a still-pending row carrying the note, rather
-		// than a superseded row that lost the reason it was superseded.
-		if note != "" {
-			if err := s.UpdateProposalStatus(id, "pending", note); err != nil {
-				return toolErr(err.Error())
-			}
-		}
-		if err := s.SupersedeProposal(id, supersededBy); err != nil {
+		// The note travels INTO SupersedeProposal so status, superseded_by and
+		// decision_note all move in that one transaction. Writing the note here
+		// as a separate statement would be a non-atomic read-modify-write around
+		// an atomic one: a failure between the two writes could strand the row,
+		// and the note write itself had to name a status, which meant resetting
+		// an already-decided row to pending to write it.
+		if err := s.SupersedeProposal(id, supersededBy, note); err != nil {
 			return toolErr(err.Error())
 		}
 		return toolOK(map[string]any{"ok": true})
