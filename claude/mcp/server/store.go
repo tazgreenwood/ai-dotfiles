@@ -13,7 +13,8 @@ import (
 // ── store: SQLite-backed persistence (DOTFILES-23) ──────────────────────────────
 //
 // Single SQLite DB (WAL mode) replacing per-project JSON files under
-// data/{project}/*.json. Tables: projects, plans, audit, issues, deploy_checks.
+// data/{project}/*.json. Tables: projects, plans, audit, issues, deploy_checks,
+// events, proposals.
 
 type store struct {
 	db *sql.DB
@@ -86,6 +87,26 @@ func (s *store) createSchema() error {
 			tags TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_project_type_occurred ON events(project, type, occurred_at)`,
+		`CREATE TABLE IF NOT EXISTS proposals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			source TEXT NOT NULL,
+			source_channel TEXT NOT NULL,
+			source_permalink TEXT NOT NULL,
+			source_ref TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			status TEXT NOT NULL,
+			superseded_by INTEGER,
+			decision_note TEXT NOT NULL DEFAULT '',
+			notified_at TEXT,
+			decided_at TEXT,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_proposals_project_status ON proposals(project, status)`,
+		// Dedup key: one proposal per inbound source message (e.g. a Slack ts).
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_source_ref ON proposals(source, source_ref)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -490,4 +511,260 @@ func (s *store) GetEvents(project, eventType, since, until string) ([]map[string
 		return nil, 0, err
 	}
 	return entries, len(entries), nil
+}
+
+// ── proposals (DOTFILES-34) ──────────────────────────────────────────────────
+//
+// A proposal is a unit of agent-produced work awaiting a human decision. It is
+// deliberately NOT a plan: nothing here executes into code, and approving one
+// only records the decision.
+//
+// source_channel and source_permalink are required, not decorative: a Slack
+// message ts alone cannot reconstruct a permalink (that needs channel +
+// workspace), and without a permalink the read-only UI queue has no exit back
+// to the conversation the proposal came from.
+
+type proposal struct {
+	ID              int64          `json:"id"`
+	Project         string         `json:"project"`
+	Source          string         `json:"source"`
+	SourceChannel   string         `json:"source_channel"`
+	SourcePermalink string         `json:"source_permalink"`
+	SourceRef       string         `json:"source_ref"`
+	Kind            string         `json:"kind"`
+	Summary         string         `json:"summary"`
+	Payload         map[string]any `json:"payload,omitempty"`
+	Status          string         `json:"status"`
+	SupersededBy    *int64         `json:"superseded_by"`
+	DecisionNote    string         `json:"decision_note"`
+	NotifiedAt      *string        `json:"notified_at"`
+	DecidedAt       *string        `json:"decided_at"`
+	CreatedAt       string         `json:"created_at"`
+}
+
+var (
+	proposalKinds    = map[string]bool{"plan": true, "fix": true, "review": true, "improvement": true}
+	proposalStatuses = map[string]bool{"pending": true, "approved": true, "rejected": true, "superseded": true}
+	// Statuses a caller may set directly. "superseded" is excluded: it must go
+	// through SupersedeProposal so status and superseded_by move together and
+	// the revision chain is never left dangling.
+	proposalDecisions = map[string]bool{"pending": true, "approved": true, "rejected": true}
+)
+
+const proposalColumns = `id, project, source, source_channel, source_permalink, source_ref,
+	kind, summary, payload, status, superseded_by, decision_note, notified_at, decided_at, created_at`
+
+// CreateProposal inserts a proposal and returns its new id. Status defaults to
+// "pending" and created_at to now (RFC3339 UTC), matching the stamping used by
+// the audit/issues/events writers.
+func (s *store) CreateProposal(p *proposal) (int64, error) {
+	if p == nil {
+		return 0, fmt.Errorf("proposal is nil")
+	}
+	if p.Project == "" {
+		return 0, fmt.Errorf("proposal project is required")
+	}
+	if p.Source == "" || p.SourceRef == "" {
+		return 0, fmt.Errorf("proposal source and source_ref are required")
+	}
+	if p.SourceChannel == "" || p.SourcePermalink == "" {
+		return 0, fmt.Errorf("proposal source_channel and source_permalink are required")
+	}
+	if !proposalKinds[p.Kind] {
+		return 0, fmt.Errorf("invalid proposal kind %q (want plan|fix|review|improvement)", p.Kind)
+	}
+	status := p.Status
+	if status == "" {
+		status = "pending"
+	}
+	if !proposalStatuses[status] {
+		return 0, fmt.Errorf("invalid proposal status %q (want pending|approved|rejected|superseded)", status)
+	}
+
+	payload := "{}"
+	if p.Payload != nil {
+		b, err := json.Marshal(p.Payload)
+		if err != nil {
+			return 0, err
+		}
+		payload = string(b)
+	}
+	createdAt := p.CreatedAt
+	if createdAt == "" {
+		createdAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	res, err := s.db.Exec(
+		`INSERT INTO proposals
+			(project, source, source_channel, source_permalink, source_ref,
+			 kind, summary, payload, status, superseded_by, decision_note,
+			 notified_at, decided_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.Project, p.Source, p.SourceChannel, p.SourcePermalink, p.SourceRef,
+		p.Kind, p.Summary, payload, status, p.SupersededBy, p.DecisionNote,
+		p.NotifiedAt, p.DecidedAt, createdAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	p.ID = id
+	p.Status = status
+	p.CreatedAt = createdAt
+	return id, nil
+}
+
+func scanProposal(sc interface{ Scan(...any) error }) (*proposal, error) {
+	var p proposal
+	var payload string
+	var decisionNote sql.NullString
+	if err := sc.Scan(
+		&p.ID, &p.Project, &p.Source, &p.SourceChannel, &p.SourcePermalink, &p.SourceRef,
+		&p.Kind, &p.Summary, &payload, &p.Status, &p.SupersededBy, &decisionNote,
+		&p.NotifiedAt, &p.DecidedAt, &p.CreatedAt,
+	); err != nil {
+		return nil, err
+	}
+	p.DecisionNote = decisionNote.String
+	if payload != "" {
+		if err := json.Unmarshal([]byte(payload), &p.Payload); err != nil {
+			return nil, fmt.Errorf("proposal %d payload: %w", p.ID, err)
+		}
+	}
+	return &p, nil
+}
+
+func (s *store) GetProposal(id int64) (*proposal, error) {
+	row := s.db.QueryRow(`SELECT `+proposalColumns+` FROM proposals WHERE id = ?`, id)
+	p, err := scanProposal(row)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("proposal %d not found", id)
+	}
+	return p, err
+}
+
+// ListProposals returns a project's proposals, newest first (it backs a queue
+// view). An empty status returns every status, including superseded revisions.
+func (s *store) ListProposals(project, status string) ([]*proposal, error) {
+	query := `SELECT ` + proposalColumns + ` FROM proposals WHERE project = ?`
+	args := []any{project}
+	if status != "" {
+		if !proposalStatuses[status] {
+			return nil, fmt.Errorf("invalid proposal status filter %q", status)
+		}
+		query += ` AND status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY id DESC`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*proposal
+	for rows.Next() {
+		p, err := scanProposal(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// UpdateProposalStatus records a human decision on a proposal. It stamps
+// decided_at for terminal statuses (approved/rejected). This never touches the
+// payload and never triggers execution — approval is a recorded decision only.
+func (s *store) UpdateProposalStatus(id int64, status, decisionNote string) error {
+	if !proposalDecisions[status] {
+		return fmt.Errorf("invalid proposal status %q (want pending|approved|rejected; use SupersedeProposal for superseded)", status)
+	}
+	var decidedAt *string
+	if status == "approved" || status == "rejected" {
+		now := time.Now().UTC().Format(time.RFC3339)
+		decidedAt = &now
+	}
+	res, err := s.db.Exec(
+		`UPDATE proposals SET status = ?, decision_note = ?, decided_at = ? WHERE id = ?`,
+		status, decisionNote, decidedAt, id,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("proposal %d not found", id)
+	}
+	return nil
+}
+
+// SupersedeProposal marks oldID superseded by newID, storing note as the old
+// row's decision_note. All three writes land in one transaction so a proposal
+// can never be left "superseded" with a NULL superseded_by, or superseded
+// without the reason it was superseded — a revision chain with a hole in it
+// would lose the history this table exists to preserve. Deliberately NOT the
+// read-modify-write shape used by UpdateStep above.
+//
+// Only a pending proposal can be superseded. Superseding is a revision of work
+// still awaiting a decision; a row that already carries a human's approve or
+// reject must not have that decision silently rewritten.
+func (s *store) SupersedeProposal(oldID, newID int64, note string) error {
+	if oldID == newID {
+		return fmt.Errorf("proposal %d cannot supersede itself", oldID)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Read the old row's project and status inside the transaction: the status
+	// gate and the successor's project check below both depend on them, and
+	// reading them outside would reintroduce the read-modify-write race.
+	var oldProject, oldStatus string
+	err = tx.QueryRow(`SELECT project, status FROM proposals WHERE id = ?`, oldID).
+		Scan(&oldProject, &oldStatus)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("proposal %d not found", oldID)
+	}
+	if err != nil {
+		return err
+	}
+	if oldStatus != "pending" {
+		return fmt.Errorf("proposal %d is %s, only a pending proposal can be superseded", oldID, oldStatus)
+	}
+
+	// The successor must exist AND belong to the same project, or a caller
+	// scoped to one project could point its revision chain at another's row.
+	var newProject string
+	err = tx.QueryRow(`SELECT project FROM proposals WHERE id = ?`, newID).Scan(&newProject)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("superseding proposal %d not found", newID)
+	}
+	if err != nil {
+		return err
+	}
+	if newProject != oldProject {
+		return fmt.Errorf("superseding proposal %d belongs to project %q, not %q", newID, newProject, oldProject)
+	}
+
+	if _, err := tx.Exec(
+		`UPDATE proposals SET status = 'superseded', superseded_by = ?, decision_note = ? WHERE id = ?`,
+		newID, note, oldID,
+	); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }

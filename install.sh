@@ -95,6 +95,22 @@ if [ -f "$BINARY" ]; then
   fi
 fi
 
+# ── Bitbucket MCP Server ───────────────────────────────────────────────────────
+# Built from source like the registry server above. ~/.claude.json points the
+# bitbucket MCP server at this path, and the binary is gitignored, so a fresh
+# clone has nothing here until this runs.
+BB_DIR="$DOTFILES/claude/mcp/bitbucket"
+BB_BINARY="$BB_DIR/bitbucket"
+
+if [ -f "$BB_DIR/main.go" ]; then
+  echo "Building bitbucket MCP server..."
+  if command -v go &>/dev/null; then
+    (cd "$BB_DIR" && go build -o bitbucket .) && echo "  ✓ built $BB_BINARY"
+  else
+    echo "  ⚠ Go not found — install Go then re-run install.sh"
+  fi
+fi
+
 # ── Claude Desktop MCP servers ──────────────────────────────────────────────────
 # Claude Desktop reads its own config, separate from ~/.claude.json (CLI-only).
 # Mirror the registry + bitbucket servers already configured for the CLI so both
@@ -159,6 +175,64 @@ if [ -f "$UI_BINARY" ] && [ -f "$UI_PLIST" ]; then
   launchctl unload "$UI_LAUNCHAGENTS" 2>/dev/null || true
   launchctl load "$UI_LAUNCHAGENTS"
   echo "  ✓ registry-ui daemon loaded (auto-starts on login)"
+fi
+
+# ── Stuart (team lead) Slack credentials ───────────────────────────────────────
+# Stuart is invoked by hand (`/lead <request>` / `/lead check`), so there is no
+# launchd job and no long-lived Claude token on disk — a human is present for
+# every run. This block only provisions the Slack tokens Stuart needs to post a
+# proposal to your phone and read the approve/pushback replies back.
+STUART_ENV="$HOME/.config/stuart/env"
+
+echo "Configuring Stuart Slack credentials..."
+
+mkdir -p "$HOME/.config/stuart"
+chmod 700 "$HOME/.config/stuart"
+
+# One-time migration from the old jarvis path. Move, never copy: two files with
+# live tokens is one more place to leak from.
+if [ -f "$HOME/.config/jarvis/env" ] && [ ! -f "$STUART_ENV" ]; then
+  mv "$HOME/.config/jarvis/env" "$STUART_ENV"
+  chmod 600 "$STUART_ENV"
+  echo "  ✓ migrated ~/.config/jarvis/env → $STUART_ENV"
+fi
+
+# NEVER clobber an existing env file — it holds live tokens.
+if [ -f "$STUART_ENV" ]; then
+  chmod 600 "$STUART_ENV"
+  echo "  ✓ $STUART_ENV already exists — left untouched"
+else
+  umask 177
+  cat > "$STUART_ENV" <<'ENVEOF'
+# Stuart's Slack credentials. Sourced at run time by the /lead skill; NOT in the
+# repo and must never be committed. Mode 600.
+#
+# Slack bot token (the bot-token kind, not a user token). Used to POST the
+# proposal — chat:write is sufficient. It must be a BOT token: Slack suppresses
+# push notifications for messages you author yourself, so a user token posts
+# successfully and never reaches your phone.
+#SLACK_BOT_TOKEN=
+#
+# READ credential, used by `/lead check` to read approve/pushback replies. The
+# Stuart channel is PRIVATE, so conversations.replies needs groups:history,
+# which the aiportal bot token does NOT hold (granted: channels:history,
+# chat:write, commands). Pick ONE:
+#   (a) add groups:history to the aiportal Slack app and reinstall it — then the
+#       bot token above is enough and you can leave SLACK_USER_TOKEN unset; or
+#   (b) paste a user token that holds groups:history below.
+#SLACK_USER_TOKEN=
+ENVEOF
+  umask 022
+  chmod 600 "$STUART_ENV"
+  echo "  ✓ created $STUART_ENV (mode 600) with placeholders"
+  echo "  ⚠ ACTION REQUIRED: fill in SLACK_BOT_TOKEN"
+fi
+
+if [ -f "$STUART_ENV" ] && ! grep -qE '^[[:space:]]*SLACK_USER_TOKEN=.' "$STUART_ENV"; then
+  echo "  ⚠ note (slack read scope): the Stuart channel is PRIVATE, so reading"
+  echo "    replies needs groups:history. Either add that scope to the aiportal app"
+  echo "    and reinstall it, or append SLACK_USER_TOKEN=<token with groups:history>"
+  echo "    to $STUART_ENV. Posting proposals works without it; '/lead check' does not."
 fi
 
 echo ""

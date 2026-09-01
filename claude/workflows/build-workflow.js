@@ -213,10 +213,16 @@ async function runStep(ctx, step, index, cwd) {
   return { index, status: 'blocked', reason: failureReason }
 }
 
+// Steps eligible for (re)execution on this run. 'blocked' and 'awaiting_human' are
+// included so that resuming a paused build actually retries the step that stopped it —
+// filtering on 'pending' alone made a blocked step permanently unresumable and silently
+// started the next run one step past the unmet gate.
+const RESUMABLE_STATUSES = new Set(['pending', 'blocked', 'awaiting_human'])
+
 function partitionRuns(steps) {
   const pending = steps
     .map((step, index) => ({ step, index }))
-    .filter(x => x.step.status === 'pending')
+    .filter(x => RESUMABLE_STATUSES.has(x.step.status))
 
   const runs = []
   let i = 0

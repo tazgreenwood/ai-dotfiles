@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1124,5 +1125,383 @@ func TestRegistryUnionFiles_MissingFileGroups(t *testing.T) {
 	result := registryUnionFiles(map[string]any{})
 	if !result.IsError {
 		t.Fatal("want error when file_groups missing, got none")
+	}
+}
+
+// ── proposals over MCP (DOTFILES-34 step 2) ──────────────────────────────────
+
+func sampleProposalArgs(sourceRef, summary string) map[string]any {
+	return map[string]any{
+		"name": "private-dotfiles",
+		"proposal": map[string]any{
+			"source":           "slack",
+			"source_channel":   "C0STUART",
+			"source_permalink": "https://example.slack.com/archives/C0STUART/p" + sourceRef,
+			"source_ref":       sourceRef,
+			"kind":             "plan",
+			"summary":          summary,
+			"payload":          map[string]any{"ticket": "DOTFILES-99"},
+		},
+	}
+}
+
+func decodeToolResult(t *testing.T, r ToolResult) map[string]any {
+	t.Helper()
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(r.Content[0].Text), &resp); err != nil {
+		t.Fatalf("decode tool result %q: %v", r.Content[0].Text, err)
+	}
+	return resp
+}
+
+func writeTestProposal(t *testing.T, sourceRef, summary string) int64 {
+	t.Helper()
+	result := registryWriteProposal(sampleProposalArgs(sourceRef, summary))
+	if result.IsError {
+		t.Fatalf("registry_write_proposal: %s", result.Content[0].Text)
+	}
+	resp := decodeToolResult(t, result)
+	idf, ok := resp["id"].(float64)
+	if !ok {
+		t.Fatalf("want numeric id, got %T (%v)", resp["id"], resp["id"])
+	}
+	return int64(idf)
+}
+
+func TestRegistryWriteProposal_ReturnsOkAndID(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	result := registryWriteProposal(sampleProposalArgs("1756600000.000100", "plan a thing"))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	resp := decodeToolResult(t, result)
+	if resp["ok"] != true {
+		t.Errorf("want ok=true, got %v", resp["ok"])
+	}
+	id, ok := resp["id"].(float64)
+	if !ok || id <= 0 {
+		t.Fatalf("want positive numeric id, got %T (%v)", resp["id"], resp["id"])
+	}
+}
+
+func TestRegistryWriteProposal_StampsCreatedAtServerSide(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	args := sampleProposalArgs("1756600000.000200", "stamped")
+	// A caller-supplied created_at must not win — the server stamps it.
+	args["proposal"].(map[string]any)["created_at"] = "1999-01-01T00:00:00Z"
+
+	id := int64(decodeToolResult(t, registryWriteProposal(args))["id"].(float64))
+
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	p, err := s.GetProposal(id)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if p.CreatedAt == "1999-01-01T00:00:00Z" {
+		t.Error("caller-supplied created_at was persisted; want server stamp")
+	}
+	if _, err := time.Parse(time.RFC3339, p.CreatedAt); err != nil {
+		t.Errorf("created_at %q is not RFC3339: %v", p.CreatedAt, err)
+	}
+}
+
+func TestRegistryWriteProposal_MissingNameOrProposal(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	if !registryWriteProposal(map[string]any{"name": "private-dotfiles"}).IsError {
+		t.Error("want error when proposal missing, got none")
+	}
+	args := sampleProposalArgs("1756600000.000300", "no name")
+	delete(args, "name")
+	if !registryWriteProposal(args).IsError {
+		t.Error("want error when name missing, got none")
+	}
+}
+
+func TestRegistryWriteProposal_DuplicateSourceRefErrorsNotPanics(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	writeTestProposal(t, "1756600000.000400", "first")
+
+	result := registryWriteProposal(sampleProposalArgs("1756600000.000400", "duplicate"))
+	if !result.IsError {
+		t.Fatal("want error on duplicate source_ref, got success")
+	}
+	// The poller keys "already seen" off this text, so it must name the cause.
+	if !strings.Contains(result.Content[0].Text, "already exists") {
+		t.Errorf("duplicate error should say 'already exists', got %s", result.Content[0].Text)
+	}
+}
+
+func TestRegistryGetProposals_ReturnsDocumentedShape(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	writeTestProposal(t, "1756600000.000500", "one")
+
+	result := registryGetProposals(map[string]any{"name": "private-dotfiles"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	resp := decodeToolResult(t, result)
+	proposals, ok := resp["proposals"].([]any)
+	if !ok {
+		t.Fatalf("want proposals array, got %T", resp["proposals"])
+	}
+	if len(proposals) != 1 {
+		t.Fatalf("want 1 proposal, got %d", len(proposals))
+	}
+	p := proposals[0].(map[string]any)
+	for _, key := range []string{"id", "project", "source_channel", "source_permalink", "source_ref", "kind", "summary", "status", "created_at"} {
+		if _, ok := p[key]; !ok {
+			t.Errorf("proposal missing key %q", key)
+		}
+	}
+	if p["status"] != "pending" {
+		t.Errorf("want status=pending, got %v", p["status"])
+	}
+}
+
+func TestRegistryGetProposals_EmptyWhenNone(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	resp := decodeToolResult(t, registryGetProposals(map[string]any{"name": "private-dotfiles"}))
+	proposals, ok := resp["proposals"].([]any)
+	if !ok {
+		t.Fatalf("want proposals array, got %T", resp["proposals"])
+	}
+	if len(proposals) != 0 {
+		t.Fatalf("want empty array, got %d", len(proposals))
+	}
+}
+
+func TestRegistryGetProposals_FiltersByStatus(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	approvedID := writeTestProposal(t, "1756600000.000600", "to approve")
+	writeTestProposal(t, "1756600000.000700", "stays pending")
+
+	upd := registryUpdateProposal(map[string]any{
+		"name": "private-dotfiles", "id": float64(approvedID), "status": "approved",
+	})
+	if upd.IsError {
+		t.Fatalf("registry_update_proposal: %s", upd.Content[0].Text)
+	}
+
+	pending := decodeToolResult(t, registryGetProposals(map[string]any{
+		"name": "private-dotfiles", "status": "pending",
+	}))["proposals"].([]any)
+	if len(pending) != 1 {
+		t.Fatalf("want 1 pending, got %d", len(pending))
+	}
+	if pending[0].(map[string]any)["summary"] != "stays pending" {
+		t.Errorf("wrong pending row: %v", pending[0])
+	}
+
+	approved := decodeToolResult(t, registryGetProposals(map[string]any{
+		"name": "private-dotfiles", "status": "approved",
+	}))["proposals"].([]any)
+	if len(approved) != 1 {
+		t.Fatalf("want 1 approved, got %d", len(approved))
+	}
+}
+
+func TestRegistryGetProposals_FiltersByID(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	writeTestProposal(t, "1756600000.000800", "first")
+	wantID := writeTestProposal(t, "1756600000.000900", "second")
+
+	resp := decodeToolResult(t, registryGetProposals(map[string]any{
+		"name": "private-dotfiles", "id": float64(wantID),
+	}))
+	proposals := resp["proposals"].([]any)
+	if len(proposals) != 1 {
+		t.Fatalf("want exactly 1 proposal for id filter, got %d", len(proposals))
+	}
+	if proposals[0].(map[string]any)["summary"] != "second" {
+		t.Errorf("want summary=second, got %v", proposals[0].(map[string]any)["summary"])
+	}
+}
+
+func TestRegistryGetProposals_UnknownIDErrors(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	result := registryGetProposals(map[string]any{"name": "private-dotfiles", "id": float64(4242)})
+	if !result.IsError {
+		t.Fatal("want error for unknown id, got success")
+	}
+}
+
+func TestRegistryGetProposals_IDFromAnotherProjectNotReturned(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	id := writeTestProposal(t, "1756600000.001000", "mine")
+
+	result := registryGetProposals(map[string]any{"name": "some-other-project", "id": float64(id)})
+	if !result.IsError {
+		t.Fatal("want error when id belongs to another project, got success")
+	}
+}
+
+func TestRegistryUpdateProposal_ApprovesAndRecordsNote(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	id := writeTestProposal(t, "1756600000.001100", "approve me")
+
+	result := registryUpdateProposal(map[string]any{
+		"name": "private-dotfiles", "id": float64(id),
+		"status": "approved", "decision_note": "lgtm",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	if decodeToolResult(t, result)["ok"] != true {
+		t.Error("want ok=true")
+	}
+
+	s, _ := getStore()
+	p, err := s.GetProposal(id)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if p.Status != "approved" {
+		t.Errorf("want status=approved, got %q", p.Status)
+	}
+	if p.DecisionNote != "lgtm" {
+		t.Errorf("want decision_note=lgtm, got %q", p.DecisionNote)
+	}
+	if p.DecidedAt == nil {
+		t.Error("want decided_at stamped on approval")
+	}
+}
+
+func TestRegistryUpdateProposal_SupersedeLinksRevisionChain(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	oldID := writeTestProposal(t, "1756600000.001200", "rev 1")
+	newID := writeTestProposal(t, "1756600000.001300", "rev 2")
+
+	result := registryUpdateProposal(map[string]any{
+		"name": "private-dotfiles", "id": float64(oldID),
+		"status": "superseded", "superseded_by": float64(newID),
+		"decision_note": "make it smaller",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	s, _ := getStore()
+	p, err := s.GetProposal(oldID)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if p.Status != "superseded" {
+		t.Errorf("want status=superseded, got %q", p.Status)
+	}
+	if p.SupersededBy == nil || *p.SupersededBy != newID {
+		t.Errorf("want superseded_by=%d, got %v", newID, p.SupersededBy)
+	}
+	if p.DecisionNote != "make it smaller" {
+		t.Errorf("want the pushback note preserved, got %q", p.DecisionNote)
+	}
+}
+
+func TestRegistryUpdateProposal_SupersededRequiresSupersededBy(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	id := writeTestProposal(t, "1756600000.001400", "rev 1")
+
+	result := registryUpdateProposal(map[string]any{
+		"name": "private-dotfiles", "id": float64(id), "status": "superseded",
+	})
+	if !result.IsError {
+		t.Fatal("want error when superseded_by omitted, got success")
+	}
+}
+
+func TestRegistryUpdateProposal_MissingIDErrorsCleanly(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	result := registryUpdateProposal(map[string]any{
+		"name": "private-dotfiles", "id": float64(9999), "status": "approved",
+	})
+	if !result.IsError {
+		t.Fatal("want error for missing id, got success")
+	}
+	if !strings.Contains(result.Content[0].Text, "not found") {
+		t.Errorf("want 'not found' in error, got %s", result.Content[0].Text)
+	}
+}
+
+func TestRegistryUpdateProposal_MissingArgs(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	id := writeTestProposal(t, "1756600000.001500", "args")
+
+	if !registryUpdateProposal(map[string]any{"name": "private-dotfiles", "id": float64(id)}).IsError {
+		t.Error("want error when status missing, got none")
+	}
+	if !registryUpdateProposal(map[string]any{"name": "private-dotfiles", "status": "approved"}).IsError {
+		t.Error("want error when id missing, got none")
+	}
+	if !registryUpdateProposal(map[string]any{"id": float64(id), "status": "approved"}).IsError {
+		t.Error("want error when name missing, got none")
+	}
+	if !registryUpdateProposal(map[string]any{
+		"name": "private-dotfiles", "id": float64(id), "status": "bogus",
+	}).IsError {
+		t.Error("want error for invalid status, got none")
+	}
+}
+
+func TestRegistryUpdateProposal_WrongProjectRejected(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	id := writeTestProposal(t, "1756600000.001600", "mine")
+
+	result := registryUpdateProposal(map[string]any{
+		"name": "some-other-project", "id": float64(id), "status": "approved",
+	})
+	if !result.IsError {
+		t.Fatal("want error when updating another project's proposal, got success")
+	}
+}
+
+func TestProposalToolsRegisteredInDispatchAndSchemas(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	names := map[string]bool{}
+	for _, tool := range allTools() {
+		names[tool.Name] = true
+	}
+	for _, want := range []string{"registry_write_proposal", "registry_get_proposals", "registry_update_proposal"} {
+		if !names[want] {
+			t.Errorf("tool %q missing from tools/list", want)
+		}
+		if got := dispatch(want, map[string]any{}); strings.Contains(got.Content[0].Text, "unknown tool") {
+			t.Errorf("tool %q not wired into dispatch", want)
+		}
 	}
 }

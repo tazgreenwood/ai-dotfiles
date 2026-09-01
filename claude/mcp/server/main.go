@@ -154,6 +154,12 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryIsFakeTicket(args)
 	case "registry_union_files":
 		return registryUnionFiles(args)
+	case "registry_write_proposal":
+		return registryWriteProposal(args)
+	case "registry_get_proposals":
+		return registryGetProposals(args)
+	case "registry_update_proposal":
+		return registryUpdateProposal(args)
 	}
 	return toolErr("unknown tool: " + name)
 }

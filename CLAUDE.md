@@ -8,7 +8,7 @@ Personal dev utilities repo. Integrates JIRA, Confluence, Bitbucket, custom regi
 
 - **Name**: private-dotfiles
 - **Workspace**: tazgreenwood
-- **Repo**: tazgreenwood/private-dotfiles (Bitbucket)
+- **Repo**: `git@github.com:tazgreenwood/ai-dotfiles.git` (GitHub). The registry project key and local directory are both `private-dotfiles`; the GitHub repo is named `ai-dotfiles`. Use `gh`, not the Bitbucket MCP, for PRs here — the Bitbucket tooling in this repo serves *other* projects.
 - **Base branch**: main
 - **PR target**: main
 
@@ -22,11 +22,13 @@ Codebase = user-facing skills + supporting MCP tools:
 - `plan.md` — auto-gen ticket keys via registry counter; make plans w/ acceptance criteria
 - `ship.md` — review, test, doc, make PR, write audit trail
 - `idea-validation.md` — agent-graph fan-out: idea-fleshing agent, then 4 parallel isolated research agents (competitor, market-trend, risk-assumption, technical-feasibility), synthesized into a self-contained HTML report
+- `lead.md` — **Stuart**, the team lead. `/lead <request>` turns prose into a plan proposal, posts it to Slack as the bot (push-notifies the phone), and persists it as `pending`. `/lead check` sweeps for new requests and classifies thread replies as approve/reject/pushback. Propose-only: approval records a decision and never triggers execution.
 
 **Workflow scripts** (`claude/workflows/`):
 - `build-workflow.js` — deterministic run-partitioning (sync/async), developer/QA retry loop, git-worktree lifecycle, sequential merge-back. Invoked by `build.md`, which is now a thin dispatcher.
 - `code-review-workflow.js` — `--graph` mode's 4-dimension parallel fan-out + synthesis, as real control flow. Invoked by `code-review.md`.
 - `ship-review-workflow.js` — security gate (HIGH-risk steps only) + `@reviewer` pass for `/ship`, as one deterministic call. Invoked by `ship.md`.
+- `lead-workflow.js` — Stuart's Slack sweep: reads the channel, filters out bot posts and thread replies in code, claims each new request via the proposals `UNIQUE(source, source_ref)` constraint, then reads pending proposals' threads and classifies human replies as approve/reject/pushback. Records terminal decisions itself; hands pushbacks back to `lead.md` to re-plan. Requires `project_name`, `channel_id`, `stuart_bot_user_id`. Invoked by `lead.md` in check mode.
 
 **MCP Servers**:
 - **Registry Server** (`claude/mcp/server/`):
@@ -199,6 +201,25 @@ Checks whether `ticket` is a registry auto-generated fake ticket (vs. a real JIR
 #### `registry_union_files(file_groups: [[string]]) -> {files: [string]}`
 Flattens and deduplicates multiple file-path arrays into one union, preserving first-occurrence order.
 
+#### `registry_write_proposal(name: string, proposal: map[string]any) -> {ok: bool, id: int} | error`
+Creates a proposal — a unit of work awaiting a human decision. Caller supplies `source`, `source_channel`, `source_ref`, `source_permalink` (all required, non-empty), `kind` (`plan|fix|review|improvement`), `summary`, `payload` (the full plan JSON), and optionally `notified_at` (RFC3339).
+
+Server-owned, never accepted from the caller: `id`, `project`, `created_at`, `decided_at`, `superseded_by`. `status` defaults to `pending`.
+
+`notified_at` is **create-only** — `registry_update_proposal` carries decision fields only, so a proposal must be posted to Slack *before* it is persisted.
+
+A duplicate `(source, source_ref)` returns a clean `proposal already exists for source %q source_ref %q` error rather than panicking. Callers treat that as "already seen", not a failure — the UNIQUE index is the dedup cursor.
+
+#### `registry_get_proposals(name: string, status?: string, id?: int) -> {proposals: [map[string]any]} | error`
+Returns a project's proposals, newest first. `status` filters to one of `pending|approved|rejected|superseded`; an invalid status errors. `id` returns that single proposal, scoped to the project.
+
+#### `registry_update_proposal(name: string, id: int, status: string, decision_note?: string, superseded_by?: int) -> {ok: bool} | error`
+Records a decision on a proposal. `superseded_by` is required when `status` is `superseded`, and rejected with any other status.
+
+The supersede path writes `status`, `superseded_by` and `decision_note` in a **single transaction**, and enforces two invariants:
+- Only a `pending` proposal can be superseded. A row already `approved` or `rejected` carries a recorded human decision and is not rewritable.
+- The successor must belong to the **same project**, so a caller scoped to one project cannot point its revision chain at another's row.
+
 ---
 
 ## Skills Status
@@ -208,6 +229,7 @@ Flattens and deduplicates multiple file-path arrays into one union, preserving f
 | plan | `/plan` or `/plan ONE-XXXX` | ✓ Shipped | registry, jira (optional) |
 | ship | `/ship` or `/ship ONE-XXXX` | ✓ Shipped | registry, bitbucket, jira, security, reviewer, documenter, handover |
 | idea-validation | `/idea-validation` | ✓ Shipped | WebSearch, WebFetch, general-purpose agent |
+| lead (Stuart) | `/lead <request>` or `/lead check` | ✓ Shipped | registry, slack (bot token), lead-workflow.js |
 
 ---
 
@@ -223,7 +245,10 @@ Full architecture-decision history lives in the registry event log, not here —
 - **Fake ticket**: Auto-gen key for projects w/o JIRA integration. Uses registry counter.
 - **Plan**: Mission state object w/ acceptance criteria, step breakdown, status. Stored as JSON in registry.
 - **Audit entry**: Metadata about shipped work (ticket, type, impact, PR URL, files changed, story points, labels, date).
-- **Registry**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db` w/ project metadata, plans, audit trails, issues, deploy checks. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`) hard-dependent on registry uptime (no local fallback).
+- **Registry**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db` w/ project metadata, plans, audit trails, issues, deploy checks, events, proposals. Single source of truth for mission state; phase skills (`/plan`, `/build`, `/ship`) hard-dependent on registry uptime (no local fallback).
+- **Stuart**: The team lead persona (`claude/skills/lead.md`, invoked `/lead`). Takes a prose request, produces a plan proposal, notifies a human, and records their decision. Named a lead rather than an assistant on purpose: the prompt requires it to push back when a request is the wrong work, since deference is the failure mode that produces plausible plans for bad ideas. Renamed from "Jarvis" on 2026-09-01 along with the removal of the unattended poller.
+- **Proposal**: A row in the `proposals` table — work awaiting a human decision, distinct from a plan (approved work) and an audit entry (shipped work). Statuses: `pending`, `approved`, `rejected`, `superseded`. Approval sets status **only**; wiring approval to `/build` is a deliberate later phase. Viewable at `/proposals` in registry-ui.
+- **Supersede chain**: A proposal revised after human pushback is never overwritten — a new row is written and the old one moves to `superseded` with `superseded_by` pointing at the successor and the human's note stored as `decision_note`. All three fields move in one transaction, and only a `pending` row can be superseded. Preserves *why* a revision happened, which is the point of the chain.
 - **Resource cache**: External integrations (Slack channels, Grafana dashboards, Bitbucket repos, AWS log groups, etc.) stored under `project.resources` in registry. Organized by category (grafana, slack, aws, bitbucket, confluence, jira, scripts).
 - **Registry context**: System-reminder block emitted by `inject-registry-context` hook on session start; holds project metadata + all cached resources; used by skills to skip redundant API calls.
 - **Skill**: User-invocable markdown prompt file routing commands to agents. All skills include SELF-IMPROVEMENT section for discovering + caching resources.

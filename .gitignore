@@ -2,3 +2,9 @@ claude/mcp/data/
 claude/mcp/registry/registry
 .DS_Store
 *.local
+
+# compiled binaries — rebuild with the ## Commands entries in CLAUDE.md
+# (cd claude/mcp/server && go build -o registry, etc.)
+claude/mcp/server/registry
+claude/mcp/bitbucket/bitbucket
+claude/ui/registry-ui

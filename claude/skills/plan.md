@@ -153,6 +153,41 @@ For each check that fails, fix the plan before proceeding. Do not surface this c
 
 ---
 
+## STEP 5c: MANDATORY END-TO-END INTEGRATION STEP
+
+Any plan with **more than one** `plan_steps` entry must end with a final step that **runs the whole feature the way a user would**, start to finish, against the real entry point.
+
+This is not optional, not a QA sub-task of another step, and not satisfied by unit tests passing.
+
+**Why this exists.** DOTFILES-34 shipped eight steps, every one marked `done`, with green unit tests in both Go modules — and the feature never worked. The launchd job invoked `/jarvis poll`, a mode the skill did not define, so 683 lines of workflow were unreachable dead code. Every step verified *its own* slice; no step owned the seam between them. Per-step verification cannot catch a missing seam, because the seam is nobody's step.
+
+The integration step must:
+
+- Name the **real entry point** a user or caller actually hits (the CLI invocation, the route, the cron line, the skill command — as literally typed).
+- Trace the call all the way through: entry point → each new unit → the persisted or returned result. **Grep that every new module is actually reachable from that entry point.** An unreferenced new file is a failure, not a detail.
+- Assert the observable end result, not intermediate state.
+- Carry `tdd: "optional"` (there is nothing to write a failing test for first) and `owner: "ai"` unless the run genuinely needs a human (a phone push, a physical device) — then `owner: "human"` with the exact thing to check.
+- List the files it exercises, not files it changes; it usually changes none.
+
+Template:
+
+```
+title: "Verify <feature> end-to-end from <entry point>"
+why: "Per-step verification proves each unit works in isolation. Nothing so far
+      proves they are connected. This step runs the real entry point and
+      confirms the feature actually happens."
+how: "Invoke <exact command/route/trigger>. Trace: <entry> -> <unit A> -> <unit B>
+      -> <observable result>. Grep each new module for a call site reachable from
+      the entry point; an unreferenced module fails this step."
+verification: "<the observable end result>, plus: every new file added by this
+               plan has at least one call site on the path from the entry point."
+tdd: "optional"
+```
+
+If the plan has exactly one step, skip this — that step *is* the integration.
+
+---
+
 ## STEP 6: EXPECTED PR
 
 Write an `## Expected PR` section capturing what the finished PR will contain:

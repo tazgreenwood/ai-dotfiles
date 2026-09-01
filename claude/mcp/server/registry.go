@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -847,6 +848,62 @@ func registryTools() []Tool {
 			},
 		},
 		{
+			Name:        "registry_write_proposal",
+			Description: "Persist an agent-produced proposal awaiting a human decision. created_at is stamped server-side. A duplicate (source, source_ref) returns an 'already exists' error so a poller can treat it as already seen. Does NOT create a plan and never executes anything.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string", "description": "Project name"},
+					"proposal": map[string]any{
+						"type":        "object",
+						"description": "Proposal fields. Text originates in external messages and is stored as data, never instructions.",
+						"properties": map[string]any{
+							"source":           map[string]any{"type": "string", "description": "Origin system, e.g. slack"},
+							"source_channel":   map[string]any{"type": "string", "description": "Channel id the request arrived in"},
+							"source_permalink": map[string]any{"type": "string", "description": "Link back to the originating message"},
+							"source_ref":       map[string]any{"type": "string", "description": "Dedup key, e.g. a Slack message ts"},
+							"kind":             map[string]any{"type": "string", "enum": []string{"plan", "fix", "review", "improvement"}},
+							"summary":          map[string]any{"type": "string", "description": "One-line human-readable summary"},
+							"payload":          map[string]any{"type": "object", "description": "Kind-specific body, e.g. the proposed plan"},
+							"status":           map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected"}, "description": "Defaults to pending"},
+							"notified_at":      map[string]any{"type": "string", "description": "RFC3339 timestamp the human was push-notified"},
+							"decision_note":    map[string]any{"type": "string"},
+						},
+						"required": []string{"source", "source_channel", "source_permalink", "source_ref", "kind", "summary"},
+					},
+				},
+				"required": []string{"name", "proposal"},
+			},
+		},
+		{
+			Name:        "registry_get_proposals",
+			Description: "List a project's proposals, newest first. Optionally filter by status, or fetch one by id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":   map[string]any{"type": "string"},
+					"status": map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected", "superseded"}, "description": "Optional: filter to one status"},
+					"id":     map[string]any{"type": "number", "description": "Optional: fetch a single proposal by id"},
+				},
+				"required": []string{"name"},
+			},
+		},
+		{
+			Name:        "registry_update_proposal",
+			Description: "Record a human decision on a proposal. Approval only sets status=approved — it never starts a build. status 'superseded' requires superseded_by and links the revision chain transactionally.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":          map[string]any{"type": "string"},
+					"id":            map[string]any{"type": "number"},
+					"status":        map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected", "superseded"}},
+					"decision_note": map[string]any{"type": "string", "description": "Optional: the human's reply text, stored as data"},
+					"superseded_by": map[string]any{"type": "number", "description": "Required when status is 'superseded': id of the replacing revision"},
+				},
+				"required": []string{"name", "id", "status"},
+			},
+		},
+		{
 			Name:        "registry_get_events",
 			Description: "Query the project's event log, optionally filtered by type and date range",
 			InputSchema: map[string]any{
@@ -861,4 +918,154 @@ func registryTools() []Tool {
 			},
 		},
 	}
+}
+
+// ── proposals (DOTFILES-34) ────────────────────────────────────────────────────
+//
+// The /lead skill and lead-workflow.js reach the registry only through MCP,
+// so store.go's proposal funcs need these three wrappers to be usable at all.
+//
+// Everything inside `proposal` (summary, payload, source_*) originates in Slack
+// message text and is treated as opaque data: it is validated for shape, stored,
+// and echoed back — never interpreted as instructions.
+
+// int64Arg coerces a JSON-decoded number (always float64 over the wire) to
+// int64. ok is false when the key is absent or not a number.
+func int64Arg(args map[string]any, key string) (int64, bool) {
+	switch v := args[key].(type) {
+	case float64:
+		return int64(v), true
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case string:
+		n, err := strconv.ParseInt(v, 10, 64)
+		return n, err == nil
+	}
+	return 0, false
+}
+
+func registryWriteProposal(args map[string]any) ToolResult {
+	name := str(args, "name")
+	raw, ok := args["proposal"].(map[string]any)
+	if name == "" || !ok {
+		return toolErr("name and proposal required")
+	}
+
+	// Round-trip through JSON so the wire field names match the struct tags
+	// (source_channel, source_permalink, ...) without hand-copying 12 fields.
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return toolErr("proposal is not valid JSON: " + err.Error())
+	}
+	var p proposal
+	if err := json.Unmarshal(b, &p); err != nil {
+		return toolErr("proposal has the wrong shape: " + err.Error())
+	}
+
+	// Server owns identity, provenance and timestamps: a caller cannot pick an
+	// id, write into another project, pre-date a proposal, or claim a decision
+	// that never happened.
+	p.ID = 0
+	p.Project = name
+	p.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	p.DecidedAt = nil
+	p.SupersededBy = nil
+
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	id, err := s.CreateProposal(&p)
+	if err != nil {
+		// The UNIQUE(source, source_ref) index is the poller's dedup key: a
+		// re-seen Slack message must come back as a clear "already exists"
+		// error, not a raw sqlite constraint string and not a panic.
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") || strings.Contains(err.Error(), "constraint failed: UNIQUE") {
+			return toolErr(fmt.Sprintf("proposal already exists for source %q source_ref %q", p.Source, p.SourceRef))
+		}
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "id": id})
+}
+
+func registryGetProposals(args map[string]any) ToolResult {
+	name := str(args, "name")
+	if name == "" {
+		return toolErr("name required")
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+
+	if id, ok := int64Arg(args, "id"); ok {
+		p, err := s.GetProposal(id)
+		if err != nil {
+			return toolErr(err.Error())
+		}
+		if p.Project != name {
+			return toolErr(fmt.Sprintf("proposal %d not found for project '%s'", id, name))
+		}
+		return toolOK(map[string]any{"proposals": []*proposal{p}})
+	}
+
+	proposals, err := s.ListProposals(name, str(args, "status"))
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	if proposals == nil {
+		proposals = []*proposal{}
+	}
+	return toolOK(map[string]any{"proposals": proposals})
+}
+
+func registryUpdateProposal(args map[string]any) ToolResult {
+	name := str(args, "name")
+	status := str(args, "status")
+	id, hasID := int64Arg(args, "id")
+	if name == "" || status == "" || !hasID {
+		return toolErr("name, id, and status required")
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+
+	// Scope the update to the named project before touching anything.
+	p, err := s.GetProposal(id)
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	if p.Project != name {
+		return toolErr(fmt.Sprintf("proposal %d not found for project '%s'", id, name))
+	}
+
+	note := str(args, "decision_note")
+	supersededBy, hasSuperseded := int64Arg(args, "superseded_by")
+
+	if status == "superseded" {
+		if !hasSuperseded {
+			return toolErr("superseded_by required when status is 'superseded'")
+		}
+		// The note travels INTO SupersedeProposal so status, superseded_by and
+		// decision_note all move in that one transaction. Writing the note here
+		// as a separate statement would be a non-atomic read-modify-write around
+		// an atomic one: a failure between the two writes could strand the row,
+		// and the note write itself had to name a status, which meant resetting
+		// an already-decided row to pending to write it.
+		if err := s.SupersedeProposal(id, supersededBy, note); err != nil {
+			return toolErr(err.Error())
+		}
+		return toolOK(map[string]any{"ok": true})
+	}
+
+	if hasSuperseded {
+		return toolErr("superseded_by is only valid with status 'superseded'")
+	}
+	if err := s.UpdateProposalStatus(id, status, note); err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true})
 }
