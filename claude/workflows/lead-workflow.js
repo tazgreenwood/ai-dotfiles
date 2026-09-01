@@ -416,10 +416,30 @@ function normalizeDecisionToken(text, botUserId) {
   return out.replace(/[.!]+$/, '').trim()
 }
 
+// A leading rejection token followed by a hard separator ("reject, already
+// exists" / "no. wrong repo") is a rejection with a reason, not a change
+// request. A separator is REQUIRED so "no idea what this is" stays pushback.
+//
+// This leniency is deliberately asymmetric — rejection only, never approval —
+// because the failure modes are asymmetric. Observed both on 2026-09-01:
+//   - "reject, already exists"  misread as pushback -> re-plans work the human
+//     just declined. Pure waste, and confusing.
+//   - "approve, are we really loading every projects context on every message"
+//     read as pushback -> produced a revision that corrected a false premise in
+//     the proposal. The strict reading was RIGHT there.
+// So a missed rejection costs real work; a strictly-read approval costs one
+// revision that is often worth having. Loosen the cheap side only.
+const REJECTION_PREFIX_RE = new RegExp(
+  '^(' + [...REJECTION_TOKENS].map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')' +
+  '\\s*[,.;:—–\\n]',
+  'i',
+)
+
 function classifyReply(text, botUserId) {
   const token = normalizeDecisionToken(text, botUserId)
   if (APPROVAL_TOKENS.has(token)) return 'approved'
   if (REJECTION_TOKENS.has(token)) return 'rejected'
+  if (REJECTION_PREFIX_RE.test(token)) return 'rejected'
   return 'pushback'
 }
 
