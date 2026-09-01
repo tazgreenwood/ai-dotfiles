@@ -73,14 +73,14 @@
           {{if .Kind}}<span class="ml-1.5 text-xs text-zinc-500 dark:text-zinc-400">{{.Kind}}</span>{{end}}
         </td>
         <td class="py-2 pr-4">
-          {{if .NotifiedAt}}
-            {{if .SourcePermalink}}
-            <a href="{{.SourcePermalink}}" rel="noopener noreferrer" class="text-zinc-600 dark:text-zinc-300 hover:underline">Open in Slack &rarr;</a>
-            {{else}}
-            <span class="text-zinc-500 dark:text-zinc-400">Sent &mdash; open your Slack DMs</span>
-            {{end}}
-          {{else}}
-          <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 ring-1 ring-inset ring-zinc-500/20">Not sent</span>
+          {{/* Link availability and delivery status are INDEPENDENT facts.
+               Gating the anchor on .NotifiedAt hid a working permalink behind a
+               "Not sent" badge on exactly the rows that needed the exit most. */}}
+          {{if .SourcePermalink}}
+          <a href="{{.SourcePermalink}}" target="_blank" rel="noopener noreferrer" class="text-zinc-600 dark:text-zinc-300 hover:underline">Open in Slack &rarr;</a>
+          {{end}}
+          {{if not .NotifiedAt}}
+          <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 ring-1 ring-inset ring-zinc-500/20{{if .SourcePermalink}} ml-1.5{{end}}">Not sent</span>
           <div class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Recorded but never delivered to Slack.</div>
           {{end}}
         </td>

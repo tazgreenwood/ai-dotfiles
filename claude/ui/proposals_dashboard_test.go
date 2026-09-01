@@ -244,11 +244,14 @@ func TestDashboardProposals_ProjectFilter(t *testing.T) {
 	}
 }
 
-// The three permalink render states. The invariant under test is that the
-// queue never renders an anchor it cannot honour — an empty href would be a
-// dead exit on the only actionable control on the row.
+// The permalink render states. Two invariants:
+//   1. The queue never renders an anchor it cannot honour — an empty href would
+//      be a dead exit on the only actionable control on the row.
+//   2. Link availability and delivery status are INDEPENDENT facts. Gating the
+//      anchor on notified_at hid a working permalink behind a "Not sent" badge,
+//      which is the bug this suite now pins against (DOTFILES-39).
 func TestDashboardProposals_PermalinkRenderStates(t *testing.T) {
-	t.Run("pending and never notified renders Not sent with no anchor", func(t *testing.T) {
+	t.Run("permalink present but never notified renders BOTH the link and Not sent", func(t *testing.T) {
 		dir, cleanup := setupFixtureDir(t)
 		defer cleanup()
 		seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
@@ -259,21 +262,23 @@ func TestDashboardProposals_PermalinkRenderStates(t *testing.T) {
 		defer ts.Close()
 
 		body := getBody(t, ts.URL+"/proposals")
+		// The row is actionable and the exit exists in the data — render it.
+		if !strings.Contains(body, `href="https://slack.example/archives/C1/p1"`) {
+			t.Errorf("want the permalink anchor even when notified_at is NULL, got:\n%s", body)
+		}
+		if !strings.Contains(body, "Open in Slack") {
+			t.Errorf("want the 'Open in Slack' label")
+		}
+		// Delivery status is still reported, independently of the link.
 		if !strings.Contains(body, "Not sent") {
-			t.Errorf("want 'Not sent' badge, got:\n%s", body)
+			t.Errorf("want 'Not sent' to remain as a delivery signal")
 		}
 		if !strings.Contains(body, "Recorded but never delivered to Slack.") {
 			t.Errorf("want the explanatory line under 'Not sent'")
 		}
-		if strings.Contains(body, "Open in Slack") {
-			t.Errorf("want NO 'Open in Slack' anchor for a never-notified proposal")
-		}
-		if strings.Contains(body, "https://slack.example/archives/C1/p1") {
-			t.Errorf("want the stored permalink NOT rendered while notified_at is NULL")
-		}
 	})
 
-	t.Run("notified with empty permalink renders plain text, no anchor", func(t *testing.T) {
+	t.Run("empty permalink renders no anchor and no empty href", func(t *testing.T) {
 		dir, cleanup := setupFixtureDir(t)
 		defer cleanup()
 		seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
@@ -284,18 +289,21 @@ func TestDashboardProposals_PermalinkRenderStates(t *testing.T) {
 		defer ts.Close()
 
 		body := getBody(t, ts.URL+"/proposals")
-		if !strings.Contains(body, "open your Slack DMs") {
-			t.Errorf("want the 'Sent — open your Slack DMs' fallback, got:\n%s", body)
-		}
 		if strings.Contains(body, "Open in Slack") {
-			t.Errorf("want NO anchor when the permalink is empty")
+			t.Errorf("want NO anchor when the permalink is empty, got:\n%s", body)
 		}
 		if strings.Contains(body, `href=""`) {
 			t.Errorf("want NO empty href anywhere in the page")
 		}
+		// The old 'Sent — open your Slack DMs' branch was unreachable in
+		// practice (store.go rejects an empty source_permalink at create time)
+		// and has been removed; it must not come back.
+		if strings.Contains(body, "open your Slack DMs") {
+			t.Errorf("the unreachable 'open your Slack DMs' branch must stay deleted")
+		}
 	})
 
-	t.Run("notified with permalink renders the cell link", func(t *testing.T) {
+	t.Run("notified with permalink renders the link in a new tab", func(t *testing.T) {
 		dir, cleanup := setupFixtureDir(t)
 		defer cleanup()
 		seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
@@ -309,11 +317,17 @@ func TestDashboardProposals_PermalinkRenderStates(t *testing.T) {
 		if !strings.Contains(body, `href="https://slack.example/archives/C1/p2"`) {
 			t.Errorf("want the permalink anchor, got:\n%s", body)
 		}
-		if !strings.Contains(body, "Open in Slack") {
-			t.Errorf("want the 'Open in Slack' label")
+		// Without target="_blank" the rel attributes are inert and the click
+		// navigates the queue away, losing the filter state.
+		if !strings.Contains(body, `target="_blank"`) {
+			t.Errorf("want target=\"_blank\" so rel=noopener noreferrer is meaningful")
 		}
+		if !strings.Contains(body, `rel="noopener noreferrer"`) {
+			t.Errorf("want rel=noopener noreferrer retained alongside target=_blank")
+		}
+		// A delivered row has nothing to warn about.
 		if strings.Contains(body, "Not sent") {
-			t.Errorf("want NO 'Not sent' badge on a notified row")
+			t.Errorf("want NO 'Not sent' badge on a delivered row")
 		}
 	})
 }
