@@ -213,13 +213,10 @@ else
 # successfully and never reaches your phone.
 #SLACK_BOT_TOKEN=
 #
-# READ credential, used by `/lead check` to read approve/pushback replies. The
-# Stuart channel is PRIVATE, so conversations.replies needs groups:history,
-# which the aiportal bot token does NOT hold (granted: channels:history,
-# chat:write, commands). Pick ONE:
-#   (a) add groups:history to the aiportal Slack app and reinstall it — then the
-#       bot token above is enough and you can leave SLACK_USER_TOKEN unset; or
-#   (b) paste a user token that holds groups:history below.
+# OPTIONAL — currently unnecessary. Verified 2026-09-01 that BOTH reads
+# `/lead check` needs work with the bot token alone: conversations.replies
+# (per-thread, the decisions half) and conversations.history (channel scan, the
+# poll half) each return ok:true. Leave unset.
 #SLACK_USER_TOKEN=
 ENVEOF
   umask 022
@@ -228,12 +225,6 @@ ENVEOF
   echo "  ⚠ ACTION REQUIRED: fill in SLACK_BOT_TOKEN"
 fi
 
-if [ -f "$STUART_ENV" ] && ! grep -qE '^[[:space:]]*SLACK_USER_TOKEN=.' "$STUART_ENV"; then
-  echo "  ⚠ note (slack read scope): the Stuart channel is PRIVATE, so reading"
-  echo "    replies needs groups:history. Either add that scope to the aiportal app"
-  echo "    and reinstall it, or append SLACK_USER_TOKEN=<token with groups:history>"
-  echo "    to $STUART_ENV. Posting proposals works without it; '/lead check' does not."
-fi
 
 echo ""
 echo "Add to /etc/hosts for clean URL:"
