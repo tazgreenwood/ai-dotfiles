@@ -1179,9 +1179,9 @@ func (s *store) ClaimProposalForBuild(project string, proposalID int64) (int64, 
 		_ = err
 	}
 
-	var rowProject, status string
-	err = tx.QueryRow(`SELECT project, status FROM proposals WHERE id = ?`, proposalID).
-		Scan(&rowProject, &status)
+	var rowProject, status, kind string
+	err = tx.QueryRow(`SELECT project, status, kind FROM proposals WHERE id = ?`, proposalID).
+		Scan(&rowProject, &status, &kind)
 	if err == sql.ErrNoRows {
 		return 0, fmt.Errorf("proposal %d not found", proposalID)
 	}
@@ -1193,6 +1193,16 @@ func (s *store) ClaimProposalForBuild(project string, proposalID int64) (int64, 
 	}
 	if status != "approved" {
 		return 0, fmt.Errorf("proposal %d is %s, not approved — only an approved proposal can be built", proposalID, status)
+	}
+	// Only a plan carries a plan body. A "registration" payload is
+	// {name, local_path, remote, drafted_purpose, ...} — building it would
+	// allocate a ticket and write a plan row with no steps. Approved
+	// registrations became routine when that kind was added, and /lead build
+	// with no id takes the NEWEST approved proposal, which right after a
+	// registration approval is the registration itself. The kind restriction
+	// lived only in skill prose; it belongs here, with the other guards.
+	if kind != "plan" {
+		return 0, fmt.Errorf("proposal %d is kind %q, not \"plan\" — only a plan proposal carries a plan body and can be built", proposalID, kind)
 	}
 
 	// Guard A: a run already carries it. The human wants --resume, not a second

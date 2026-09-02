@@ -1250,3 +1250,45 @@ func TestSumCostSince_IsGlobalAndZeroWhenEmpty(t *testing.T) {
 		t.Errorf("want a cross-project total of 1.0 over 2 calls, got %v over %d", total, n)
 	}
 }
+
+// TestClaimProposalForBuild_RefusesNonPlanKind pins the kind guard. Adding the
+// "registration" kind made approved non-plan proposals routine, and /lead build
+// with no id takes the newest approved proposal — which right after a
+// registration approval is the registration row, whose payload is not a plan.
+// Refusing in the store keeps the guard where the other claim guards live,
+// rather than in prompt prose that can drift.
+func TestClaimProposalForBuild_RefusesNonPlanKind(t *testing.T) {
+	s := newTestStore(t)
+
+	p := sampleProposal("register some-repo")
+	p.Kind = "registration"
+	p.SourceRef = "1756600009.000901"
+	id, err := s.CreateProposal(p)
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+	if err := s.UpdateProposalStatus(id, "approved", "approve"); err != nil {
+		t.Fatalf("UpdateProposalStatus: %v", err)
+	}
+
+	if _, err := s.ClaimProposalForBuild(p.Project, id); err == nil {
+		t.Fatal("claim succeeded for kind=registration; want refusal")
+	} else if !strings.Contains(err.Error(), "not \"plan\"") {
+		t.Errorf("error should name the kind guard, got: %v", err)
+	}
+
+	// A plan proposal in the same state still claims cleanly.
+	q := sampleProposal("do the work")
+	q.Kind = "plan"
+	q.SourceRef = "1756600009.000902"
+	qid, err := s.CreateProposal(q)
+	if err != nil {
+		t.Fatalf("CreateProposal(plan): %v", err)
+	}
+	if err := s.UpdateProposalStatus(qid, "approved", "approve"); err != nil {
+		t.Fatalf("UpdateProposalStatus(plan): %v", err)
+	}
+	if _, err := s.ClaimProposalForBuild(q.Project, qid); err != nil {
+		t.Fatalf("claim refused a plan proposal: %v", err)
+	}
+}
