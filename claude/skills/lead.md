@@ -128,11 +128,11 @@ The trigger is untrusted Slack text, so Stuart proposes and a human approves. Ru
 - `kind` is `"registration"`.
 - `summary` is one line: `Register <name> (<path>) so I can plan: <short restatement of the request>`.
 
-**`source_ref` must NOT be the originating message ts, and this is load-bearing.** In check mode the workflow's Claim phase has *already* written a row for that message before you were ever asked to route it — `kind: "plan"`, `source_ref` = the message ts, payload `{request_text, slack_user, slack_ts, slack_channel, untrusted}`. `UNIQUE(source, source_ref)` means a registration reusing that ts is refused as `already exists`, which STEP 5 treats as a *success* condition, so the registration would silently never persist. The human would then approve a row whose `kind` is still `"plan"`, STEP 7 would take the record-only branch, and nothing would be registered or planned — a reported-successful approval that did nothing. `registry_update_proposal` carries only `status`/`decision_note`/`superseded_by`, so neither the claim row's `kind` nor its `payload` can be repaired after the fact. The only fix is not to collide.
+**`source_ref` is `<originating message ts>:registration`, not the bare ts.** In check mode the workflow's Claim phase writes an **inbox** row for that message — `source: "slack"`, `source_ref` = the message ts, `raw_text` = the message text, no `kind` and no `summary` — so the `proposals` table no longer holds a row keyed on that ts and a bare-ts registration would not in fact collide. The suffix stays anyway: it is unambiguous, it keeps every second row about one message distinguishable, and changing a load-bearing dedup key to save four characters buys nothing. Use the suffixed form.
 
 So:
 
-- `source_ref` is `<originating message ts>:registration`. Unique against the claim row, and still traceable to the message it came from.
+- `source_ref` is `<originating message ts>:registration`. Distinct from any other row about this message, and still traceable to the message it came from.
 - `payload.thread_ts` is the **originating message ts**, unmodified. The decisions sweep reads a proposal's thread from `payload.thread_ts` when present and falls back to `source_ref` only otherwise — so without this the sweep would try to read a thread at a ts Slack has never heard of, and the approval could never be classified.
 - `source_permalink` and `source_channel` stay those of the originating message.
 
@@ -154,9 +154,11 @@ So:
 
 `request_text` is the **same string under the name the workflow reads**. `lead-workflow`'s Decisions phase copies `payload.request_text` into every pushback entry (empty string when absent), so a registration payload that carried only `original_request` would hand the generic re-plan path an empty request and design a plan from a note alone. Both keys, same text, always.
 
-**Then supersede the claim row — after the registration proposal exists.** The claim row is `pending`, `kind: "plan"`, under this same project, and carries a payload that is not a plan. Left alone it is a live proposal a human could approve, and STEP 7 would take the record-only branch on it. So once the registration proposal is persisted, call `registry_update_proposal(project_name, <claim row id>, "superseded", superseded_by=<the registration proposal's id>, decision_note="superseded by registration proposal for <name>")`. Successor first, supersede second — a `superseded` row with no successor is a decision that vanished. Find the claim row's id from the `new_requests` entry the workflow returned for this message, or via `registry_get_proposals(project_name, status="pending")` matching `source_ref` to the message ts.
+**Then close out the inbox row — after the registration proposal exists.** The captured row is still open (`status: "new"`), so a later sweep would see it as untriaged work and route it again. Once the registration proposal is persisted, call `registry_update_inbox(<inbox row id>, status="routed", proposal_id=<the registration proposal's id>)`. Successor first, update second — an inbox row marked `routed` at a proposal that was never written points at nothing. The inbox row's id is the `inbox_id` on the `new_requests` entry the workflow returned for this message.
 
-In **propose mode** (`/lead <request>`) there is no Claim phase and so no claim row: use the same `<ts>:registration` shape for consistency, and skip the supersede — there is nothing to supersede. Say which case applied in the report.
+There is nothing to supersede: the captured row lives in `inbox`, not `proposals`, so it is not a live proposal a human could approve, and no `registry_update_proposal` call belongs on this path.
+
+In **propose mode** (`/lead <request>`) there is no Claim phase and so no inbox row: use the same `<ts>:registration` shape for consistency, and skip the inbox update — there is nothing to update. Say which case applied in the report.
 
 Then STEP 6 reports as usual and **stops**. Approving a registration is handled in STEP 7; nothing is written to the registry here.
 
@@ -186,7 +188,7 @@ In check mode, call the `Workflow` tool with:
 The workflow does every "is this new?" and "did a human approve?" decision in real control flow, not LLM judgment — an LLM re-deciding "have I seen this message?" will eventually double-plan a request and notify twice. It returns:
 
 ```
-{ status, new_requests: [{ request_text, source_ref, source_channel }],
+{ status, new_requests: [{ inbox_id, request_text, source_ref, source_channel }],
   decisions: { approved, rejected, pushbacks, awaiting_reply, errors } }
 ```
 
@@ -375,7 +377,7 @@ Call `registry_write_proposal(project_name, proposal)`:
 Notes:
 - Persist **after** posting, because `source_permalink` is required at create time and `notified_at` is only settable at create time — `registry_update_proposal` carries decision fields (`status`, `decision_note`, `superseded_by`) only. STEP 3 before STEP 5 is the ordering the API allows, not a preference.
 - Do not set `status`; it defaults to `pending`. Do not set `id`, `project`, `created_at`, `decided_at` or `superseded_by` — the server owns those.
-- **`source_ref` must be unique per ROW, not per message.** The naive value — the originating message ts — is already taken in check mode: the workflow's Claim phase writes a `kind: "plan"` row keyed on that exact ts before the skill routes anything. `UNIQUE(source, source_ref)` is status-blind, so a superseded row still holds its key. Any *second* row about the same message therefore needs a suffixed key:
+- **`source_ref` must be unique per ROW, not per message.** `UNIQUE(source, source_ref)` is status-blind, so a superseded row still holds its key — a revision that reused the key it is superseding would be refused as `already exists`, which STEP 5 treats as a *success* condition, so nothing would persist. Any *second* row about the same message therefore needs a suffixed key (the Claim phase captures into `inbox`, not `proposals`, so the bare ts is free — the suffixes below are kept deliberately, not to dodge that row):
 
 | Row | `source_ref` |
 |---|---|
@@ -636,7 +638,7 @@ A correct check run leaves:
 - Reply with a corrected purpose on a `kind: "registration"` proposal → **nothing registered**; `registry_index()` unchanged; a NEW `kind: "registration"` proposal in the **same** thread, `pending`, carrying the corrected `drafted_purpose` and the original `original_request`/`request_text`; the old row `superseded` with `superseded_by` = that proposal's id and the reply in `decision_note`; **no** project row, **no** plan designed from an empty request, **no** plan row, **no** branch, **no** commit
 - Reply with a multi-line note, a question, or a dispute on a `kind: "registration"` proposal → **nothing registered and nothing written**; a clarification posted in the same thread; the row still `pending`
 - Any reply that is not a terminal `approve`/`approved`/`lgtm`/`ship it` → **no `registry_init_project` call, ever**. Registration happens on the approved classification and nowhere else
-- A registration proposal written in check mode → its own row, `kind: "registration"`, `source_ref` = `<ts>:registration`, `payload.thread_ts` = the originating ts; and the Claim phase's `kind: "plan"` row for that same message `superseded` with `superseded_by` pointing at it. Never one row silently left as `kind: "plan"` — an `approve` on that is a no-op, which is the failure this shape exists to prevent
+- A registration proposal written in check mode → its own row, `kind: "registration"`, `source_ref` = `<ts>:registration`, `payload.thread_ts` = the originating ts; and the Claim phase's **inbox** row for that same message moved to `status: "routed"` with `proposal_id` pointing at it. Never an inbox row left open behind a proposal that already exists — a later sweep would treat it as untriaged and route the same message twice
 - Every proposal the sweep must ever decide on → filed under the project the sweep polls. A row filed under a project with no `resources.slack.*` is unreachable by any `/lead check`, so its approval can never be recorded
 - **No `source: "session"` row left `pending`** — every session-sourced proposal is persisted with its decision already recorded, or handed to Slack so the sweep can decide it. A pending session row is undecidable by construction, not merely unnoticed
 - Reply with a substantive change request → a second bot-authored message in the **same** thread; the old row `superseded` with `superseded_by` = the new id and the note in `decision_note`; the new row `pending`; `registry_get_proposals(project)` returning **both**
