@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -102,6 +103,31 @@ func TestCreateProposal_RejectsBadKindAndStatus(t *testing.T) {
 	bad2.Status = "shipped"
 	if _, err := s.CreateProposal(bad2); err == nil {
 		t.Error("want error for invalid status, got nil")
+	}
+}
+
+// TestCreateProposal_ValidKinds pins the kind enum. "registration" joins the
+// original four so Stuart can propose registering an unregistered repo through
+// the same approval gate a plan goes through; the enum stays closed so a typo
+// is still an error rather than a silently unroutable row.
+func TestCreateProposal_ValidKinds(t *testing.T) {
+	s := newTestStore(t)
+
+	for i, kind := range []string{"plan", "fix", "review", "improvement", "registration"} {
+		p := sampleProposal("kind " + kind)
+		p.Kind = kind
+		p.SourceRef = fmt.Sprintf("1756600001.0001%02d", i)
+		id, err := s.CreateProposal(p)
+		if err != nil {
+			t.Fatalf("CreateProposal(kind=%q): %v", kind, err)
+		}
+		got, err := s.GetProposal(id)
+		if err != nil {
+			t.Fatalf("GetProposal(kind=%q): %v", kind, err)
+		}
+		if got.Kind != kind {
+			t.Errorf("kind: want %q, got %q", kind, got.Kind)
+		}
 	}
 }
 
@@ -1222,5 +1248,47 @@ func TestSumCostSince_IsGlobalAndZeroWhenEmpty(t *testing.T) {
 	}
 	if total != 1.0 || n != 2 {
 		t.Errorf("want a cross-project total of 1.0 over 2 calls, got %v over %d", total, n)
+	}
+}
+
+// TestClaimProposalForBuild_RefusesNonPlanKind pins the kind guard. Adding the
+// "registration" kind made approved non-plan proposals routine, and /lead build
+// with no id takes the newest approved proposal — which right after a
+// registration approval is the registration row, whose payload is not a plan.
+// Refusing in the store keeps the guard where the other claim guards live,
+// rather than in prompt prose that can drift.
+func TestClaimProposalForBuild_RefusesNonPlanKind(t *testing.T) {
+	s := newTestStore(t)
+
+	p := sampleProposal("register some-repo")
+	p.Kind = "registration"
+	p.SourceRef = "1756600009.000901"
+	id, err := s.CreateProposal(p)
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+	if err := s.UpdateProposalStatus(id, "approved", "approve"); err != nil {
+		t.Fatalf("UpdateProposalStatus: %v", err)
+	}
+
+	if _, err := s.ClaimProposalForBuild(p.Project, id); err == nil {
+		t.Fatal("claim succeeded for kind=registration; want refusal")
+	} else if !strings.Contains(err.Error(), "not \"plan\"") {
+		t.Errorf("error should name the kind guard, got: %v", err)
+	}
+
+	// A plan proposal in the same state still claims cleanly.
+	q := sampleProposal("do the work")
+	q.Kind = "plan"
+	q.SourceRef = "1756600009.000902"
+	qid, err := s.CreateProposal(q)
+	if err != nil {
+		t.Fatalf("CreateProposal(plan): %v", err)
+	}
+	if err := s.UpdateProposalStatus(qid, "approved", "approve"); err != nil {
+		t.Fatalf("UpdateProposalStatus(plan): %v", err)
+	}
+	if _, err := s.ClaimProposalForBuild(q.Project, qid); err != nil {
+		t.Fatalf("claim refused a plan proposal: %v", err)
 	}
 }

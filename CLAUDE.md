@@ -94,7 +94,11 @@ Response: { "name": "...", "repo": {...}, "deploy": {...}, "ticket_counter": N, 
 Sets value in project metadata via dot-path. Makes intermediate objects as needed.
 
 #### `registry_init_project(name: string, workspace?: string, localPath?: string, base?: string, prTarget?: string, profile?: string, cluster?: string, logGroup?: string, env?: string) -> {ok: bool, created: string, data: map[string]any} | error`
-Makes new project entry, defaults on missing fields.
+Makes new project entry. **An omitted field is not left unset — it is stamped with a default**, and the defaults are this workspace's, not the caller's repo's: `workspace` → `$BITBUCKET_WORKSPACE` else `clearlinkit` (a *Bitbucket* workspace, written onto GitHub repos too), `base` → `production`, `prTarget` → `staging`, `profile` → `martech`, `cluster` → `general-production`, `logGroup` → `<name>-production`, `env` → `production`.
+
+So "omit it rather than guess" is never available here: omitting *is* a guess, just an invisible one. A repo whose default branch is `master` registered without an explicit `base` points every later `/plan`, `/build` and `/ship` at a branch that does not exist. Callers must pass what they know (resolve the real default branch with `git -C <path> symbolic-ref --short refs/remotes/origin/HEAD`) and **report every value that was stamped rather than chosen**. Re-initialising an existing name is refused — `project '%s' already exists`; use `registry_set` to update fields.
+
+**There is no delete counterpart.** Nothing in the MCP surface removes a project, so a wrong registration is permanent and degrades `registry_index()` routing for every later request until the database is edited by hand. Callers that register from an *inferred* target (rather than a human naming it) must corroborate the inference before writing — see `/lead` STEP 7 B0.
 
 #### `registry_list_projects() -> {projects: []string}`
 Lists all projects in registry.
@@ -226,9 +230,11 @@ The `agent_runs` resume spine behind `/lead build`. One row ties proposal → pl
 `registry_update_run` writes phase, status, cursor, note and ticket in a **single statement** — deliberately not the `UpdateStep` read-modify-write, since this is the row a concurrent resume reads. **Omitting `cursor` or `ticket` leaves the stored value unchanged**: a phase-only advance that blanked the cursor would make a resume re-run completed steps, and the ticket can only ever arrive on a later advance because the run is opened *before* the key is allocated. Writes are scoped to the caller's project.
 
 #### `registry_write_proposal(name: string, proposal: map[string]any) -> {ok: bool, id: int} | error`
-Creates a proposal — a unit of work awaiting a human decision. Caller supplies `source`, `source_channel`, `source_ref`, `source_permalink` (all required, non-empty), `kind` (`plan|fix|review|improvement`), `summary`, `payload` (the full plan JSON), and optionally `notified_at` (RFC3339).
+Creates a proposal — a unit of work awaiting a human decision. Caller supplies `source`, `source_channel`, `source_ref`, `source_permalink` (all required, non-empty), `kind` (`plan|fix|review|improvement|registration`), `summary`, `payload` (the full plan JSON), and optionally `notified_at` (RFC3339).
 
 Server-owned, never accepted from the caller: `id`, `project`, `created_at`, `decided_at`, `superseded_by`. `status` defaults to `pending`.
+
+`kind: "registration"` is `/lead` STEP 1a-bis's zero-match output: the request matched no registered project but a repo on disk confidently matches it. Its `payload` is `{name, local_path, remote, drafted_purpose, original_request, request_text}` rather than a plan (`original_request` and `request_text` hold the **same** verbatim text — the first is what approval re-plans, the second is the key `lead-workflow`'s Decisions phase copies into pushback entries, so a payload carrying only one of them hands the re-plan path an empty request), and it is filed under the **cwd** project because the project it proposes does not exist yet. Registration is propose-only — the trigger text is untrusted, so nothing is written to the registry until a human approves.
 
 `notified_at` is **create-only** — `registry_update_proposal` carries decision fields only, so a proposal must be posted to Slack *before* it is persisted.
 
@@ -253,7 +259,7 @@ The supersede path writes `status`, `superseded_by` and `decision_note` in a **s
 | plan | `/plan` or `/plan ONE-XXXX` | ✓ Shipped | registry, jira (optional) |
 | ship | `/ship` or `/ship ONE-XXXX` | ✓ Shipped | registry, bitbucket, jira, security, reviewer, documenter, handover |
 | idea-validation | `/idea-validation` | ✓ Shipped | WebSearch, WebFetch, general-purpose agent |
-| lead (Stuart) | `/lead <request>` · `/lead check` · `/lead build [id]` · `--resume <run>` · `--in-session` | ✓ Shipped | registry, slack (bot token), lead-workflow.js, build, ship |
+| lead (Stuart) | `/lead <request>` · `/lead check` · `/lead build [id]` · `/lead register <name-or-path>` · `--resume <run>` · `--in-session` | ✓ Shipped | registry, slack (bot token), lead-workflow.js, build, ship |
 
 ---
 

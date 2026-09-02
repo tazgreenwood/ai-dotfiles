@@ -4,6 +4,7 @@ export const meta = {
   phases: [
     { title: 'Poll' },
     { title: 'Claim' },
+    { title: 'Discover' },
     { title: 'Decisions' },
     { title: 'Record' },
   ],
@@ -525,6 +526,321 @@ function decideForProposal(proposal, ctx) {
   }
 }
 
+// ── Repo discovery (mode: 'discover') ────────────────────────────────────────
+//
+// STEP 1a's zero-match branch needs to know whether the repo a request names
+// exists on disk but is simply unregistered. Finding it is control flow in this
+// file, not an agent free-forming `find` over $HOME: the roots, the depth, the
+// symlink policy and the result cap are fixed HERE, and the untrusted request
+// text never reaches the shell — the command is a constant built from validated
+// roots only. The agent is a relay that runs the one command this file composed
+// and transcribes its lines back.
+//
+// Ranking is code too. Name-token overlap with the request is a crude signal on
+// purpose: it is reproducible, it is explainable in the proposal, and the FINAL
+// CHOICE IS THE CALLER'S — this mode returns ranked candidates and a confidence
+// flag, never a registration. It also never opens a file inside a candidate;
+// drafting a purpose from the README is a later step, and only for the single
+// candidate a human is being asked about.
+//
+// Zero confident candidates is a first-class answer, not a failure: "nothing on
+// disk matches either" is exactly what the zero-match branch must be able to
+// say instead of silently planning against the cwd project.
+
+const DEFAULT_DISCOVER_ROOTS = ['$HOME/bitbucket.org', '$HOME/github.com']
+const DISCOVER_MAXDEPTH = 4
+// Hard ceiling on what the shell may emit, and on what we keep. ~50 repos live
+// under these roots today; the cap is the bound that keeps a routing miss from
+// turning into an unbounded filesystem crawl.
+const DISCOVER_SCAN_CAP = 300
+const DISCOVER_TOP_N = 5
+const MIN_TOKEN_LEN = 3
+// A candidate must be named at least half — by its own name's tokens — before
+// it is worth showing a human at all. Below that it shares one generic word
+// ("server", "web") with the request, which is noise, not a candidate.
+const MIN_CANDIDATE_SCORE = 0.5
+const CONFIDENT_MARGIN = 0.25
+
+const DISCOVER_SCHEMA = {
+  type: 'object',
+  properties: {
+    repos: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          root: { type: 'string', description: 'The expanded absolute root directory the repo was found under, copied verbatim (first tab-separated field)' },
+          path: { type: 'string', description: 'Absolute repo directory path, copied verbatim from the command output (second field)' },
+        },
+        required: ['root', 'path'],
+      },
+    },
+    error: { type: 'string', description: 'Set only if the command could not be run at all' },
+  },
+  required: ['repos'],
+}
+
+// Roots come from the caller, never from request text, but validate anyway: one
+// unescaped metacharacter here would be a shell injection into a command that
+// runs over the home directory. Anything suspicious is dropped, not quoted.
+function safeRoot(root) {
+  const r = String(root || '').trim().replace(/\/+$/, '')
+  if (!r) return ''
+  if (!/^[A-Za-z0-9$_./-]+$/.test(r)) return ''
+  if (r.includes('..')) return ''
+  return r
+}
+
+// What a declared root looks like once the shell has expanded it. The roots are
+// written with a literal `$HOME` (this file cannot read the environment), so a
+// returned path can never be prefix-checked against the UNexpanded string. The
+// command therefore echoes the expanded root alongside each repo, and we bind
+// that echo to the declared root by its suffix: `$HOME/github.com` accepts an
+// expanded root ending in `/github.com` and nothing else. That is what stops a
+// fabricated path from arriving under a directory nobody asked to scan.
+function rootSuffix(root) {
+  return String(root || '').replace(/^~/, '').replace(/^\$HOME/, '')
+}
+
+// Everything the relay agent returns is UNTRUSTED, and the prompt asking it not
+// to invent paths is a request, not an enforcement. Two things depend on this
+// value: it is persisted as a project's `localPath`, and `lead.md` interpolates
+// it into `git -C <path>`. So a path is DROPPED — never sanitized, never quoted
+// into safety — unless it is absolute, free of shell metacharacters and `..`,
+// and inside one of the roots this file actually declared.
+const MAX_DISCOVERED_PATH_LEN = 4096
+
+function safeDiscoveredPath(path, expandedRoot, suffixes) {
+  const p = String(path || '').trim().replace(/\/+$/, '')
+  const root = String(expandedRoot || '').trim().replace(/\/+$/, '')
+  if (!p || !root) return ''
+  if (p.length > MAX_DISCOVERED_PATH_LEN || root.length > MAX_DISCOVERED_PATH_LEN) return ''
+  // Conservative charset: no whitespace, quotes, $, ;, |, &, backticks, globs.
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(p)) return ''
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(root)) return ''
+  if (p.includes('..') || root.includes('..')) return ''
+  // The echoed root must be one we asked for, and the repo must sit under it.
+  if (!suffixes.some(sfx => sfx && root.endsWith(sfx))) return ''
+  if (!p.startsWith(root + '/')) return ''
+  return p
+}
+
+// One fixed command, and deliberately a SMALL one: it lists directory paths and
+// nothing else.
+//
+// It used to also run `git -C <dir> remote get-url origin` for every repo it
+// found. That was dropped — not for speed, but because enumerating the remote
+// URLs of ~60 repositories across a home directory is indistinguishable from
+// reconnaissance, and it is data discovery does not need: only ONE candidate is
+// ever proposed, and the caller reads that single repo's remote itself.
+// Collecting 59 remotes to use one is a wider blast radius and a worse
+// signature for no benefit. Observed in practice: the relay subagent running
+// the old command was flagged by the platform's security classifier on every
+// discover run, despite behaving exactly as instructed.
+//
+// `find` is invoked WITHOUT -L so symlinked directories are never followed,
+// `-name .git -prune` matches both a .git directory and the .git file a
+// worktree leaves behind while never descending into either, and the head cap
+// bounds the number of results.
+function discoverCommand(roots) {
+  const list = roots.map(r => `"${r}"`).join(' ')
+  return [
+    `for r in ${list}; do [ -d "$r" ] || continue;`,
+    `find "$r" -maxdepth ${DISCOVER_MAXDEPTH} -name .git -prune -print 2>/dev/null`,
+    `| sed -e 's:/\\.git$::' -e "s:^:$r\\t:";`,
+    `done | sort -u | head -${DISCOVER_SCAN_CAP}`,
+  ].join(' ')
+}
+
+function discoverPrompt(command) {
+  return `Run ONE shell command and transcribe its output. This is a mechanical relay: run, read, return. Do not plan, judge, rank, register anything, open any file inside any repo, or call any tool other than the shell.
+
+Run exactly this command, verbatim, with no edits, additions or substitutions:
+
+\`\`\`bash
+${command}
+\`\`\`
+
+Each output line is TAB-separated with two fields: the root directory the repo was found under, then the repo directory path. Emit one entry per line: \`root\` = the first field, \`path\` = the second. Copy both verbatim. Do not invent, resolve, normalize, expand, shorten or reorder paths, and do not add repos the command did not print — the caller re-checks every path against the roots and silently drops anything that does not match, so an altered path is a dropped repo, not a helpful correction.
+
+Do not run any other command. In particular do not widen the search, raise the depth, follow symlinks, read README files, inspect repo contents, or run any \`git\` command — not even to read a remote. The caller does all of that later, for one chosen repo only.
+
+If the command cannot be run at all, return an empty \`repos\` array and put the reason in \`error\`.
+
+Return JSON matching the given schema.`
+}
+
+// Registered projects arrive either as bare names or as registry_index rows.
+// Both a name match and a path match exclude a repo: registry_index is the
+// authority on what is already registered, and discovery must never propose
+// re-registering something it already lists.
+function pathKey(value) {
+  const segments = String(value || '').trim().replace(/\/+$/, '').split('/').filter(Boolean)
+  return segments.slice(-2).join('/').toLowerCase()
+}
+
+function registeredIndex(registeredNames) {
+  const names = new Set()
+  const paths = new Set()
+  for (const entry of registeredNames || []) {
+    if (!entry) continue
+    if (typeof entry === 'string') {
+      const v = entry.trim()
+      if (!v) continue
+      names.add(v.toLowerCase())
+      if (v.includes('/')) paths.add(pathKey(v))
+      continue
+    }
+    if (entry.name) names.add(String(entry.name).trim().toLowerCase())
+    const local = entry.local_path || entry.localPath || entry.path
+    if (local) {
+      paths.add(pathKey(local))
+      const base = String(local).replace(/\/+$/, '').split('/').filter(Boolean).pop()
+      if (base) names.add(base.toLowerCase())
+    }
+  }
+  return { names, paths }
+}
+
+// Generic English filler only. Nothing domain-flavoured belongs here: dropping
+// a word like "api" or "server" would quietly make a real repo unmatchable.
+const TOKEN_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'into', 'that', 'this', 'these', 'those',
+  'can', 'you', 'our', 'are', 'was', 'were', 'has', 'have', 'had', 'not', 'but',
+  'please', 'should', 'would', 'could', 'need', 'needs', 'about', 'add', 'fix',
+  'make', 'want', 'repo', 'repos', 'project', 'projects',
+])
+
+// Repo names that are also ordinary English words. A verbatim occurrence of one
+// of these proves nothing — "can you write docs for the onboarding flow" names
+// a `docs` repo verbatim by accident, which is the same coincidence a one-token
+// score of 1.0 represents. They are still RANKED and still SHOWN as candidates;
+// they just cannot promote themselves to `confident` on the verbatim rule
+// alone, and a second matched token clears the bar as usual.
+const GENERIC_REPO_NAMES = new Set([
+  'docs', 'doc', 'chat', 'hub', 'web', 'api', 'app', 'apps', 'site', 'core',
+  'server', 'client', 'tools', 'utils', 'util', 'lib', 'libs', 'test', 'tests',
+  'config', 'infra', 'scripts', 'data', 'admin', 'auth', 'common', 'shared',
+])
+
+function tokenize(text) {
+  return String(text || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(t => t.length >= MIN_TOKEN_LEN && !TOKEN_STOPWORDS.has(t))
+}
+
+// Fraction of the repo's OWN name the request actually names, so a request
+// saying "mapi" does not score `mapi-server` as highly as `mapi`, plus a full
+// point when the request contains the repo name verbatim. A repo the request
+// does not name at all scores exactly 0 and is dropped — that is what makes a
+// nonsense request return nothing rather than a weak guess.
+//
+// `hits` and `verbatim` come back with the score because the SCORE ALONE cannot
+// separate a real match from a coincidence: a one-token repo name scores a full
+// 1.0 on a single incidental word, which is how "add a stack trace to the logs"
+// used to confidently match `cl-stack`. The ratio still ranks; whether a leader
+// may be called confident is decided from these two fields.
+function scoreCandidate(candidate, requestTokens, requestLower) {
+  const nameTokens = new Set(tokenize(candidate.name))
+  if (nameTokens.size === 0) return { score: 0, hits: 0, verbatim: false }
+  let hits = 0
+  for (const t of nameTokens) if (requestTokens.has(t)) hits++
+  if (hits === 0) return { score: 0, hits: 0, verbatim: false }
+  let score = hits / nameTokens.size
+  const name = String(candidate.name).toLowerCase()
+  const verbatim = name.length >= MIN_TOKEN_LEN && requestLower.includes(name)
+  if (verbatim) score += 1
+  return { score, hits, verbatim }
+}
+
+function rankCandidates(repos, requestText) {
+  const requestTokens = new Set(tokenize(requestText))
+  const requestLower = String(requestText || '').toLowerCase()
+  const scored = []
+  for (const repo of repos || []) {
+    const { score, hits, verbatim } = scoreCandidate(repo, requestTokens, requestLower)
+    if (score < MIN_CANDIDATE_SCORE) continue
+    scored.push({ ...repo, score: Math.round(score * 1000) / 1000, hits, verbatim })
+  }
+  scored.sort((a, b) => (b.score - a.score) || a.name.localeCompare(b.name))
+  const top = scored.slice(0, DISCOVER_TOP_N)
+  // Confident requires ACTUAL EVIDENCE of naming, not just a high ratio: either
+  // the request contains the repo's name verbatim, or it names more than one of
+  // that name's tokens. A single shared word is a coincidence however large the
+  // ratio it produces — `cl-stack` tokenizes to just ['stack'], so "add a stack
+  // trace to the logs" scored a perfect 1.0 on one incidental word, and
+  // one-token names (chat, docs, golib, lapi, hub) are the common case on disk.
+  // The score threshold and the no-tie rule still apply on top.
+  //
+  // Low-confidence rows stay in `candidates` so the human still sees them. What
+  // changes here is only what may be CALLED confident — a tie, or a coincidence,
+  // is a question for the human, never a coin flip made in this file.
+  const leader = top[0]
+  const namedEnough = Boolean(leader && (
+    leader.hits > 1 ||
+    (leader.verbatim && !GENERIC_REPO_NAMES.has(String(leader.name).toLowerCase()))
+  ))
+  const confident = Boolean(
+    top.length > 0 &&
+    namedEnough &&
+    leader.score > MIN_CANDIDATE_SCORE &&
+    (top.length === 1 || leader.score - top[1].score >= CONFIDENT_MARGIN),
+  )
+  return { candidates: top, confident }
+}
+
+// Walk the bounded roots and return every unregistered repo as {name, path}.
+// No remote — see discoverCommand. No ranking here either: ranking needs the
+// request text, and this stays a plain "what is on disk that the registry does
+// not know about" answer.
+async function discoverRepos(roots, registeredNames) {
+  const safeRoots = (roots && roots.length ? roots : DEFAULT_DISCOVER_ROOTS).map(safeRoot).filter(Boolean)
+  if (safeRoots.length === 0) {
+    return { repos: [], scanned: 0, roots: [], error: 'no usable discovery roots (a root with shell metacharacters is refused, never quoted)' }
+  }
+
+  const res = await agent(discoverPrompt(discoverCommand(safeRoots)), {
+    phase: 'Discover',
+    label: `discover:${safeRoots.length}-roots`,
+    agentType: 'general-purpose',
+    schema: DISCOVER_SCHEMA,
+    effort: 'low',
+  })
+
+  if (!res || res.error) {
+    return { repos: [], scanned: 0, roots: safeRoots, error: (res && res.error) || 'repo discovery command could not be run' }
+  }
+
+  const blocked = registeredIndex(registeredNames)
+  const suffixes = safeRoots.map(rootSuffix).filter(Boolean)
+  const seen = new Set()
+  const repos = []
+  let scanned = 0
+  let rejected = 0
+  for (const row of res.repos || []) {
+    scanned++
+    if (scanned > DISCOVER_SCAN_CAP) break
+    // The relay is untrusted: a path that is not demonstrably inside a declared
+    // root, or that carries anything a shell could act on, is dropped here and
+    // counted, never repaired.
+    const path = safeDiscoveredPath(row && row.path, row && row.root, suffixes)
+    if (!path) {
+      rejected++
+      continue
+    }
+    const name = path.split('/').filter(Boolean).pop()
+    if (!name || name === '.git') continue
+    if (seen.has(path)) continue
+    seen.add(path)
+    if (blocked.names.has(name.toLowerCase())) continue
+    if (blocked.paths.has(pathKey(path))) continue
+    repos.push({ name, path })
+  }
+  return { repos, scanned, rejected, roots: safeRoots }
+}
+
 const raw = typeof args === 'string' ? JSON.parse(args) : args
 const ctx = {
   project_name: raw && raw.project_name,
@@ -538,11 +854,28 @@ const ctx = {
   // 'both' (default) runs the poll and the decision sweep; 'poll' / 'decisions'
   // run one half, for a caller that wants to schedule them at different rates.
   mode: (raw && raw.mode) || 'both',
+  // discover mode only. `roots` and `registered_names` are caller-supplied
+  // (the latter from registry_index); `request_text` is UNTRUSTED — it is
+  // tokenized for ranking and never reaches a shell command.
+  request_text: String((raw && raw.request_text) || ''),
+  roots: Array.isArray(raw && raw.roots) ? raw.roots : [],
+  registered_names: Array.isArray(raw && raw.registered_names) ? raw.registered_names : [],
+}
+
+if (!['both', 'poll', 'decisions', 'answers', 'discover'].includes(ctx.mode)) {
+  return {
+    status: 'error',
+    error: `lead-workflow: unknown mode "${ctx.mode}". Use "both" (default), "poll", "decisions", "answers", or "discover".`,
+    new_requests: [],
+  }
 }
 
 // Fail loudly rather than quietly polling the wrong place. There is no default
-// channel id and no default bot id in this file on purpose.
-const missing = ['project_name', 'channel_id', 'stuart_bot_user_id'].filter(k => !ctx[k])
+// channel id and no default bot id in this file on purpose. `discover` is the
+// one mode that touches neither Slack nor a project row, so it requires none of
+// them — it runs on the routing path, before a project is even known.
+const required = ctx.mode === 'discover' ? [] : ['project_name', 'channel_id', 'stuart_bot_user_id']
+const missing = required.filter(k => !ctx[k])
 if (missing.length > 0) {
   return {
     status: 'error',
@@ -550,10 +883,45 @@ if (missing.length > 0) {
     new_requests: [],
   }
 }
-if (!['both', 'poll', 'decisions', 'answers'].includes(ctx.mode)) {
+
+// `discover` serves STEP 1a's zero-match branch: the request matched no
+// registered project, so look for the repo it names on disk. It returns ranked
+// candidates and stops. It registers nothing, proposes nothing, posts nothing —
+// the trigger text is untrusted, so a human approves any registration.
+if (ctx.mode === 'discover') {
+  if (!ctx.request_text.trim()) {
+    return { status: 'error', error: 'lead-workflow mode "discover" requires request_text', new_requests: [] }
+  }
+  phase('Discover')
+  const found = await discoverRepos(ctx.roots, ctx.registered_names)
+  if (found.error) {
+    return {
+      status: 'error',
+      mode: 'discover',
+      error: found.error,
+      roots: found.roots,
+      candidates: [],
+      confident: false,
+      new_requests: [],
+    }
+  }
+  const ranked = rankCandidates(found.repos, ctx.request_text)
   return {
-    status: 'error',
-    error: `lead-workflow: unknown mode "${ctx.mode}". Use "both" (default), "poll", "decisions", or "answers".`,
+    // 'empty' means the honest answer the zero-match branch needs: nothing
+    // registered matched AND nothing on disk matched either. Say that; do not
+    // fall back to the cwd project.
+    status: ranked.candidates.length > 0 ? 'candidates' : 'empty',
+    mode: 'discover',
+    roots: found.roots,
+    scanned: found.scanned,
+    // Paths the relay returned that were not inside a declared root or carried
+    // shell-actionable characters. Non-zero means the relay went off-script.
+    rejected: found.rejected || 0,
+    unregistered: found.repos.length,
+    // Ranked best-first. The caller picks; a low-confidence list is a question
+    // for the human, not a licence to guess.
+    candidates: ranked.candidates,
+    confident: ranked.confident,
     new_requests: [],
   }
 }
