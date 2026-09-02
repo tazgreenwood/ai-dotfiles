@@ -569,10 +569,11 @@ const DISCOVER_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Absolute repo directory path, copied verbatim from the command output' },
-          remote: { type: 'string', description: 'The origin remote URL for that repo; empty string when the command printed none' },
+          root: { type: 'string', description: 'The expanded absolute root directory the repo was found under, copied verbatim (first tab-separated field)' },
+          path: { type: 'string', description: 'Absolute repo directory path, copied verbatim from the command output (second field)' },
+          remote: { type: 'string', description: 'The origin remote URL for that repo; empty string when the command printed none (third field)' },
         },
-        required: ['path'],
+        required: ['root', 'path'],
       },
     },
     error: { type: 'string', description: 'Set only if the command could not be run at all' },
@@ -591,6 +592,40 @@ function safeRoot(root) {
   return r
 }
 
+// What a declared root looks like once the shell has expanded it. The roots are
+// written with a literal `$HOME` (this file cannot read the environment), so a
+// returned path can never be prefix-checked against the UNexpanded string. The
+// command therefore echoes the expanded root alongside each repo, and we bind
+// that echo to the declared root by its suffix: `$HOME/github.com` accepts an
+// expanded root ending in `/github.com` and nothing else. That is what stops a
+// fabricated path from arriving under a directory nobody asked to scan.
+function rootSuffix(root) {
+  return String(root || '').replace(/^~/, '').replace(/^\$HOME/, '')
+}
+
+// Everything the relay agent returns is UNTRUSTED, and the prompt asking it not
+// to invent paths is a request, not an enforcement. Two things depend on this
+// value: it is persisted as a project's `localPath`, and `lead.md` interpolates
+// it into `git -C <path>`. So a path is DROPPED — never sanitized, never quoted
+// into safety — unless it is absolute, free of shell metacharacters and `..`,
+// and inside one of the roots this file actually declared.
+const MAX_DISCOVERED_PATH_LEN = 4096
+
+function safeDiscoveredPath(path, expandedRoot, suffixes) {
+  const p = String(path || '').trim().replace(/\/+$/, '')
+  const root = String(expandedRoot || '').trim().replace(/\/+$/, '')
+  if (!p || !root) return ''
+  if (p.length > MAX_DISCOVERED_PATH_LEN || root.length > MAX_DISCOVERED_PATH_LEN) return ''
+  // Conservative charset: no whitespace, quotes, $, ;, |, &, backticks, globs.
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(p)) return ''
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(root)) return ''
+  if (p.includes('..') || root.includes('..')) return ''
+  // The echoed root must be one we asked for, and the repo must sit under it.
+  if (!suffixes.some(sfx => sfx && root.endsWith(sfx))) return ''
+  if (!p.startsWith(root + '/')) return ''
+  return p
+}
+
 // One fixed command. `find` is invoked WITHOUT -L so symlinked directories are
 // never followed, `-name .git -prune` matches both a .git directory and the
 // .git file a worktree leaves behind while never descending into either, and
@@ -602,7 +637,7 @@ function discoverCommand(roots) {
     `find "$r" -maxdepth ${DISCOVER_MAXDEPTH} -name .git -prune -print 2>/dev/null;`,
     `done | sort -u | head -${DISCOVER_SCAN_CAP}`,
     `| while IFS= read -r g; do d=$(dirname "$g");`,
-    `printf '%s\\t%s\\n' "$d" "$(git -C "$d" remote get-url origin 2>/dev/null)"; done`,
+    `for r2 in ${list}; do case "$d/" in "$r2"/*) printf '%s\\t%s\\t%s\\n' "$r2" "$d" "$(git -C "$d" remote get-url origin 2>/dev/null)";; esac; done; done`,
   ].join(' ')
 }
 
@@ -615,7 +650,7 @@ Run exactly this command, verbatim, with no edits, additions or substitutions:
 ${command}
 \`\`\`
 
-Each output line is a repo directory path, a TAB, then that repo's origin remote URL (which may be empty). Emit one entry per line: \`path\` = the text before the tab, \`remote\` = the text after it (empty string when there is none). Copy both verbatim. Do not invent, resolve, normalize or reorder paths, and do not add repos the command did not print.
+Each output line is TAB-separated with three fields: the root directory the repo was found under, the repo directory path, then that repo's origin remote URL (which may be empty). Emit one entry per line: \`root\` = the first field, \`path\` = the second, \`remote\` = the third (empty string when there is none). Copy all three verbatim. Do not invent, resolve, normalize, expand, shorten or reorder paths, and do not add repos the command did not print — the caller re-checks every path against the roots and silently drops anything that does not match, so an altered path is a dropped repo, not a helpful correction.
 
 Do not run any other command. In particular do not widen the search, raise the depth, follow symlinks, read README files, or inspect repo contents — the caller does that later for one chosen repo only.
 
@@ -665,6 +700,18 @@ const TOKEN_STOPWORDS = new Set([
   'make', 'want', 'repo', 'repos', 'project', 'projects',
 ])
 
+// Repo names that are also ordinary English words. A verbatim occurrence of one
+// of these proves nothing — "can you write docs for the onboarding flow" names
+// a `docs` repo verbatim by accident, which is the same coincidence a one-token
+// score of 1.0 represents. They are still RANKED and still SHOWN as candidates;
+// they just cannot promote themselves to `confident` on the verbatim rule
+// alone, and a second matched token clears the bar as usual.
+const GENERIC_REPO_NAMES = new Set([
+  'docs', 'doc', 'chat', 'hub', 'web', 'api', 'app', 'apps', 'site', 'core',
+  'server', 'client', 'tools', 'utils', 'util', 'lib', 'libs', 'test', 'tests',
+  'config', 'infra', 'scripts', 'data', 'admin', 'auth', 'common', 'shared',
+])
+
 function tokenize(text) {
   return String(text || '')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
@@ -678,16 +725,23 @@ function tokenize(text) {
 // point when the request contains the repo name verbatim. A repo the request
 // does not name at all scores exactly 0 and is dropped — that is what makes a
 // nonsense request return nothing rather than a weak guess.
+//
+// `hits` and `verbatim` come back with the score because the SCORE ALONE cannot
+// separate a real match from a coincidence: a one-token repo name scores a full
+// 1.0 on a single incidental word, which is how "add a stack trace to the logs"
+// used to confidently match `cl-stack`. The ratio still ranks; whether a leader
+// may be called confident is decided from these two fields.
 function scoreCandidate(candidate, requestTokens, requestLower) {
   const nameTokens = new Set(tokenize(candidate.name))
-  if (nameTokens.size === 0) return 0
+  if (nameTokens.size === 0) return { score: 0, hits: 0, verbatim: false }
   let hits = 0
   for (const t of nameTokens) if (requestTokens.has(t)) hits++
-  if (hits === 0) return 0
+  if (hits === 0) return { score: 0, hits: 0, verbatim: false }
   let score = hits / nameTokens.size
   const name = String(candidate.name).toLowerCase()
-  if (name.length >= MIN_TOKEN_LEN && requestLower.includes(name)) score += 1
-  return score
+  const verbatim = name.length >= MIN_TOKEN_LEN && requestLower.includes(name)
+  if (verbatim) score += 1
+  return { score, hits, verbatim }
 }
 
 function rankCandidates(repos, requestText) {
@@ -695,23 +749,33 @@ function rankCandidates(repos, requestText) {
   const requestLower = String(requestText || '').toLowerCase()
   const scored = []
   for (const repo of repos || []) {
-    const score = scoreCandidate(repo, requestTokens, requestLower)
+    const { score, hits, verbatim } = scoreCandidate(repo, requestTokens, requestLower)
     if (score < MIN_CANDIDATE_SCORE) continue
-    scored.push({ ...repo, score: Math.round(score * 1000) / 1000 })
+    scored.push({ ...repo, score: Math.round(score * 1000) / 1000, hits, verbatim })
   }
   scored.sort((a, b) => (b.score - a.score) || a.name.localeCompare(b.name))
   const top = scored.slice(0, DISCOVER_TOP_N)
-  // Confident means: the leader is more than a bare half-match AND it is not in
-  // a tie. The threshold is exclusive here on purpose — a two-token repo name
-  // sharing exactly one generic word with the request ("server", "core") lands
-  // on exactly MIN_CANDIDATE_SCORE, and being the only such repo must not
-  // promote that noise to a confident answer. Those stay in `candidates` so the
-  // human can see them; they just make this a question rather than a claim. A
-  // tie is likewise a question for the human, not a coin flip made here.
+  // Confident requires ACTUAL EVIDENCE of naming, not just a high ratio: either
+  // the request contains the repo's name verbatim, or it names more than one of
+  // that name's tokens. A single shared word is a coincidence however large the
+  // ratio it produces — `cl-stack` tokenizes to just ['stack'], so "add a stack
+  // trace to the logs" scored a perfect 1.0 on one incidental word, and
+  // one-token names (chat, docs, golib, lapi, hub) are the common case on disk.
+  // The score threshold and the no-tie rule still apply on top.
+  //
+  // Low-confidence rows stay in `candidates` so the human still sees them. What
+  // changes here is only what may be CALLED confident — a tie, or a coincidence,
+  // is a question for the human, never a coin flip made in this file.
+  const leader = top[0]
+  const namedEnough = Boolean(leader && (
+    leader.hits > 1 ||
+    (leader.verbatim && !GENERIC_REPO_NAMES.has(String(leader.name).toLowerCase()))
+  ))
   const confident = Boolean(
     top.length > 0 &&
-    top[0].score > MIN_CANDIDATE_SCORE &&
-    (top.length === 1 || top[0].score - top[1].score >= CONFIDENT_MARGIN),
+    namedEnough &&
+    leader.score > MIN_CANDIDATE_SCORE &&
+    (top.length === 1 || leader.score - top[1].score >= CONFIDENT_MARGIN),
   )
   return { candidates: top, confident }
 }
@@ -738,14 +802,22 @@ async function discoverRepos(roots, registeredNames) {
   }
 
   const blocked = registeredIndex(registeredNames)
+  const suffixes = safeRoots.map(rootSuffix).filter(Boolean)
   const seen = new Set()
   const repos = []
   let scanned = 0
+  let rejected = 0
   for (const row of res.repos || []) {
-    const path = String((row && row.path) || '').trim().replace(/\/+$/, '')
-    if (!path) continue
     scanned++
     if (scanned > DISCOVER_SCAN_CAP) break
+    // The relay is untrusted: a path that is not demonstrably inside a declared
+    // root, or that carries anything a shell could act on, is dropped here and
+    // counted, never repaired.
+    const path = safeDiscoveredPath(row && row.path, row && row.root, suffixes)
+    if (!path) {
+      rejected++
+      continue
+    }
     const name = path.split('/').filter(Boolean).pop()
     if (!name || name === '.git') continue
     if (seen.has(path)) continue
@@ -754,7 +826,7 @@ async function discoverRepos(roots, registeredNames) {
     if (blocked.paths.has(pathKey(path))) continue
     repos.push({ name, path, remote: String((row && row.remote) || '').trim() })
   }
-  return { repos, scanned, roots: safeRoots }
+  return { repos, scanned, rejected, roots: safeRoots }
 }
 
 const raw = typeof args === 'string' ? JSON.parse(args) : args
@@ -830,6 +902,9 @@ if (ctx.mode === 'discover') {
     mode: 'discover',
     roots: found.roots,
     scanned: found.scanned,
+    // Paths the relay returned that were not inside a declared root or carried
+    // shell-actionable characters. Non-zero means the relay went off-script.
+    rejected: found.rejected || 0,
     unregistered: found.repos.length,
     // Ranked best-first. The caller picks; a low-confidence list is a question
     // for the human, not a licence to guess.
