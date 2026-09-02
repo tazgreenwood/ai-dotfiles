@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -1587,5 +1590,482 @@ func TestUpdateInboxSetsProjectLater(t *testing.T) {
 	}
 	if got.Note != "read-only, runs now" {
 		t.Errorf("note: want the triage note, got %q", got.Note)
+	}
+}
+
+// ── worklist (DOTFILES-40) ───────────────────────────────────────────────────
+//
+// ListWorklist is the cross-project sibling of ListIndex: "what is in flight
+// everywhere, and what is each thing waiting on". It answers from three tables
+// — open inbox rows, pending proposals, running/paused runs — and its entire
+// value is being cheap enough to call on every sweep, so these tests pin the
+// query count as hard as they pin the contents.
+
+// worklistOfKind returns just the rows of one kind, so an assertion about
+// proposals is not perturbed by inbox or run rows.
+func worklistOfKind(rows []worklistItem, kind string) []worklistItem {
+	var out []worklistItem
+	for _, r := range rows {
+		if r.Kind == kind {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func worklistHas(rows []worklistItem, kind, project string, id int64) bool {
+	for _, r := range rows {
+		if r.Kind == kind && r.Project == project && r.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// seedWorklistProject gives one project the full triple: an open inbox row, a
+// pending proposal and a paused run. refSeed keeps (source, source_ref) unique
+// across projects, since that UNIQUE index is global, not per-project.
+func seedWorklistProject(t *testing.T, s *store, project, refSeed string) (inboxID, proposalID, runID int64) {
+	t.Helper()
+
+	seedProject(t, s, project, project+" does a thing", []map[string]any{
+		planWith(strings.ToUpper(project)+"-1", "the live one", "pending"),
+	})
+
+	it := sampleInbox(refSeed + ".000100")
+	it.Project = &project
+	it.RawText = "open ask for " + project
+	inboxID, err := s.CreateInbox(it)
+	if err != nil {
+		t.Fatalf("CreateInbox %s: %v", project, err)
+	}
+
+	p := sampleProposal("pending proposal for " + project)
+	p.Project = project
+	p.SourceRef = refSeed + ".000200"
+	p.SourcePermalink = "https://example.slack.com/archives/C0STUART/p" + refSeed + "000200"
+	proposalID, err = s.CreateProposal(p)
+	if err != nil {
+		t.Fatalf("CreateProposal %s: %v", project, err)
+	}
+
+	r := sampleRun()
+	r.Project = project
+	r.ProposalID = &proposalID
+	r.Status = "paused"
+	r.Phase = "building"
+	r.Note = "waiting on an answer for " + project
+	runID, err = s.CreateRun(r)
+	if err != nil {
+		t.Fatalf("CreateRun %s: %v", project, err)
+	}
+	return inboxID, proposalID, runID
+}
+
+// TestListWorklistSpansProjects — the worklist is deliberately NOT
+// project-scoped: the point is one call that shows everything in flight.
+func TestListWorklistSpansProjects(t *testing.T) {
+	s := newTestStore(t)
+
+	aInbox, aProposal, aRun := seedWorklistProject(t, s, "alpha", "1756800001")
+	bInbox, bProposal, bRun := seedWorklistProject(t, s, "beta", "1756800002")
+
+	rows, err := s.ListWorklist()
+	if err != nil {
+		t.Fatalf("ListWorklist: %v", err)
+	}
+
+	want := []struct {
+		kind    string
+		project string
+		id      int64
+	}{
+		{"inbox", "alpha", aInbox}, {"proposal", "alpha", aProposal}, {"run", "alpha", aRun},
+		{"inbox", "beta", bInbox}, {"proposal", "beta", bProposal}, {"run", "beta", bRun},
+	}
+	for _, w := range want {
+		if !worklistHas(rows, w.kind, w.project, w.id) {
+			t.Errorf("worklist missing %s %d for project %s; got %+v", w.kind, w.id, w.project, rows)
+		}
+	}
+	if len(rows) != len(want) {
+		t.Errorf("want exactly %d rows, got %d: %+v", len(want), len(rows), rows)
+	}
+
+	// waiting_on is the column that makes the view actionable — a row with no
+	// stated blocker is a row the human has to open something else to read.
+	for _, r := range rows {
+		if r.WaitingOn == "" {
+			t.Errorf("%s %d has an empty waiting_on", r.Kind, r.ID)
+		}
+	}
+}
+
+// TestListWorklistExcludesClosedAndDecided — a worklist that shows finished
+// work is noise, and noise is what stops it being read every sweep.
+func TestListWorklistExcludesClosedAndDecided(t *testing.T) {
+	s := newTestStore(t)
+	project := "alpha"
+	seedProject(t, s, project, "alpha does a thing", nil)
+
+	// Open vs closed inbox rows. new/triaged/routed are open; closed is not.
+	var openInbox []int64
+	for i, status := range []string{"new", "triaged", "routed"} {
+		it := sampleInbox(fmt.Sprintf("1756810000.0001%02d", i))
+		it.Project = &project
+		it.Status = status
+		if status == "triaged" || status == "routed" {
+			it.Triage = "plan"
+		}
+		id, err := s.CreateInbox(it)
+		if err != nil {
+			t.Fatalf("CreateInbox(%s): %v", status, err)
+		}
+		openInbox = append(openInbox, id)
+	}
+	closedRow := sampleInbox("1756810000.000199")
+	closedRow.Project = &project
+	closedRow.Status = "closed"
+	closedID, err := s.CreateInbox(closedRow)
+	if err != nil {
+		t.Fatalf("CreateInbox(closed): %v", err)
+	}
+
+	// Pending proposal stays; approved and rejected are decided; superseded is
+	// history. Only the pending one is work awaiting a human.
+	newProposal := func(ref, summary string) int64 {
+		p := sampleProposal(summary)
+		p.Project = project
+		p.SourceRef = ref
+		p.SourcePermalink = "https://example.slack.com/archives/C0STUART/p" + strings.ReplaceAll(ref, ".", "")
+		id, err := s.CreateProposal(p)
+		if err != nil {
+			t.Fatalf("CreateProposal(%s): %v", summary, err)
+		}
+		return id
+	}
+	pendingID := newProposal("1756810001.000100", "still pending")
+	approvedID := newProposal("1756810001.000200", "approved")
+	rejectedID := newProposal("1756810001.000300", "rejected")
+	oldID := newProposal("1756810001.000400", "superseded")
+	successorID := newProposal("1756810001.000500", "the successor")
+	if err := s.UpdateProposalStatus(approvedID, "approved", ""); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if err := s.UpdateProposalStatus(rejectedID, "rejected", "no thanks"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if err := s.SupersedeProposal(oldID, successorID, "revised"); err != nil {
+		t.Fatalf("supersede: %v", err)
+	}
+
+	// running/paused runs stay; done/failed do not.
+	newRun := func(status, phase string) int64 {
+		r := sampleRun()
+		r.Project = project
+		r.ProposalID = nil
+		r.Status = status
+		r.Phase = phase
+		id, err := s.CreateRun(r)
+		if err != nil {
+			t.Fatalf("CreateRun(%s): %v", status, err)
+		}
+		return id
+	}
+	runningID := newRun("running", "building")
+	pausedID := newRun("paused", "building")
+	doneID := newRun("done", "done")
+	failedID := newRun("failed", "blocked")
+
+	rows, err := s.ListWorklist()
+	if err != nil {
+		t.Fatalf("ListWorklist: %v", err)
+	}
+
+	for _, id := range openInbox {
+		if !worklistHas(rows, "inbox", project, id) {
+			t.Errorf("open inbox row %d missing from worklist", id)
+		}
+	}
+	if worklistHas(rows, "inbox", project, closedID) {
+		t.Errorf("closed inbox row %d must not appear", closedID)
+	}
+	if !worklistHas(rows, "proposal", project, pendingID) {
+		t.Errorf("pending proposal %d missing from worklist", pendingID)
+	}
+	if !worklistHas(rows, "proposal", project, successorID) {
+		t.Errorf("successor proposal %d is still pending and must appear", successorID)
+	}
+	for name, id := range map[string]int64{"approved": approvedID, "rejected": rejectedID, "superseded": oldID} {
+		if worklistHas(rows, "proposal", project, id) {
+			t.Errorf("%s proposal %d must not appear", name, id)
+		}
+	}
+	if !worklistHas(rows, "run", project, runningID) {
+		t.Errorf("running run %d missing from worklist", runningID)
+	}
+	if !worklistHas(rows, "run", project, pausedID) {
+		t.Errorf("paused run %d missing from worklist", pausedID)
+	}
+	for name, id := range map[string]int64{"done": doneID, "failed": failedID} {
+		if worklistHas(rows, "run", project, id) {
+			t.Errorf("%s run %d must not appear", name, id)
+		}
+	}
+
+	if n := len(worklistOfKind(rows, "inbox")); n != 3 {
+		t.Errorf("want 3 open inbox rows, got %d", n)
+	}
+	if n := len(worklistOfKind(rows, "proposal")); n != 2 {
+		t.Errorf("want 2 pending proposals, got %d", n)
+	}
+	if n := len(worklistOfKind(rows, "run")); n != 2 {
+		t.Errorf("want 2 live runs, got %d", n)
+	}
+}
+
+// TestListWorklistCarriesNoPayloads — same constraint ListIndex carries: a
+// view called on every sweep must not drag plan bodies or proposal payloads
+// into context. Ids, status, a short summary and waiting_on, nothing more.
+func TestListWorklistCarriesNoPayloads(t *testing.T) {
+	s := newTestStore(t)
+	project := "alpha"
+	seedProject(t, s, project, "alpha does a thing", []map[string]any{
+		planWith("ALPHA-1", "the live one", "pending"),
+	})
+
+	it := sampleInbox("1756820000.000100")
+	it.Project = &project
+	if _, err := s.CreateInbox(it); err != nil {
+		t.Fatalf("CreateInbox: %v", err)
+	}
+
+	p := sampleProposal("plan a thing")
+	p.Project = project
+	p.SourceRef = "1756820000.000200"
+	p.Payload = map[string]any{
+		"ticket": "ALPHA-2",
+		"plan_steps": []any{
+			map[string]any{"id": 1, "how": "PAYLOAD_CANARY_STEP_HOW", "files": []any{"a.go"}},
+		},
+	}
+	pid, err := s.CreateProposal(p)
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	r := sampleRun()
+	r.Project = project
+	r.ProposalID = &pid
+	r.Status = "running"
+	r.Cursor = map[string]any{"branch": "feat/x", "note": "CURSOR_CANARY"}
+	if _, err := s.CreateRun(r); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	rows, err := s.ListWorklist()
+	if err != nil {
+		t.Fatalf("ListWorklist: %v", err)
+	}
+	blob, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, forbidden := range []string{
+		"plan_steps", "PAYLOAD_CANARY_STEP_HOW", "payload",
+		"acceptance_criteria", "resources", "CURSOR_CANARY", "cursor",
+	} {
+		if strings.Contains(string(blob), forbidden) {
+			t.Errorf("worklist payload leaks %q: %s", forbidden, blob)
+		}
+	}
+}
+
+// ── worklist query budget ────────────────────────────────────────────────────
+//
+// The assertion that actually protects the feature: the query count must not
+// grow with project count. ListIndex was built for exactly this reason, and an
+// N+1 hidden behind a correct-looking output shape is the failure this catches.
+//
+// Counting happens in a driver wrapper rather than around the store, because
+// the store's own methods are what we are measuring. Only queries are counted;
+// schema Execs and inserts are not, and the counter is reset immediately before
+// the measured call.
+
+type queryCounter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *queryCounter) inc() {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+}
+
+func (c *queryCounter) reset() {
+	c.mu.Lock()
+	c.n = 0
+	c.mu.Unlock()
+}
+
+func (c *queryCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+type countingDriver struct {
+	inner   driver.Driver
+	counter *queryCounter
+}
+
+func (d countingDriver) Open(name string) (driver.Conn, error) {
+	c, err := d.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &countingConn{Conn: c, counter: d.counter}, nil
+}
+
+type countingConn struct {
+	driver.Conn
+	counter *queryCounter
+}
+
+func (c *countingConn) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
+	qc, ok := c.Conn.(driver.QueryerContext)
+	if !ok {
+		// database/sql falls back to Prepare + Stmt.Query, counted below.
+		return nil, driver.ErrSkip
+	}
+	c.counter.inc()
+	return qc.QueryContext(ctx, q, args)
+}
+
+func (c *countingConn) ExecContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
+	ec, ok := c.Conn.(driver.ExecerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	return ec.ExecContext(ctx, q, args)
+}
+
+func (c *countingConn) Prepare(q string) (driver.Stmt, error) {
+	st, err := c.Conn.Prepare(q)
+	if err != nil {
+		return nil, err
+	}
+	return &countingStmt{Stmt: st, counter: c.counter}, nil
+}
+
+func (c *countingConn) PrepareContext(ctx context.Context, q string) (driver.Stmt, error) {
+	pc, ok := c.Conn.(driver.ConnPrepareContext)
+	if !ok {
+		return c.Prepare(q)
+	}
+	st, err := pc.PrepareContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return &countingStmt{Stmt: st, counter: c.counter}, nil
+}
+
+type countingStmt struct {
+	driver.Stmt
+	counter *queryCounter
+}
+
+func (s *countingStmt) Query(args []driver.Value) (driver.Rows, error) {
+	s.counter.inc()
+	return s.Stmt.Query(args)
+}
+
+func (s *countingStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	qc, ok := s.Stmt.(driver.StmtQueryContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	s.counter.inc()
+	return qc.QueryContext(ctx, args)
+}
+
+func (s *countingStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
+	ec, ok := s.Stmt.(driver.StmtExecContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	return ec.ExecContext(ctx, args)
+}
+
+var countingDriverSeq int
+
+// newCountingStore builds a store whose queries are counted. It reuses the
+// registered "sqlite" driver underneath, so the DB behaves exactly as in
+// production; only the call path is instrumented.
+func newCountingStore(t *testing.T) (*store, *queryCounter) {
+	t.Helper()
+
+	probe, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "probe.db"))
+	if err != nil {
+		t.Fatalf("open probe: %v", err)
+	}
+	inner := probe.Driver()
+	probe.Close()
+
+	counter := &queryCounter{}
+	countingDriverSeq++
+	name := fmt.Sprintf("sqlite-counting-%d", countingDriverSeq)
+	sql.Register(name, countingDriver{inner: inner, counter: counter})
+
+	db, err := sql.Open(name, filepath.Join(t.TempDir(), "registry.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open counting db: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		t.Fatalf("WAL: %v", err)
+	}
+	s := &store{db: db}
+	if err := s.createSchema(); err != nil {
+		db.Close()
+		t.Fatalf("createSchema: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s, counter
+}
+
+func worklistQueryCount(t *testing.T, projects int) int {
+	t.Helper()
+	s, counter := newCountingStore(t)
+	for i := 0; i < projects; i++ {
+		seedWorklistProject(t, s, fmt.Sprintf("proj%02d", i), fmt.Sprintf("17569%05d", i))
+	}
+
+	counter.reset()
+	rows, err := s.ListWorklist()
+	if err != nil {
+		t.Fatalf("ListWorklist(%d projects): %v", projects, err)
+	}
+	n := counter.count()
+	if len(rows) != projects*3 {
+		t.Fatalf("want %d rows for %d projects, got %d", projects*3, projects, len(rows))
+	}
+	if n == 0 {
+		t.Fatal("counted zero queries — the counting driver is not on the call path")
+	}
+	return n
+}
+
+func TestListWorklistQueryCountIsBounded(t *testing.T) {
+	four := worklistQueryCount(t, 4)
+	twelve := worklistQueryCount(t, 12)
+
+	if twelve != four {
+		t.Errorf("query count grows with project count (N+1): 4 projects = %d queries, 12 projects = %d", four, twelve)
+	}
+	// A bound that is generous but still a bound: three tables plus slack.
+	if four > 6 {
+		t.Errorf("worklist should cost roughly one query per table (inbox, proposals, agent_runs), got %d", four)
 	}
 }
