@@ -571,7 +571,6 @@ const DISCOVER_SCHEMA = {
         properties: {
           root: { type: 'string', description: 'The expanded absolute root directory the repo was found under, copied verbatim (first tab-separated field)' },
           path: { type: 'string', description: 'Absolute repo directory path, copied verbatim from the command output (second field)' },
-          remote: { type: 'string', description: 'The origin remote URL for that repo; empty string when the command printed none (third field)' },
         },
         required: ['root', 'path'],
       },
@@ -626,18 +625,30 @@ function safeDiscoveredPath(path, expandedRoot, suffixes) {
   return p
 }
 
-// One fixed command. `find` is invoked WITHOUT -L so symlinked directories are
-// never followed, `-name .git -prune` matches both a .git directory and the
-// .git file a worktree leaves behind while never descending into either, and
-// the head cap bounds the walk before any git call is made.
+// One fixed command, and deliberately a SMALL one: it lists directory paths and
+// nothing else.
+//
+// It used to also run `git -C <dir> remote get-url origin` for every repo it
+// found. That was dropped — not for speed, but because enumerating the remote
+// URLs of ~60 repositories across a home directory is indistinguishable from
+// reconnaissance, and it is data discovery does not need: only ONE candidate is
+// ever proposed, and the caller reads that single repo's remote itself.
+// Collecting 59 remotes to use one is a wider blast radius and a worse
+// signature for no benefit. Observed in practice: the relay subagent running
+// the old command was flagged by the platform's security classifier on every
+// discover run, despite behaving exactly as instructed.
+//
+// `find` is invoked WITHOUT -L so symlinked directories are never followed,
+// `-name .git -prune` matches both a .git directory and the .git file a
+// worktree leaves behind while never descending into either, and the head cap
+// bounds the number of results.
 function discoverCommand(roots) {
   const list = roots.map(r => `"${r}"`).join(' ')
   return [
     `for r in ${list}; do [ -d "$r" ] || continue;`,
-    `find "$r" -maxdepth ${DISCOVER_MAXDEPTH} -name .git -prune -print 2>/dev/null;`,
+    `find "$r" -maxdepth ${DISCOVER_MAXDEPTH} -name .git -prune -print 2>/dev/null`,
+    `| sed -e 's:/\\.git$::' -e "s:^:$r\\t:";`,
     `done | sort -u | head -${DISCOVER_SCAN_CAP}`,
-    `| while IFS= read -r g; do d=$(dirname "$g");`,
-    `for r2 in ${list}; do case "$d/" in "$r2"/*) printf '%s\\t%s\\t%s\\n' "$r2" "$d" "$(git -C "$d" remote get-url origin 2>/dev/null)";; esac; done; done`,
   ].join(' ')
 }
 
@@ -650,9 +661,9 @@ Run exactly this command, verbatim, with no edits, additions or substitutions:
 ${command}
 \`\`\`
 
-Each output line is TAB-separated with three fields: the root directory the repo was found under, the repo directory path, then that repo's origin remote URL (which may be empty). Emit one entry per line: \`root\` = the first field, \`path\` = the second, \`remote\` = the third (empty string when there is none). Copy all three verbatim. Do not invent, resolve, normalize, expand, shorten or reorder paths, and do not add repos the command did not print — the caller re-checks every path against the roots and silently drops anything that does not match, so an altered path is a dropped repo, not a helpful correction.
+Each output line is TAB-separated with two fields: the root directory the repo was found under, then the repo directory path. Emit one entry per line: \`root\` = the first field, \`path\` = the second. Copy both verbatim. Do not invent, resolve, normalize, expand, shorten or reorder paths, and do not add repos the command did not print — the caller re-checks every path against the roots and silently drops anything that does not match, so an altered path is a dropped repo, not a helpful correction.
 
-Do not run any other command. In particular do not widen the search, raise the depth, follow symlinks, read README files, or inspect repo contents — the caller does that later for one chosen repo only.
+Do not run any other command. In particular do not widen the search, raise the depth, follow symlinks, read README files, inspect repo contents, or run any \`git\` command — not even to read a remote. The caller does all of that later, for one chosen repo only.
 
 If the command cannot be run at all, return an empty \`repos\` array and put the reason in \`error\`.
 
@@ -780,9 +791,10 @@ function rankCandidates(repos, requestText) {
   return { candidates: top, confident }
 }
 
-// Walk the bounded roots and return every unregistered repo as {name, path,
-// remote}. No ranking here — ranking needs the request text, and this stays a
-// plain "what is on disk that the registry does not know about" answer.
+// Walk the bounded roots and return every unregistered repo as {name, path}.
+// No remote — see discoverCommand. No ranking here either: ranking needs the
+// request text, and this stays a plain "what is on disk that the registry does
+// not know about" answer.
 async function discoverRepos(roots, registeredNames) {
   const safeRoots = (roots && roots.length ? roots : DEFAULT_DISCOVER_ROOTS).map(safeRoot).filter(Boolean)
   if (safeRoots.length === 0) {
@@ -824,7 +836,7 @@ async function discoverRepos(roots, registeredNames) {
     seen.add(path)
     if (blocked.names.has(name.toLowerCase())) continue
     if (blocked.paths.has(pathKey(path))) continue
-    repos.push({ name, path, remote: String((row && row.remote) || '').trim() })
+    repos.push({ name, path })
   }
   return { repos, scanned, rejected, roots: safeRoots }
 }
