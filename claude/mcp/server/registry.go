@@ -397,6 +397,25 @@ func registryIndex(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"projects": entries})
 }
 
+// registryWorklist is the cross-project "what is in flight, and what is each
+// thing waiting on" view: open inbox rows, pending proposals and live runs.
+// Like registry_index it takes no args and carries no payloads or plan bodies —
+// it is meant to be cheap enough to call on every sweep.
+func registryWorklist(args map[string]any) ToolResult {
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	items, err := s.ListWorklist()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	if items == nil {
+		items = []worklistItem{}
+	}
+	return toolOK(map[string]any{"worklist": items})
+}
+
 func registryListPlans(args map[string]any) ToolResult {
 	name := str(args, "name")
 	if name == "" {
@@ -957,6 +976,11 @@ func registryTools() []Tool {
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
+			Name:        "registry_worklist",
+			Description: "Cross-project worklist: open inbox rows, pending proposals and running/paused runs, each with a status, a short summary and what it is waiting on. No proposal payloads, plan bodies or run cursors. No arguments.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
 			Name:        "registry_list_plans",
 			Description: "List all plans for a project",
 			InputSchema: map[string]any{
@@ -1251,12 +1275,12 @@ func registryTools() []Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"id":           map[string]any{"type": "number"},
-					"status":       map[string]any{"type": "string", "enum": []string{"new", "triaged", "routed", "closed"}, "description": "Optional"},
-					"triage":       map[string]any{"type": "string", "enum": []string{"investigate", "plan", "answer", "ask", "drop"}, "description": "Optional"},
-					"project":      map[string]any{"type": "string", "description": "Optional: project name, typically set during triage"},
-					"note":         map[string]any{"type": "string", "description": "Optional: internal note"},
-					"proposal_id":  map[string]any{"type": "number", "description": "Optional: links to a created proposal after planning"},
+					"id":          map[string]any{"type": "number"},
+					"status":      map[string]any{"type": "string", "enum": []string{"new", "triaged", "routed", "closed"}, "description": "Optional"},
+					"triage":      map[string]any{"type": "string", "enum": []string{"investigate", "plan", "answer", "ask", "drop"}, "description": "Optional"},
+					"project":     map[string]any{"type": "string", "description": "Optional: project name, typically set during triage"},
+					"note":        map[string]any{"type": "string", "description": "Optional: internal note"},
+					"proposal_id": map[string]any{"type": "number", "description": "Optional: links to a created proposal after planning"},
 				},
 				"required": []string{"id"},
 			},

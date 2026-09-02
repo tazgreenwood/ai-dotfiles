@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -1633,4 +1634,210 @@ func (s *store) SumCostSince(since string) (float64, int, error) {
 		return 0, 0, err
 	}
 	return total.Float64, n, nil
+}
+
+// ── worklist (DOTFILES-40) ───────────────────────────────────────────────────
+//
+// The cross-project sibling of ListIndex, answering one question: what is in
+// flight everywhere, and what is each thing waiting on. Today that costs N
+// queries per project (open inbox rows, pending proposals, live runs, each
+// asked project by project), which is exactly the N+1 ListIndex exists to
+// avoid.
+//
+// Three queries total — one per table — joined in memory by project name.
+// Every row carries ids, a status, a short summary and a waiting_on string and
+// NOTHING else: no proposal payloads, no plan bodies, no run cursors. That is
+// the same constraint ListIndex carries, and for the same reason — a view
+// called on every sweep must not drag whole plans into context.
+
+type worklistItem struct {
+	Kind         string `json:"kind"` // inbox | proposal | run
+	ID           int64  `json:"id"`
+	Project      string `json:"project"` // "" for an inbox row captured before routing
+	Status       string `json:"status"`
+	Summary      string `json:"summary"`
+	WaitingOn    string `json:"waiting_on"`
+	Triage       string `json:"triage,omitempty"`
+	ProposalKind string `json:"proposal_kind,omitempty"`
+	Ticket       string `json:"ticket,omitempty"`
+	Phase        string `json:"phase,omitempty"`
+	ProposalID   *int64 `json:"proposal_id,omitempty"`
+	Permalink    string `json:"permalink,omitempty"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+}
+
+// worklistSummaryMax keeps a row's summary short enough that a full worklist
+// stays a glance rather than a read. Long raw Slack text is the common case.
+const worklistSummaryMax = 160
+
+func shortSummary(s string) string {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if len(s) <= worklistSummaryMax {
+		return s
+	}
+	return s[:worklistSummaryMax-1] + "…"
+}
+
+// inboxWaitingOn states the blocker in the row's own terms. A worklist row with
+// no stated blocker forces the human to open something else to learn why it is
+// still there, which defeats the point of the view.
+func inboxWaitingOn(status, triage string) string {
+	switch status {
+	case "new":
+		return "triage"
+	case "triaged":
+		if triage != "" {
+			return "routing (triaged: " + triage + ")"
+		}
+		return "routing"
+	case "routed":
+		if triage != "" {
+			return triage + " in progress"
+		}
+		return "routed work to finish"
+	}
+	return "unknown inbox status " + status
+}
+
+func runWaitingOn(status, phase, note string) string {
+	if note = strings.TrimSpace(note); note != "" {
+		return note
+	}
+	if status == "paused" {
+		return "a resume (paused in " + phase + ", no reason recorded)"
+	}
+	return "the " + phase + " phase to finish"
+}
+
+// ListWorklist returns every open inbox row, every pending proposal and every
+// running-or-paused run across ALL projects. Deliberately not project-scoped:
+// a freshly captured inbox row may have no project yet, so a project-scoped
+// worklist would hide exactly the rows that still need a decision.
+func (s *store) ListWorklist() ([]worklistItem, error) {
+	var out []worklistItem
+
+	inboxRows, err := s.db.Query(
+		`SELECT id, project, status, triage, raw_text, source_permalink,
+		        proposal_id, updated_at
+		   FROM inbox
+		  WHERE status != 'closed'
+		  ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer inboxRows.Close()
+	for inboxRows.Next() {
+		var id int64
+		var project, triage, permalink, updatedAt sql.NullString
+		var status, rawText string
+		var proposalID *int64
+		if err := inboxRows.Scan(&id, &project, &status, &triage, &rawText,
+			&permalink, &proposalID, &updatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, worklistItem{
+			Kind:       "inbox",
+			ID:         id,
+			Project:    project.String,
+			Status:     status,
+			Summary:    shortSummary(rawText),
+			WaitingOn:  inboxWaitingOn(status, triage.String),
+			Triage:     triage.String,
+			ProposalID: proposalID,
+			Permalink:  permalink.String,
+			UpdatedAt:  updatedAt.String,
+		})
+	}
+	if err := inboxRows.Err(); err != nil {
+		return nil, err
+	}
+
+	proposalRows, err := s.db.Query(
+		`SELECT id, project, kind, summary, source_permalink, created_at
+		   FROM proposals
+		  WHERE status = 'pending'
+		  ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer proposalRows.Close()
+	for proposalRows.Next() {
+		var id int64
+		var project, kind, summary string
+		var permalink, createdAt sql.NullString
+		if err := proposalRows.Scan(&id, &project, &kind, &summary,
+			&permalink, &createdAt); err != nil {
+			return nil, err
+		}
+		out = append(out, worklistItem{
+			Kind:         "proposal",
+			ID:           id,
+			Project:      project,
+			Status:       "pending",
+			Summary:      shortSummary(summary),
+			WaitingOn:    "a human decision (approve / reject / push back)",
+			ProposalKind: kind,
+			Permalink:    permalink.String,
+			UpdatedAt:    createdAt.String,
+		})
+	}
+	if err := proposalRows.Err(); err != nil {
+		return nil, err
+	}
+
+	runRows, err := s.db.Query(
+		`SELECT id, project, proposal_id, ticket, phase, status, note, updated_at
+		   FROM agent_runs
+		  WHERE status IN ('running', 'paused')
+		  ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer runRows.Close()
+	for runRows.Next() {
+		var id int64
+		var project, phase, status string
+		var ticket, note, updatedAt sql.NullString
+		var proposalID *int64
+		if err := runRows.Scan(&id, &project, &proposalID, &ticket, &phase,
+			&status, &note, &updatedAt); err != nil {
+			return nil, err
+		}
+		summary := ticket.String
+		if summary == "" {
+			summary = phase + " run"
+		}
+		out = append(out, worklistItem{
+			Kind:       "run",
+			ID:         id,
+			Project:    project,
+			Status:     status,
+			Summary:    shortSummary(summary),
+			WaitingOn:  runWaitingOn(status, phase, note.String),
+			Ticket:     ticket.String,
+			Phase:      phase,
+			ProposalID: proposalID,
+			UpdatedAt:  updatedAt.String,
+		})
+	}
+	if err := runRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Grouped by project so the view reads as "here is what each project owes",
+	// with a stable kind order inside each group.
+	kindOrder := map[string]int{"inbox": 0, "proposal": 1, "run": 2}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Project != out[j].Project {
+			return out[i].Project < out[j].Project
+		}
+		if out[i].Kind != out[j].Kind {
+			return kindOrder[out[i].Kind] < kindOrder[out[j].Kind]
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
 }
