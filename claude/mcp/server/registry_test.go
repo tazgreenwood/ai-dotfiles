@@ -2039,3 +2039,56 @@ func TestInboxToolsRegisteredInDispatchAndSchemas(t *testing.T) {
 		_ = name
 	}
 }
+
+// TestRegistryWriteInbox_IgnoresCallerSuppliedLinkageFields covers the
+// ship-review WARNING: project, proposal_id, run_id and note are not in the
+// tool's InputSchema, but json.Unmarshal fills them from any extra keys sent, so
+// without an explicit reset a capture-time caller could pre-link a brand-new row
+// to an arbitrary existing proposal or run.
+func TestRegistryWriteInbox_IgnoresCallerSuppliedLinkageFields(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	args := sampleInboxArgs("1756600100.000900", "forged linkage")
+	inbox := args["inbox"].(map[string]any)
+	inbox["project"] = "some-other-project"
+	inbox["proposal_id"] = 4242
+	inbox["run_id"] = 777
+	inbox["note"] = "pre-set by the caller"
+	inbox["status"] = "routed"
+	inbox["triage"] = "drop"
+
+	result := registryWriteInbox(args)
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	id := int64(decodeToolResult(t, result)["id"].(float64))
+
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	it, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox: %v", err)
+	}
+
+	if it.Project != nil {
+		t.Errorf("caller-supplied project was persisted (%v); capture happens before routing, so it must be null", *it.Project)
+	}
+	if it.ProposalID != nil {
+		t.Errorf("caller-supplied proposal_id was persisted (%d); a fresh row must not be pre-linked to an existing proposal", *it.ProposalID)
+	}
+	if it.RunID != nil {
+		t.Errorf("caller-supplied run_id was persisted (%d); a fresh row must not be pre-linked to an existing run", *it.RunID)
+	}
+	if it.Note != "" {
+		t.Errorf("caller-supplied note was persisted (%q); note is written by triage, not by capture", it.Note)
+	}
+	if it.Status != "new" {
+		t.Errorf("caller-supplied status won: got %q, want %q", it.Status, "new")
+	}
+	if it.Triage != "" {
+		t.Errorf("caller-supplied triage was persisted (%q); only triage may set a verdict", it.Triage)
+	}
+}

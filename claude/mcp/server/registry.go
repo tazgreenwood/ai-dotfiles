@@ -1237,7 +1237,7 @@ func registryTools() []Tool {
 		},
 		{
 			Name:        "registry_write_inbox",
-			Description: "Capture an ask (from Slack or another source) into the inbox. created_at is stamped server-side. A duplicate (source, source_ref) returns an 'already exists' error so a poller can treat it as already seen. Project is optional at write time — triage sets it later. Does NOT create a plan and never executes anything.",
+			Description: "Capture an ask (from Slack or another source) into the inbox. created_at is stamped server-side. A duplicate (source, source_ref) returns an 'already exists' error so a poller can treat it as already seen. status, triage, project, proposal_id, run_id and note are server-owned and are IGNORED if sent — capture records only where a message came from and what it said; triage sets the rest later via registry_update_inbox. Does NOT create a plan and never executes anything.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1250,7 +1250,6 @@ func registryTools() []Tool {
 							"source_permalink": map[string]any{"type": "string", "description": "Link back to the originating message"},
 							"source_ref":       map[string]any{"type": "string", "description": "Dedup key, e.g. a Slack message ts"},
 							"raw_text":         map[string]any{"type": "string", "description": "The verbatim message text"},
-							"project":          map[string]any{"type": "string", "description": "Optional: project name. Defaults to null; triage sets it on a later update."},
 						},
 						"required": []string{"source", "source_channel", "source_permalink", "source_ref", "raw_text"},
 					},
@@ -1464,13 +1463,28 @@ func registryWriteInbox(args map[string]any) ToolResult {
 		return toolErr("inbox has the wrong shape: " + err.Error())
 	}
 
-	// Server owns identity, provenance and timestamps: a caller cannot pick an
-	// id, pre-date an item, or claim a status/triage that the human never chose.
+	// Server owns identity, provenance, lifecycle and every linkage field. A
+	// capture-time caller supplies ONLY where the message came from and what it
+	// said; everything that describes what has been DECIDED about the row is
+	// zeroed here and can be set afterwards only through UpdateInbox.
+	//
+	// Resetting the linkage fields is not defensive tidiness. project,
+	// proposal_id and run_id are not in this tool's InputSchema, but
+	// json.Unmarshal above happily fills them from any extra keys the caller
+	// sends, and CreateInbox persists whatever it is given — so without this a
+	// caller could pre-link a brand-new row to an arbitrary existing proposal or
+	// run, which is exactly the server-owned-field forgery the ID reset exists
+	// to stop. project is zeroed for a second reason: capture happens BEFORE
+	// routing, so a project set at capture time is an invisible mis-route.
 	it.ID = 0
 	it.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	it.UpdatedAt = ""
 	it.Status = "new"
 	it.Triage = ""
+	it.Project = nil
+	it.ProposalID = nil
+	it.RunID = nil
+	it.Note = ""
 
 	s, err := getStore()
 	if err != nil {

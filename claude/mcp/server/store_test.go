@@ -2069,3 +2069,95 @@ func TestListWorklistQueryCountIsBounded(t *testing.T) {
 		t.Errorf("worklist should cost roughly one query per table (inbox, proposals, agent_runs), got %d", four)
 	}
 }
+
+// ── inbox security + migration fixes (DOTFILES-40 ship-review remediation) ───
+//
+// These three cover the findings that blocked the first /ship: a caller forging
+// server-owned linkage fields, a row written with none of the identity the tool
+// schema calls required, and the dedup cursor moving between tables with no
+// backfill.
+
+func TestCreateInboxRequiresRawTextAndSourceLocation(t *testing.T) {
+	s := newTestStore(t)
+
+	noText := sampleInbox("1756700000.000200")
+	noText.RawText = ""
+	if _, err := s.CreateInbox(noText); err == nil {
+		t.Error("want error when raw_text is empty, got nil — an inbox row with no text is untriageable")
+	}
+
+	noChannel := sampleInbox("1756700000.000201")
+	noChannel.SourceChannel = ""
+	if _, err := s.CreateInbox(noChannel); err == nil {
+		t.Error("want error when source_channel is empty, got nil")
+	}
+
+	noPermalink := sampleInbox("1756700000.000202")
+	noPermalink.SourcePermalink = ""
+	if _, err := s.CreateInbox(noPermalink); err == nil {
+		t.Error("want error when source_permalink is empty, got nil — a queue row with no way back to the conversation is not actionable")
+	}
+}
+
+// TestCreateSchemaBackfillsInboxCursorFromProposals is the upgrade path: a
+// registry that already holds proposals written before the inbox existed must
+// not re-capture and re-plan those messages on its first post-upgrade sweep.
+func TestCreateSchemaBackfillsInboxCursorFromProposals(t *testing.T) {
+	s := newTestStore(t)
+
+	p := sampleProposal("already handled before the inbox existed")
+	if _, err := s.CreateProposal(p); err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	// Simulate the next server start, which is when the backfill runs.
+	if err := s.createSchema(); err != nil {
+		t.Fatalf("createSchema (re-run): %v", err)
+	}
+
+	items, err := s.ListInbox("closed")
+	if err != nil {
+		t.Fatalf("ListInbox: %v", err)
+	}
+	var found *inboxItem
+	for _, it := range items {
+		if it.SourceRef == p.SourceRef {
+			found = it
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("proposal source_ref %q was not backfilled into inbox; the first sweep after upgrade would re-capture and re-plan it", p.SourceRef)
+	}
+	if found.Status != "closed" {
+		t.Errorf("backfilled cursor row should be closed (it is not work), got %q", found.Status)
+	}
+	if found.Triage != "" {
+		t.Errorf("backfilled cursor row should carry no triage verdict, got %q", found.Triage)
+	}
+
+	// The whole point: capturing that same message again must now be refused.
+	if _, err := s.CreateInbox(sampleInbox(p.SourceRef)); err == nil {
+		t.Error("want 'already exists' on a source_ref that is already a proposal, got nil — the dedup cursor did not carry over")
+	}
+}
+
+func TestCreateSchemaBackfillIsIdempotent(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.CreateProposal(sampleProposal("run me twice")); err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := s.createSchema(); err != nil {
+			t.Fatalf("createSchema run %d: %v", i, err)
+		}
+	}
+	items, err := s.ListInbox("")
+	if err != nil {
+		t.Fatalf("ListInbox: %v", err)
+	}
+	if len(items) != 1 {
+		t.Errorf("want exactly 1 backfilled row after 3 schema runs, got %d — backfill is not idempotent", len(items))
+	}
+}

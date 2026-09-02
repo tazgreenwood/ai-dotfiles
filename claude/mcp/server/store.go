@@ -171,6 +171,31 @@ func (s *store) createSchema() error {
 		`CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox(status)`,
 		// Dedup key: one inbox row per inbound source message (e.g. a Slack ts).
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_source_ref ON inbox(source, source_ref)`,
+		// Backfill the dedup cursor from proposals written BEFORE the inbox
+		// existed. DOTFILES-40 moved the "have I seen this Slack message?"
+		// cursor off proposals(source, source_ref) and onto inbox(source,
+		// source_ref). Without this, every message still inside the sweep's
+		// 25-message poll window that had already become a proposal looks brand
+		// new to the first post-upgrade sweep: it gets captured, re-triaged,
+		// re-planned and re-posted, and on the plan path its proposal write
+		// collides with the row that already exists — which lead.md STEP 5 reads
+		// as "already seen" success, so the run reports done having persisted
+		// nothing.
+		//
+		// Rows land as 'closed' with no triage: they are cursor entries, not
+		// work. INSERT OR IGNORE + the UNIQUE index above makes this idempotent,
+		// so it is safe on every startup and cannot clobber a live row.
+		`INSERT OR IGNORE INTO inbox
+			(project, source, source_ref, source_channel, source_permalink,
+			 raw_text, status, note, created_at)
+		 SELECT project, source, source_ref,
+		        COALESCE(source_channel, ''), COALESCE(source_permalink, ''),
+		        COALESCE(summary, '(backfilled from proposal)'),
+		        'closed',
+		        'Backfilled cursor entry: this message was already handled as a proposal before the inbox existed.',
+		        created_at
+		   FROM proposals
+		  WHERE source = 'slack'`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -1232,6 +1257,18 @@ func (s *store) CreateInbox(it *inboxItem) (int64, error) {
 	}
 	if it.Source == "" || it.SourceRef == "" {
 		return 0, fmt.Errorf("inbox source and source_ref are required")
+	}
+	// raw_text is what triage reads; the two source_* fields are the only route
+	// back to the conversation a row came from. The tool schema marks all three
+	// required, but a schema is a hint to the caller, not enforcement — the
+	// proposal writer validates its own equivalents here for the same reason.
+	// A row with no raw_text is untriageable; one with no permalink is a queue
+	// entry nobody can act on.
+	if it.RawText == "" {
+		return 0, fmt.Errorf("inbox raw_text is required")
+	}
+	if it.SourceChannel == "" || it.SourcePermalink == "" {
+		return 0, fmt.Errorf("inbox source_channel and source_permalink are required for source %q", it.Source)
 	}
 	status := it.Status
 	if status == "" {
