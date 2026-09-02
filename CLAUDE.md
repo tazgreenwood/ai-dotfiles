@@ -94,7 +94,9 @@ Response: { "name": "...", "repo": {...}, "deploy": {...}, "ticket_counter": N, 
 Sets value in project metadata via dot-path. Makes intermediate objects as needed.
 
 #### `registry_init_project(name: string, workspace?: string, localPath?: string, base?: string, prTarget?: string, profile?: string, cluster?: string, logGroup?: string, env?: string) -> {ok: bool, created: string, data: map[string]any} | error`
-Makes new project entry, defaults on missing fields.
+Makes new project entry. **An omitted field is not left unset — it is stamped with a default**, and the defaults are this workspace's, not the caller's repo's: `workspace` → `$BITBUCKET_WORKSPACE` else `clearlinkit` (a *Bitbucket* workspace, written onto GitHub repos too), `base` → `production`, `prTarget` → `staging`, `profile` → `martech`, `cluster` → `general-production`, `logGroup` → `<name>-production`, `env` → `production`.
+
+So "omit it rather than guess" is never available here: omitting *is* a guess, just an invisible one. A repo whose default branch is `master` registered without an explicit `base` points every later `/plan`, `/build` and `/ship` at a branch that does not exist. Callers must pass what they know (resolve the real default branch with `git -C <path> symbolic-ref --short refs/remotes/origin/HEAD`) and **report every value that was stamped rather than chosen**. Re-initialising an existing name is refused — `project '%s' already exists`; use `registry_set` to update fields.
 
 #### `registry_list_projects() -> {projects: []string}`
 Lists all projects in registry.

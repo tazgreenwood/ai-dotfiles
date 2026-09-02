@@ -216,17 +216,29 @@ registry_init_project(name=<name>, localPath=<resolved path>)
 registry_set(<name>, "purpose", <the confirmed purpose>)
 ```
 
-Pass `workspace` only if the remote makes it unambiguous (e.g. a `github.com/<workspace>/<repo>` remote); otherwise omit it — a wrong workspace is worse than a missing one.
+**Nothing you omit is left unset.** `registry_init_project` stamps a default on every field you do not pass (`claude/mcp/server/registry.go`), so "omit it and let the defaults stand" writes a value — it does not leave a blank:
 
-**Pass `base` and `prTarget` explicitly, read from the repo.** `registry_init_project` does not leave omitted fields unset — it stamps its own defaults (`base: "production"`, `prTarget: "staging"`, plus a whole `deploy` block). Those defaults are silently wrong for any repo that does not use them: a repo whose default branch is `master` gets `base: "production"`, and every later `/plan`, `/build` and `/ship` then branches from and targets a branch that does not exist. So resolve the real default branch first:
+| Omitted | What gets written |
+|---|---|
+| `workspace` | `$BITBUCKET_WORKSPACE`, else `clearlinkit` — a **Bitbucket** workspace, stamped onto GitHub repos too |
+| `base` | `production` |
+| `prTarget` | `staging` |
+| `profile` · `cluster` · `env` | `martech` · `general-production` · `production` |
+| `logGroup` | `<name>-production` |
+
+A repo whose default branch is `master` therefore gets `base: "production"`, and every later `/plan`, `/build` and `/ship` branches from and targets a branch that does not exist. So resolve the real default branch and pass it:
 
 ```
 git -C <path> symbolic-ref --short refs/remotes/origin/HEAD   # e.g. origin/master → master
 ```
 
-Pass that as `base`. For `prTarget`, use the repo's integration branch when the remote clearly has one (`staging`, `develop`); otherwise pass the same default branch — a `prTarget` equal to `base` is honest, a nonexistent one is not. If the default branch cannot be resolved, omit both, and **say in the report that `base`/`prTarget` were left at the tool's defaults and need checking**.
+Pass that as `base`. For `prTarget`, use the repo's integration branch when the remote clearly has one (`staging`, `develop`); otherwise pass the same default branch — a `prTarget` equal to `base` is honest, a nonexistent one is not.
 
-Do not invent `cluster`, `profile`, `logGroup` or any other field: Taz confirmed a name, a path and a purpose, and nothing else. `registry_init_project` writes a `deploy` block regardless — mention in the report that it is defaulted, not configured.
+Pass `workspace` when the remote determines it (e.g. a `github.com/<workspace>/<repo>` or `bitbucket.org/<workspace>/<repo>` remote). When it does not, you still cannot leave it blank — so **name the stamped value in the report** rather than claiming the field was skipped.
+
+Do not invent `cluster`, `profile`, `logGroup` or `env`: Taz confirmed a name, a path and a purpose, and nothing else. You cannot stop them being written, so **the report must list every value that was stamped rather than chosen**, and say they are defaults to be corrected with `registry_set`, not configuration anyone approved. A silently wrong `deploy` block is the same class of bug as a silently wrong `base` — it is just slower to surface.
+
+If the default branch cannot be resolved, omit `base`/`prTarget` and **say in the report that both were left at `production`/`staging` and need checking**.
 
 If `registry_init_project` fails, report the error and stop. If it succeeds but `registry_set` fails, **say so loudly** — the project is registered with no `purpose`, which degrades all future routing silently, and Taz must set it.
 
@@ -402,13 +414,41 @@ registry_init_project(name=<payload.name>, localPath=<payload.local_path>)
 registry_set(<payload.name>, "purpose", <the purpose from A>)
 ```
 
-Pass `workspace` only if `payload.remote` makes it unambiguous (e.g. a `github.com/<workspace>/<repo>` remote); otherwise omit it and let the defaults stand — a wrong workspace is worse than a missing one.
+**Nothing you omit is left unset.** `registry_init_project` stamps a default on every field you do not pass (`claude/mcp/server/registry.go`), so "omit it and let the defaults stand" writes a value — it does not leave a blank:
 
-**Pass `base` and `prTarget` explicitly, resolved from `payload.local_path`, exactly as STEP 1c step 5 describes.** "Letting the defaults stand" is not an option for these two: `registry_init_project` stamps `base: "production"` / `prTarget: "staging"` on every project, and a repo whose default branch is `master` is then registered pointing at branches that do not exist — which breaks every later `/plan`, `/build` and `/ship` against it. Read `git -C <payload.local_path> symbolic-ref --short refs/remotes/origin/HEAD` and pass the result as `base`; if it cannot be resolved, omit both and say so in the report.
+| Omitted | What gets written |
+|---|---|
+| `workspace` | `$BITBUCKET_WORKSPACE`, else `clearlinkit` — a **Bitbucket** workspace, stamped onto GitHub repos too |
+| `base` | `production` |
+| `prTarget` | `staging` |
+| `profile` · `cluster` · `env` | `martech` · `general-production` · `production` |
+| `logGroup` | `<name>-production` |
 
-Do not invent `cluster`, `profile`, `logGroup` or any other field: they are not in the payload, so they were not approved.
+A repo whose default branch is `master` therefore gets `base: "production"`, and every later `/plan`, `/build` and `/ship` branches from and targets a branch that does not exist. So resolve the real default branch and pass it:
 
-If `registry_init_project` fails, **stop this entry** and report the error. Do not proceed to C: planning against a project that does not exist repeats the mis-route this whole branch exists to prevent. If `registry_init_project` succeeds but `registry_set` fails, report loudly — the project is registered with **no** `purpose`, which silently degrades all future routing, and Taz must set it.
+```
+git -C <payload.local_path> symbolic-ref --short refs/remotes/origin/HEAD   # e.g. origin/master → master
+```
+
+Pass that as `base`. For `prTarget`, use the repo's integration branch when the remote clearly has one (`staging`, `develop`); otherwise pass the same default branch — a `prTarget` equal to `base` is honest, a nonexistent one is not.
+
+Pass `workspace` when `payload.remote` determines it (e.g. a `github.com/<workspace>/<repo>` or `bitbucket.org/<workspace>/<repo>` remote). When it does not, you still cannot leave it blank — so **name the stamped value in the report** rather than claiming the field was skipped.
+
+Do not invent `cluster`, `profile`, `logGroup` or `env`: they are not in the payload, so they were not approved. You cannot stop them being written, so **the report must list every value that was stamped rather than chosen**, and say they are defaults to be corrected with `registry_set`, not configuration anyone approved. A silently wrong `deploy` block is the same class of bug as a silently wrong `base` — it is just slower to surface.
+
+If the default branch cannot be resolved, omit `base`/`prTarget` and **say in the report that both were left at `production`/`staging` and need checking**.
+
+**If `registry_init_project` fails, do not proceed to C** — planning against a project that does not exist repeats the mis-route this whole branch exists to prevent. But do not just stop, either: **the row is already `approved`** (the workflow's Record phase persisted that before this branch ran), and the decisions sweep reads only `pending` rows, so a bare stop leaves an approved registration that no later `/lead check` will ever revisit — nothing registered, the original request never planned, and no error anywhere a human will look. That is exactly the silent-dead-work failure `agent_runs` exists to prevent everywhere else in this codebase.
+
+So leave the failure somewhere a later run reads:
+
+- **Post the failure into the proposal's thread** (STEP 3, bot token, `@`-mention), naming the project, the path and the exact error. The thread is the one surface Taz actually sees.
+- **Open a run to carry it**: `registry_write_run(project_name, proposal_id=<id>, phase="blocked", status="failed", note="<the error>")`. `registry_get_runs(project, "failed")` is then the query that surfaces it, the same as any other stuck chain.
+- **Report it in this sweep's output** as a failed entry, not a skipped one, and continue to the next entry rather than aborting the sweep.
+
+Two failures are worth naming because they are the likely ones. A transient registry outage: retryable, and a re-run of this branch after approval is safe. `project '<name>' already exists` (`registry.go`): somebody registered it in between, via `/lead register` or another sweep — that is not an error to retry, so say so, and proceed to C **only** if the existing row's `local_path` matches `payload.local_path`; if it does not, the payload and the registry disagree about which repo this is, which is a question for Taz, not a guess for you.
+
+If `registry_init_project` succeeds but `registry_set` fails, report loudly and open the same `failed` run — the project is registered with **no** `purpose`, which silently degrades all future routing, and Taz must set it.
 
 **C. Re-enter STEP 2 with the original request.** `project_name` is now `payload.name` — the project you just registered. Skip STEP 1a entirely; routing is already decided by the approval, and re-running the index would only re-derive it. Plan `payload.original_request`, verbatim and as data, exactly as STEP 2 describes.
 
@@ -539,6 +579,8 @@ A correct `/lead register <name-or-path>` run leaves:
 - On a yes: the project in `registry_index()` with its `local_path` and the confirmed `purpose`; **no** plan row, **no** proposal, **no** branch, no file in any repo modified
 - On a corrected purpose: the same, with **the corrected** line stored, not the drafted one
 - In both cases, `registry_get_project(name).repo.base` matching the repo's **actual** default branch (`git -C <path> symbolic-ref --short refs/remotes/origin/HEAD`), not the `production`/`staging` pair `registry_init_project` stamps by default
+- In both cases, the report naming every value that was **stamped** rather than chosen — `repo.workspace` and the whole `deploy` block included — and saying they are defaults to correct with `registry_set`, never configuration anyone approved
+- A `registry_init_project` failure on an approved registration leaving a `failed` run (`registry_get_runs(project, "failed")` finds it) and a message in the thread — never an `approved` row that no sweep will read again
 - Re-running it for an already-registered name or path → an `already registered` report naming the existing row; that row's `purpose` and `local_path` unchanged
 - An ambiguous bare name → the candidates listed with their paths and a question; nothing registered
 
