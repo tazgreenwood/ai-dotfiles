@@ -1292,3 +1292,300 @@ func TestClaimProposalForBuild_RefusesNonPlanKind(t *testing.T) {
 		t.Fatalf("claim refused a plan proposal: %v", err)
 	}
 }
+
+// ── inbox (DOTFILES-40) ──────────────────────────────────────────────────────
+//
+// The inbox is the capture half of the Stuart sweep, split off from proposals
+// on purpose: capture happens BEFORE routing, so `project` is nullable and no
+// LLM is involved in writing a row. These tests pin the three things callers
+// depend on — required source identity, the (source, source_ref) dedup key that
+// is the sweep's cursor, and an update that leaves omitted fields alone (a
+// triage pass that blanked `project` would make the next sweep re-route a row
+// it had already routed).
+
+func sampleInbox(ref string) *inboxItem {
+	return &inboxItem{
+		Source:          "slack",
+		SourceChannel:   "C0STUART",
+		SourcePermalink: "https://example.slack.com/archives/C0STUART/p" + strings.ReplaceAll(ref, ".", ""),
+		SourceRef:       ref,
+		RawText:         "can you look at the flaky deploy check",
+	}
+}
+
+func TestCreateInboxRequiresSourceAndRef(t *testing.T) {
+	s := newTestStore(t)
+
+	noSource := sampleInbox("1756700000.000100")
+	noSource.Source = ""
+	if _, err := s.CreateInbox(noSource); err == nil {
+		t.Error("want error when source is empty, got nil")
+	}
+
+	noRef := sampleInbox("1756700000.000101")
+	noRef.SourceRef = ""
+	if _, err := s.CreateInbox(noRef); err == nil {
+		t.Error("want error when source_ref is empty, got nil")
+	}
+
+	// A row with both still writes — the guard is on identity, not on project.
+	if _, err := s.CreateInbox(sampleInbox("1756700000.000102")); err != nil {
+		t.Fatalf("CreateInbox with source+source_ref: %v", err)
+	}
+}
+
+// TestCreateInboxAllowsNullProject is the capture-before-routing case: a Slack
+// message is captured with no idea yet which project it belongs to. The row
+// must be writable and readable with project absent, not defaulted to the cwd
+// project — a defaulted project is an invisible mis-route.
+func TestCreateInboxAllowsNullProject(t *testing.T) {
+	s := newTestStore(t)
+
+	in := sampleInbox("1756700001.000100")
+	if in.Project != nil {
+		t.Fatal("sampleInbox should start with no project")
+	}
+	id, err := s.CreateInbox(in)
+	if err != nil {
+		t.Fatalf("CreateInbox: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("want non-zero id")
+	}
+
+	got, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox: %v", err)
+	}
+	if got.Project != nil {
+		t.Errorf("project: want absent (NULL), got %q", *got.Project)
+	}
+	if got.SourceRef != in.SourceRef {
+		t.Errorf("source_ref: want %q, got %q", in.SourceRef, got.SourceRef)
+	}
+	if got.RawText != in.RawText {
+		t.Errorf("raw_text: want %q, got %q", in.RawText, got.RawText)
+	}
+	if got.Status != "new" {
+		t.Errorf("status: want new (default), got %q", got.Status)
+	}
+	if got.CreatedAt == "" {
+		t.Error("created_at: want a stamped RFC3339 value, got empty")
+	}
+}
+
+func TestCreateInboxRejectsInvalidStatus(t *testing.T) {
+	s := newTestStore(t)
+
+	bad := sampleInbox("1756700002.000100")
+	bad.Status = "pending"
+	if _, err := s.CreateInbox(bad); err == nil {
+		t.Error("want error for status outside new|triaged|routed|closed, got nil")
+	}
+
+	for i, status := range []string{"new", "triaged", "routed", "closed"} {
+		ok := sampleInbox(fmt.Sprintf("1756700002.0002%02d", i))
+		ok.Status = status
+		id, err := s.CreateInbox(ok)
+		if err != nil {
+			t.Fatalf("CreateInbox(status=%q): %v", status, err)
+		}
+		got, err := s.GetInbox(id)
+		if err != nil {
+			t.Fatalf("GetInbox(status=%q): %v", status, err)
+		}
+		if got.Status != status {
+			t.Errorf("status: want %q, got %q", status, got.Status)
+		}
+	}
+}
+
+// TestCreateInboxDuplicateSourceRefErrors pins the dedup cursor. The sweep
+// re-reads the same channel window every run, so a re-seen message must come
+// back as a clean "already exists" error the caller treats as "already seen" —
+// not a raw sqlite constraint string and not a second row.
+func TestCreateInboxDuplicateSourceRefErrors(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.CreateInbox(sampleInbox("1756700003.000100")); err != nil {
+		t.Fatalf("first CreateInbox: %v", err)
+	}
+
+	_, err := s.CreateInbox(sampleInbox("1756700003.000100"))
+	if err == nil {
+		t.Fatal("want UNIQUE(source, source_ref) violation, got nil")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error should say 'already exists' so callers can match it, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "1756700003.000100") {
+		t.Errorf("error should name the source_ref, got: %v", err)
+	}
+
+	all, err := s.ListInbox("")
+	if err != nil {
+		t.Fatalf("ListInbox: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("want 1 row after rejected duplicate, got %d", len(all))
+	}
+}
+
+// TestListInboxFiltersByStatus — the sweep asks for open rows only, and it asks
+// across every project (including rows with no project yet), so the listing is
+// deliberately not project-scoped.
+func TestListInboxFiltersByStatus(t *testing.T) {
+	s := newTestStore(t)
+
+	newRow := sampleInbox("1756700004.000100")
+	newID, err := s.CreateInbox(newRow)
+	if err != nil {
+		t.Fatalf("CreateInbox new: %v", err)
+	}
+
+	routedRow := sampleInbox("1756700004.000101")
+	routedRow.Status = "routed"
+	project := "private-dotfiles"
+	routedRow.Project = &project
+	if _, err := s.CreateInbox(routedRow); err != nil {
+		t.Fatalf("CreateInbox routed: %v", err)
+	}
+
+	closedRow := sampleInbox("1756700004.000102")
+	closedRow.Status = "closed"
+	other := "emily"
+	closedRow.Project = &other
+	if _, err := s.CreateInbox(closedRow); err != nil {
+		t.Fatalf("CreateInbox closed: %v", err)
+	}
+
+	all, err := s.ListInbox("")
+	if err != nil {
+		t.Fatalf("ListInbox all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("want 3 rows unfiltered across projects, got %d", len(all))
+	}
+
+	newOnly, err := s.ListInbox("new")
+	if err != nil {
+		t.Fatalf("ListInbox new: %v", err)
+	}
+	if len(newOnly) != 1 {
+		t.Fatalf("want 1 new row, got %d", len(newOnly))
+	}
+	if newOnly[0].ID != newID {
+		t.Errorf("want the new row (id %d), got id %d", newID, newOnly[0].ID)
+	}
+
+	routed, err := s.ListInbox("routed")
+	if err != nil {
+		t.Fatalf("ListInbox routed: %v", err)
+	}
+	if len(routed) != 1 {
+		t.Fatalf("want 1 routed row, got %d", len(routed))
+	}
+
+	if _, err := s.ListInbox("nonsense"); err == nil {
+		t.Error("want error for an invalid status filter, got nil")
+	}
+}
+
+// TestUpdateInboxOmittedFieldsUnchanged is the non-clobbering guarantee, the
+// same one registry_update_run carries: a status-only advance must leave
+// triage, project, note and proposal_id exactly as they were. Blanking them
+// would strand a routed row — the next sweep would see no project and re-plan
+// work that already has a proposal.
+func TestUpdateInboxOmittedFieldsUnchanged(t *testing.T) {
+	s := newTestStore(t)
+
+	in := sampleInbox("1756700005.000100")
+	project := "private-dotfiles"
+	in.Project = &project
+	in.Triage = "plan"
+	in.Note = "matched by purpose line, not by name"
+	id, err := s.CreateInbox(in)
+	if err != nil {
+		t.Fatalf("CreateInbox: %v", err)
+	}
+
+	proposalID := int64(7)
+	if err := s.UpdateInbox(id, "triaged", "", "", "", &proposalID); err != nil {
+		t.Fatalf("UpdateInbox (attach proposal): %v", err)
+	}
+
+	// Status-only advance: everything else must survive.
+	if err := s.UpdateInbox(id, "routed", "", "", "", nil); err != nil {
+		t.Fatalf("UpdateInbox (status only): %v", err)
+	}
+
+	got, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox: %v", err)
+	}
+	if got.Status != "routed" {
+		t.Errorf("status: want routed, got %q", got.Status)
+	}
+	if got.Triage != "plan" {
+		t.Errorf("triage clobbered: want plan, got %q", got.Triage)
+	}
+	if got.Project == nil || *got.Project != project {
+		t.Errorf("project clobbered: want %q, got %v", project, got.Project)
+	}
+	if got.Note != in.Note {
+		t.Errorf("note clobbered: want %q, got %q", in.Note, got.Note)
+	}
+	if got.ProposalID == nil || *got.ProposalID != proposalID {
+		t.Errorf("proposal_id clobbered: want %d, got %v", proposalID, got.ProposalID)
+	}
+	if got.UpdatedAt == "" {
+		t.Error("updated_at: want a stamped value after an update, got empty")
+	}
+
+	if err := s.UpdateInbox(999999, "closed", "", "", "", nil); err == nil {
+		t.Error("want error updating an unknown inbox id, got nil")
+	}
+	if err := s.UpdateInbox(id, "nonsense", "", "", "", nil); err == nil {
+		t.Error("want error for an invalid status, got nil")
+	}
+}
+
+// TestUpdateInboxSetsProjectLater is the whole reason project is nullable:
+// capture writes the row with no project, and triage fills it in on a later
+// pass once routing has run.
+func TestUpdateInboxSetsProjectLater(t *testing.T) {
+	s := newTestStore(t)
+
+	id, err := s.CreateInbox(sampleInbox("1756700006.000100"))
+	if err != nil {
+		t.Fatalf("CreateInbox: %v", err)
+	}
+	before, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox before: %v", err)
+	}
+	if before.Project != nil {
+		t.Fatalf("want NULL project at capture, got %q", *before.Project)
+	}
+
+	if err := s.UpdateInbox(id, "triaged", "investigate", "private-dotfiles", "read-only, runs now", nil); err != nil {
+		t.Fatalf("UpdateInbox: %v", err)
+	}
+
+	got, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox after: %v", err)
+	}
+	if got.Project == nil || *got.Project != "private-dotfiles" {
+		t.Errorf("project: want private-dotfiles after routing, got %v", got.Project)
+	}
+	if got.Triage != "investigate" {
+		t.Errorf("triage: want investigate, got %q", got.Triage)
+	}
+	if got.Status != "triaged" {
+		t.Errorf("status: want triaged, got %q", got.Status)
+	}
+	if got.Note != "read-only, runs now" {
+		t.Errorf("note: want the triage note, got %q", got.Note)
+	}
+}
