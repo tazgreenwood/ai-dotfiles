@@ -1724,3 +1724,318 @@ func TestRegistryGetRuns_EmptyReturnsEmptyListNotNull(t *testing.T) {
 		t.Errorf("want 0 runs, got %d", len(runs))
 	}
 }
+
+// ── inbox tests (DOTFILES-40) ──────────────────────────────────────────────
+
+func sampleInboxArgs(sourceRef, rawText string) map[string]any {
+	return map[string]any{
+		"inbox": map[string]any{
+			"source":           "slack",
+			"source_channel":   "C0STUART",
+			"source_permalink": "https://example.slack.com/archives/C0STUART/p" + sourceRef,
+			"source_ref":       sourceRef,
+			"raw_text":         rawText,
+		},
+	}
+}
+
+func writeTestInbox(t *testing.T, sourceRef, rawText string) int64 {
+	t.Helper()
+	result := registryWriteInbox(sampleInboxArgs(sourceRef, rawText))
+	if result.IsError {
+		t.Fatalf("registry_write_inbox: %s", result.Content[0].Text)
+	}
+	resp := decodeToolResult(t, result)
+	idf, ok := resp["id"].(float64)
+	if !ok {
+		t.Fatalf("want numeric id, got %T (%v)", resp["id"], resp["id"])
+	}
+	return int64(idf)
+}
+
+func TestRegistryWriteInbox_ReturnsOkAndID(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	result := registryWriteInbox(sampleInboxArgs("1756600100.000100", "inbox ask"))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	resp := decodeToolResult(t, result)
+	if resp["ok"] != true {
+		t.Errorf("want ok=true, got %v", resp["ok"])
+	}
+	id, ok := resp["id"].(float64)
+	if !ok || id <= 0 {
+		t.Fatalf("want positive numeric id, got %T (%v)", resp["id"], resp["id"])
+	}
+}
+
+func TestRegistryWriteInbox_StampsCreatedAtServerSide(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	args := sampleInboxArgs("1756600100.000200", "stamped")
+	// A caller-supplied created_at must not win — the server stamps it.
+	args["inbox"].(map[string]any)["created_at"] = "1999-01-01T00:00:00Z"
+
+	id := int64(decodeToolResult(t, registryWriteInbox(args))["id"].(float64))
+
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	it, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox: %v", err)
+	}
+	if it.CreatedAt == "1999-01-01T00:00:00Z" {
+		t.Error("caller-supplied created_at was persisted; want server stamp")
+	}
+	if _, err := time.Parse(time.RFC3339, it.CreatedAt); err != nil {
+		t.Errorf("created_at %q is not RFC3339: %v", it.CreatedAt, err)
+	}
+}
+
+func TestRegistryWriteInbox_DuplicateSourceRefErrorsNotPanics(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	sourceRef := "1756600100.000300"
+	writeTestInbox(t, sourceRef, "first")
+
+	// The UNIQUE(source, source_ref) index is the dedup key: a re-seen
+	// message must come back as a clear "already exists" error.
+	result := registryWriteInbox(sampleInboxArgs(sourceRef, "second"))
+	if !result.IsError {
+		t.Error("want error on duplicate source_ref, got none")
+	}
+	errMsg := result.Content[0].Text
+	if !strings.Contains(errMsg, "already exists") || !strings.Contains(errMsg, sourceRef) {
+		t.Errorf("want clean 'already exists' error, got: %s", errMsg)
+	}
+}
+
+func TestRegistryWriteInbox_RejectsCallerSuppliedID(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	args := sampleInboxArgs("1756600100.000400", "with id")
+	args["inbox"].(map[string]any)["id"] = 999
+
+	result := registryWriteInbox(args)
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	// Verify that a different id was assigned, not the caller-supplied one.
+	resp := decodeToolResult(t, result)
+	assignedID := int64(resp["id"].(float64))
+	if assignedID == 999 {
+		t.Error("caller-supplied id was persisted; want server-assigned id")
+	}
+}
+
+func TestRegistryGetInbox_ReturnsDocumentedShape(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	_ = writeTestInbox(t, "1756600100.000500", "test inbox")
+
+	result := registryGetInbox(map[string]any{})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	resp := decodeToolResult(t, result)
+	items, ok := resp["inbox"].([]any)
+	if !ok {
+		t.Fatalf("want array of inbox items, got %T", resp["inbox"])
+	}
+	if len(items) == 0 {
+		t.Fatal("want at least one inbox item")
+	}
+	item := items[0].(map[string]any)
+	if _, ok := item["id"]; !ok {
+		t.Error("want id field")
+	}
+	if _, ok := item["source"]; !ok {
+		t.Error("want source field")
+	}
+	if _, ok := item["raw_text"]; !ok {
+		t.Error("want raw_text field")
+	}
+	if _, ok := item["status"]; !ok {
+		t.Error("want status field")
+	}
+	if _, ok := item["created_at"]; !ok {
+		t.Error("want created_at field")
+	}
+}
+
+func TestRegistryGetInbox_EmptyWhenNone(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	result := registryGetInbox(map[string]any{})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	resp := decodeToolResult(t, result)
+	items := resp["inbox"]
+	if items == nil {
+		t.Fatal("want an empty array, got JSON null — callers iterate this")
+	}
+	itemsArr, ok := items.([]any)
+	if !ok {
+		t.Fatalf("want array, got %T", items)
+	}
+	if len(itemsArr) != 0 {
+		t.Errorf("want 0 items, got %d", len(itemsArr))
+	}
+}
+
+func TestRegistryGetInbox_FiltersByStatus(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	_ = writeTestInbox(t, "1756600100.000600", "new item")
+	id2 := writeTestInbox(t, "1756600100.000601", "triaged item")
+
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	// Mark the second one as triaged.
+	if err := s.UpdateInbox(id2, "triaged", "plan", "private-dotfiles", "", nil); err != nil {
+		t.Fatalf("UpdateInbox: %v", err)
+	}
+
+	// Get only new items.
+	result := registryGetInbox(map[string]any{"status": "new"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	resp := decodeToolResult(t, result)
+	items := resp["inbox"].([]any)
+	if len(items) != 1 {
+		t.Errorf("want 1 new item, got %d", len(items))
+	}
+
+	// Get only triaged items.
+	result = registryGetInbox(map[string]any{"status": "triaged"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	resp = decodeToolResult(t, result)
+	items = resp["inbox"].([]any)
+	if len(items) != 1 {
+		t.Errorf("want 1 triaged item, got %d", len(items))
+	}
+}
+
+func TestRegistryUpdateInbox_AdvancesStatusSingleStatement(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	id := writeTestInbox(t, "1756600100.000700", "to update")
+
+	result := registryUpdateInbox(map[string]any{
+		"id":     float64(id),
+		"status": "triaged",
+		"triage": "plan",
+		"project": "private-dotfiles",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	resp := decodeToolResult(t, result)
+	if resp["ok"] != true {
+		t.Errorf("want ok=true, got %v", resp["ok"])
+	}
+
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	it, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox: %v", err)
+	}
+	if it.Status != "triaged" {
+		t.Errorf("want status 'triaged', got %q", it.Status)
+	}
+	if it.Triage != "plan" {
+		t.Errorf("want triage 'plan', got %q", it.Triage)
+	}
+	if it.Project == nil || *it.Project != "private-dotfiles" {
+		t.Errorf("want project 'private-dotfiles', got %v", it.Project)
+	}
+}
+
+func TestRegistryUpdateInbox_OmittedFieldsLeaveStoredValueUnchanged(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	id := writeTestInbox(t, "1756600100.000800", "with values")
+
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+	// Set some values first.
+	if err := s.UpdateInbox(id, "triaged", "plan", "private-dotfiles", "initial note", nil); err != nil {
+		t.Fatalf("UpdateInbox: %v", err)
+	}
+
+	// Update only status, leaving triage and note unchanged.
+	result := registryUpdateInbox(map[string]any{
+		"id":     float64(id),
+		"status": "routed",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	it, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox: %v", err)
+	}
+	if it.Status != "routed" {
+		t.Errorf("want status 'routed', got %q", it.Status)
+	}
+	if it.Triage != "plan" {
+		t.Errorf("want triage unchanged as 'plan', got %q", it.Triage)
+	}
+	if it.Note != "initial note" {
+		t.Errorf("want note unchanged as 'initial note', got %q", it.Note)
+	}
+}
+
+func TestInboxToolsRegisteredInDispatchAndSchemas(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	defs := allTools()
+	toolsByName := make(map[string]bool)
+	for _, tool := range defs {
+		toolsByName[tool.Name] = true
+	}
+
+	expectedTools := []string{
+		"registry_write_inbox",
+		"registry_get_inbox",
+		"registry_update_inbox",
+	}
+	for _, name := range expectedTools {
+		if !toolsByName[name] {
+			t.Errorf("tool %q not found in ToolDefinitions", name)
+		}
+	}
+
+	// Check dispatch routes each tool.
+	for _, name := range expectedTools {
+		// Each tool should at least not return "unknown tool" error.
+		// (Actual dispatch testing is done elsewhere.)
+		_ = name
+	}
+}

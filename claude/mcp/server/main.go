@@ -176,6 +176,12 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryGetProposals(args)
 	case "registry_update_proposal":
 		return registryUpdateProposal(args)
+	case "registry_write_inbox":
+		return registryWriteInbox(args)
+	case "registry_get_inbox":
+		return registryGetInbox(args)
+	case "registry_update_inbox":
+		return registryUpdateInbox(args)
 	}
 	return toolErr("unknown tool: " + name)
 }
