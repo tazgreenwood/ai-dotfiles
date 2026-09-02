@@ -160,7 +160,7 @@ In **propose mode** (`/lead <request>`) there is no Claim phase and so no claim 
 
 Then STEP 6 reports as usual and **stops**. Approving a registration is handled in STEP 7; nothing is written to the registry here.
 
-**`--in-session` on a registration.** STEP 3's in-session path takes the decision right there, and STEP 7 is check-mode only — so an in-session `approve` would otherwise mark the row `approved` and stop, registering nothing and planning nothing, which is precisely the acceptance criterion ("approving a registration registers the project AND plans the original request") failing on a route nobody walked. So: when the human approves a `kind: "registration"` proposal **in session**, run **B, C and E of STEP 7's approved-registration branch** unchanged, and **D with the session substitution below**. An in-session **rejection** records the rejection and registers nothing.
+**`--in-session` on a registration.** STEP 3's in-session path takes the decision right there, and STEP 7 is check-mode only — so an in-session `approve` would otherwise mark the row `approved` and stop, registering nothing and planning nothing, which is precisely the acceptance criterion ("approving a registration registers the project AND plans the original request") failing on a route nobody walked. So: when the human approves a `kind: "registration"` proposal **in session**, run **B0, B1, B2, C and E of STEP 7's approved-registration branch** unchanged — including B0's match gate and B1's plan-before-you-write ordering, both of which exist because the registration write is irreversible — and **D with the session substitution below**. An in-session **rejection** records the rejection and registers nothing.
 
 **D, in session, must not persist a `pending` row — and this is not a formatting detail.** The sweep that decides proposals reads only pending proposals whose `source` is `"slack"`, and it classifies from Slack thread replies. A `source: "session"` row therefore has **no decider once this session ends**: `/lead check` will never read it, no reply can ever classify it, and it sits `pending` forever. Filing the follow-up plan proposal as a pending session row is silent dead work — the same failure as an approved registration no sweep revisits, one branch further along. (This was found by walking the path, not by reading it: DOTFILES-37 step 9 produced exactly such a row.)
 
@@ -171,7 +171,7 @@ So in session, D takes **one** of two routes, never a third:
 
 **Never leave a `source: "session"` proposal `pending` at the end of the turn.** If you cannot decide it and cannot post it (Slack unavailable), say so plainly and persist nothing — an unwritten proposal is recoverable by re-running; an undecidable row is not.
 
-Every other guard in B–E applies identically, including E: whichever route D takes, the follow-up proposal is never **built**, never written as a plan row, and never turned into a branch or a commit by this step. Approving it in session records a decision and stops; execution still requires a human to type `/lead build`.
+Every other guard in B0–E applies identically, including E: whichever route D takes, the follow-up proposal is never **built**, never written as a plan row, and never turned into a branch or a commit by this step. Approving it in session records a decision and stops; execution still requires a human to type `/lead build`.
 
 ---
 
@@ -255,6 +255,8 @@ git -C <path> symbolic-ref --short refs/remotes/origin/HEAD   # e.g. origin/mast
 Pass that as `base`. For `prTarget`, use the repo's integration branch when the remote clearly has one (`staging`, `develop`); otherwise pass the same default branch — a `prTarget` equal to `base` is honest, a nonexistent one is not.
 
 Pass `workspace` when the remote determines it (e.g. a `github.com/<workspace>/<repo>` or `bitbucket.org/<workspace>/<repo>` remote). When it does not, you still cannot leave it blank — so **name the stamped value in the report** rather than claiming the field was skipped.
+
+**This write is irreversible.** There is no registry delete tool, so a wrong project row is permanent and misroutes every later request until someone edits the database by hand. That is why step 4 shows the drafted purpose and waits, and why step 2 refuses an already-registered name instead of updating it. Taz naming the project himself is what stands in for STEP 7 B0's match gate here — he is asserting which repo this is, so there is no discovery guess needing corroboration. Do not extend that assertion beyond what he made: register the one repo he named, and nothing else.
 
 Do not invent `cluster`, `profile`, `logGroup` or `env`: Taz confirmed a name, a path and a purpose, and nothing else. You cannot stop them being written, so **the report must list every value that was stamped rather than chosen**, and say they are defaults to be corrected with `registry_set`, not configuration anyone approved. A silently wrong `deploy` block is the same class of bug as a silently wrong `base` — it is just slower to surface.
 
