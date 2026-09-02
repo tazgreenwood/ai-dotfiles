@@ -65,6 +65,61 @@ func TestGetRoot_Returns200HTML(t *testing.T) {
 	}
 }
 
+// TestGetRoot_RendersOnePlanCardLinkedToPlanPage verifies the DOTFILES-39
+// redesign: the global Kanban board renders one card per PLAN (not one per
+// step), showing the ticket, plan summary, and an N/M steps-done progress
+// indicator, linked to the existing per-plan detail page rather than opening
+// a step-detail modal.
+func TestGetRoot_RendersOnePlanCardLinkedToPlanPage(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{
+		"name": "existing",
+		"repo": map[string]any{"workspace": "tazgreenwood"},
+	})
+	seedPlan(t, dir, "existing", "TICKET-MULTI", map[string]any{
+		"ticket":  "TICKET-MULTI",
+		"summary": "Multi-step plan",
+		"plan_steps": []map[string]any{
+			{"step": 1, "status": "done"},
+			{"step": 2, "status": "pending"},
+			{"step": 3, "status": "pending"},
+		},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, `href="/projects/existing/plans/TICKET-MULTI"`) {
+		t.Errorf("want plan card linking to /projects/existing/plans/TICKET-MULTI, got:\n%s", html)
+	}
+	if !strings.Contains(html, "Multi-step plan") {
+		t.Errorf("want plan summary %q rendered, got:\n%s", "Multi-step plan", html)
+	}
+	if !strings.Contains(html, "1/3") {
+		t.Errorf("want steps-done progress indicator %q, got:\n%s", "1/3", html)
+	}
+	if strings.Contains(html, "data-step-modal") {
+		t.Errorf("want no step-detail modal trigger left in the page, found data-step-modal")
+	}
+	if strings.Contains(html, "Step 1") || strings.Contains(html, "Step 2") {
+		t.Errorf("want no per-step card text on the plan-level board, got:\n%s", html)
+	}
+}
+
 // ── GET /projects/{name} ───────────────────────────────────────────────────────
 
 func TestGetProject_ExistingReturns200(t *testing.T) {

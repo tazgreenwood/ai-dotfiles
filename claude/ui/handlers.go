@@ -108,6 +108,7 @@ func render(w http.ResponseWriter, r *http.Request, page string, data any) {
 		"globalTabs":      globalTabs,
 		"add":             func(a, b int) int { return a + b },
 		"sub":             func(a, b int) int { return a - b },
+		"percent":         func(n, d int) int { return n * 100 / d },
 		"groupColorClass": groupColorClass,
 		"dateOnly":        dateOnly,
 		"relAge":          relAge,
