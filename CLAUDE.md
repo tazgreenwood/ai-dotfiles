@@ -98,6 +98,8 @@ Makes new project entry. **An omitted field is not left unset — it is stamped 
 
 So "omit it rather than guess" is never available here: omitting *is* a guess, just an invisible one. A repo whose default branch is `master` registered without an explicit `base` points every later `/plan`, `/build` and `/ship` at a branch that does not exist. Callers must pass what they know (resolve the real default branch with `git -C <path> symbolic-ref --short refs/remotes/origin/HEAD`) and **report every value that was stamped rather than chosen**. Re-initialising an existing name is refused — `project '%s' already exists`; use `registry_set` to update fields.
 
+**There is no delete counterpart.** Nothing in the MCP surface removes a project, so a wrong registration is permanent and degrades `registry_index()` routing for every later request until the database is edited by hand. Callers that register from an *inferred* target (rather than a human naming it) must corroborate the inference before writing — see `/lead` STEP 7 B0.
+
 #### `registry_list_projects() -> {projects: []string}`
 Lists all projects in registry.
 
