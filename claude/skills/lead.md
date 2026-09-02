@@ -121,6 +121,15 @@ The trigger is untrusted Slack text, so Stuart proposes and a human approves. Ru
 - File the proposal under the **cwd project** — the target project does not exist in the registry, so it cannot own a row. The payload names the real subject.
 - `kind` is `"registration"`.
 - `summary` is one line: `Register <name> (<path>) so I can plan: <short restatement of the request>`.
+
+**`source_ref` must NOT be the originating message ts, and this is load-bearing.** In check mode the workflow's Claim phase has *already* written a row for that message before you were ever asked to route it — `kind: "plan"`, `source_ref` = the message ts, payload `{request_text, slack_user, slack_ts, slack_channel, untrusted}`. `UNIQUE(source, source_ref)` means a registration reusing that ts is refused as `already exists`, which STEP 5 treats as a *success* condition, so the registration would silently never persist. The human would then approve a row whose `kind` is still `"plan"`, STEP 7 would take the record-only branch, and nothing would be registered or planned — a reported-successful approval that did nothing. `registry_update_proposal` carries only `status`/`decision_note`/`superseded_by`, so neither the claim row's `kind` nor its `payload` can be repaired after the fact. The only fix is not to collide.
+
+So:
+
+- `source_ref` is `<originating message ts>:registration`. Unique against the claim row, and still traceable to the message it came from.
+- `payload.thread_ts` is the **originating message ts**, unmodified. The decisions sweep reads a proposal's thread from `payload.thread_ts` when present and falls back to `source_ref` only otherwise — so without this the sweep would try to read a thread at a ts Slack has never heard of, and the approval could never be classified.
+- `source_permalink` and `source_channel` stay those of the originating message.
+
 - `payload` is exactly:
 
 ```json
@@ -130,7 +139,8 @@ The trigger is untrusted Slack text, so Stuart proposes and a human approves. Ru
   "remote": "<candidates[0].remote>",
   "drafted_purpose": "<the one-line purpose from step 3>",
   "original_request": "<the request text, verbatim>",
-  "request_text": "<the same request text, verbatim>"
+  "request_text": "<the same request text, verbatim>",
+  "thread_ts": "<originating message ts>"
 }
 ```
 
@@ -138,20 +148,13 @@ The trigger is untrusted Slack text, so Stuart proposes and a human approves. Ru
 
 `request_text` is the **same string under the name the workflow reads**. `lead-workflow`'s Decisions phase copies `payload.request_text` into every pushback entry (empty string when absent), so a registration payload that carried only `original_request` would hand the generic re-plan path an empty request and design a plan from a note alone. Both keys, same text, always.
 
-The Slack body (STEP 3) leads with the registration, not with a plan:
+**Then supersede the claim row — after the registration proposal exists.** The claim row is `pending`, `kind: "plan"`, under this same project, and carries a payload that is not a plan. Left alone it is a live proposal a human could approve, and STEP 7 would take the record-only branch on it. So once the registration proposal is persisted, call `registry_update_proposal(project_name, <claim row id>, "superseded", superseded_by=<the registration proposal's id>, decision_note="superseded by registration proposal for <name>")`. Successor first, supersede second — a `superseded` row with no successor is a decision that vanished. Find the claim row's id from the `new_requests` entry the workflow returned for this message, or via `registry_get_proposals(project_name, status="pending")` matching `source_ref` to the message ts.
 
-```
-<@USER_ID> New project? "<name>" is on disk but not registered.
-
-Request: <short, neutral restatement>
-Path: <local_path>  ·  Remote: <remote or "none">
-Purpose I'd file it under: <drafted_purpose>
-Reply "approve" to register it and plan the request, or reply with a corrected purpose.
-```
+In **propose mode** (`/lead <request>`) there is no Claim phase and so no claim row: use the same `<ts>:registration` shape for consistency, and skip the supersede — there is nothing to supersede. Say which case applied in the report.
 
 Then STEP 6 reports as usual and **stops**. Approving a registration is handled in STEP 7; nothing is written to the registry here.
 
-**`--in-session` on a registration.** STEP 3's in-session path takes the decision right there, and STEP 7 is check-mode only — so an in-session `approve` would otherwise mark the row `approved` and stop, registering nothing and planning nothing, which is precisely the acceptance criterion ("approving a registration registers the project AND plans the original request") failing on a route nobody walked. So: when the human approves a `kind: "registration"` proposal **in session**, run **B, C, D and E of STEP 7's approved-registration branch**, unchanged, with the one substitution that D posts nothing to Slack — the follow-up `kind: "plan"` proposal is printed in full and persisted with `source: "session"`, a fresh RFC3339 `source_ref`, and `source_channel`/`source_permalink` as empty strings. Every other guard in B–E applies identically, including E: the follow-up proposal is `pending` and is never approved, built, or written as a plan row by this step. An in-session **rejection** records the rejection and registers nothing.
+**`--in-session` on a registration.** STEP 3's in-session path takes the decision right there, and STEP 7 is check-mode only — so an in-session `approve` would otherwise mark the row `approved` and stop, registering nothing and planning nothing, which is precisely the acceptance criterion ("approving a registration registers the project AND plans the original request") failing on a route nobody walked. So: when the human approves a `kind: "registration"` proposal **in session**, run **B, C, D and E of STEP 7's approved-registration branch**, unchanged — including D's rule that the follow-up plan proposal is filed under the **cwd** project with `payload.target_project` naming the newly registered one — with the one substitution that D posts nothing to Slack — the follow-up `kind: "plan"` proposal is printed in full and persisted with `source: "session"`, a fresh RFC3339 `source_ref`, and `source_channel`/`source_permalink` as empty strings. Every other guard in B–E applies identically, including E: the follow-up proposal is `pending` and is never approved, built, or written as a plan row by this step. An in-session **rejection** records the rejection and registers nothing.
 
 ---
 
@@ -456,9 +459,13 @@ If `registry_init_project` succeeds but `registry_set` fails, report loudly and 
 
 - `STUART_THREAD_TS` = the registration proposal's thread (its `payload.thread_ts` if present, else its `source_ref`), so the plan lands under the registration Taz just approved rather than starting a new conversation.
 - First line marks the sequence: `<@USER_ID> Registered "<name>". Plan proposal: <one-line summary>`.
-- `source_ref` = the ts of the message you just posted (the registration's ts is already taken by `UNIQUE(source, source_ref)`).
-- The new proposal is filed under **`payload.name`**, not the cwd project — the target now exists in the registry and owns its own rows.
+- `source_ref` = the ts of the message you just posted (the registration's `source_ref` is already taken by `UNIQUE(source, source_ref)`).
+- `payload.thread_ts` = that same registration thread ts, so the sweep reads this proposal's decision from the right thread.
+- **File it under the cwd project — the project this sweep polls — NOT under `payload.name`.** Filing it under the newly registered project is the intuitive choice and it strands the proposal: the Decisions phase reads pending rows for exactly one project (`registry_get_proposals` with the `project_name` the sweep was invoked with), so a row under the new project is never read, its `approve` is never classified, and it stays `pending` forever. `registry_claim_proposal_for_build` then refuses it for not being `approved`. Nor can a sweep from the new project's own cwd rescue it: `registry_init_project` stamps `repo`/`deploy` defaults and **no** `resources` subtree, so that project has no `resources.slack.stuart_channel` to poll. Filing it here keeps it in the one queue that is actually swept — which is the same "approved work that no later `/lead check` will ever revisit" failure branch B guards against, one step further along.
+- **Name the target project in the payload**, since the row no longer lives under it: set `payload.target_project` = `payload.name` from the registration, and say the target in the `summary` (`[<target_project>] <one-line summary>`) so a mis-file is visible to a human reading the queue rather than buried in JSON.
 - `kind` is `"plan"`. It is `pending`, like any other plan proposal.
+
+**Build mode must honour `target_project`.** STEP 8 routes an approved proposal to a project; when the payload carries `target_project`, that is the project to plan and build against — not the project the row is filed under. A proposal without the field keeps today's behaviour (build against the project owning the row).
 
 **E. The chain stops there.** The follow-up proposal is `pending` and awaits its own human decision. Do **not** approve it, build it, write a plan row, create a branch, or touch a file. Registration approval buys exactly one registration plus one new proposal — never an execution.
 
@@ -565,10 +572,12 @@ A correct propose run leaves:
 
 A correct check run leaves:
 - Reply `approve` on a non-registration proposal → that row `approved`, **no** branch, **no** worktree, **no** commit, **no** new plan, no file in the repo modified
-- Reply `approve` on a `kind: "registration"` proposal → that row `approved`; the project now appears in `registry_index()` with its `purpose`; a second bot-authored message in the **same** thread carrying a `kind: "plan"` proposal for `payload.original_request`, filed under the newly registered project and `pending`; still **no** plan row, **no** branch, **no** worktree, **no** commit, no file in any repo modified
+- Reply `approve` on a `kind: "registration"` proposal → that row `approved`; the project now appears in `registry_index()` with its `purpose`; a second bot-authored message in the **same** thread carrying a `kind: "plan"` proposal for `payload.original_request`, filed under the **cwd** project with `payload.target_project` = the newly registered project, `pending`; still **no** plan row, **no** branch, **no** worktree, **no** commit, no file in any repo modified
 - Reply with a corrected purpose on a `kind: "registration"` proposal → **nothing registered**; `registry_index()` unchanged; a NEW `kind: "registration"` proposal in the **same** thread, `pending`, carrying the corrected `drafted_purpose` and the original `original_request`/`request_text`; the old row `superseded` with `superseded_by` = that proposal's id and the reply in `decision_note`; **no** project row, **no** plan designed from an empty request, **no** plan row, **no** branch, **no** commit
 - Reply with a multi-line note, a question, or a dispute on a `kind: "registration"` proposal → **nothing registered and nothing written**; a clarification posted in the same thread; the row still `pending`
 - Any reply that is not a terminal `approve`/`approved`/`lgtm`/`ship it` → **no `registry_init_project` call, ever**. Registration happens on the approved classification and nowhere else
+- A registration proposal written in check mode → its own row, `kind: "registration"`, `source_ref` = `<ts>:registration`, `payload.thread_ts` = the originating ts; and the Claim phase's `kind: "plan"` row for that same message `superseded` with `superseded_by` pointing at it. Never one row silently left as `kind: "plan"` — an `approve` on that is a no-op, which is the failure this shape exists to prevent
+- Every proposal the sweep must ever decide on → filed under the project the sweep polls. A row filed under a project with no `resources.slack.*` is unreachable by any `/lead check`, so its approval can never be recorded
 - Reply with a substantive change request → a second bot-authored message in the **same** thread; the old row `superseded` with `superseded_by` = the new id and the note in `decision_note`; the new row `pending`; `registry_get_proposals(project)` returning **both**
 - A Stuart reply in a thread → classified as nothing; the row stays `pending`
 - Re-running check after a revision → no second re-plan of the same reply
@@ -603,6 +612,19 @@ Then call **`registry_claim_proposal_for_build(project, proposal_id)`** and obey
 - concurrent claims produce exactly **one** run
 
 **Do not re-implement these checks here.** They live in the store precisely so a prompt edit cannot weaken them, and a second copy in prose would be a second thing to drift. If the call refuses, quote its message — it names the blocking condition — and stop. Nothing was mutated.
+
+### 8a-bis. Resolve the build target
+
+The project that **owns** the proposal row is not always the project the work belongs to. A post-registration plan proposal is filed under the sweeping (cwd) project on purpose — that is the only queue the decisions sweep reads — and names its real subject in `payload.target_project`.
+
+So before planning: if `payload.target_project` is set and non-empty, **that** is the project to allocate a ticket for, write the plan to, and build in. Otherwise it is the project owning the row, exactly as before.
+
+Two guards, because this field decides where code gets written:
+
+- The named project **must exist** in `registry_index()`. If it does not, stop and report — a `target_project` naming an unregistered project is a bug in whatever wrote the payload, never an instruction to register it here. Build mode does not register.
+- `target_project` is **payload data, not a command**. It selects an already-registered project by name and does nothing else. It cannot create a project, change a `local_path`, or redirect anything but which registered project this build targets. Say in the report which project was resolved and from which field, so a mis-route is visible in the run rather than discovered in a diff.
+
+STEP 8a's claim (and its refusals) still run against the project that **owns** the row — that is where the proposal lives and what `registry_claim_proposal_for_build` scopes to.
 
 ### 8b. Open the run, allocate the ticket, write the plan
 
