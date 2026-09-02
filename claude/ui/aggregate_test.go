@@ -97,6 +97,140 @@ func TestAggregateKanban_NoDoneAt_NotExcluded(t *testing.T) {
 	}
 }
 
+// ── AggregatePlanKanban ──────────────────────────────────────────────────────
+
+func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
+
+	seedPlan(t, dir, "alpha", "DOTFILES-1", map[string]any{
+		"ticket":  "DOTFILES-1",
+		"summary": "all pending",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "pending"},
+			{"step": 2, "title": "b", "status": "pending"},
+		},
+	})
+	seedPlan(t, dir, "alpha", "DOTFILES-2", map[string]any{
+		"ticket":  "DOTFILES-2",
+		"summary": "partial",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "done", "done_at": time.Now().UTC().Format(time.RFC3339)},
+			{"step": 2, "title": "b", "status": "pending"},
+		},
+	})
+	seedPlan(t, dir, "alpha", "DOTFILES-3", map[string]any{
+		"ticket":  "DOTFILES-3",
+		"summary": "all done",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "done", "done_at": time.Now().UTC().Format(time.RFC3339)},
+			{"step": 2, "title": "b", "status": "done", "done_at": time.Now().UTC().Format(time.RFC3339)},
+		},
+	})
+	seedPlan(t, dir, "alpha", "DOTFILES-4", map[string]any{
+		"ticket":  "DOTFILES-4",
+		"summary": "has blocked",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "done", "done_at": time.Now().UTC().Format(time.RFC3339)},
+			{"step": 2, "title": "b", "status": "blocked"},
+			{"step": 3, "title": "c", "status": "in_progress"},
+		},
+	})
+	seedPlan(t, dir, "alpha", "DOTFILES-5", map[string]any{
+		"ticket":  "DOTFILES-5",
+		"summary": "has in_progress",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "pending"},
+			{"step": 2, "title": "b", "status": "in_progress"},
+		},
+	})
+
+	cards, _ := AggregatePlanKanban(time.Now().AddDate(0, 0, -14))
+
+	byTicket := map[string]PlanCard{}
+	for _, c := range cards {
+		byTicket[c.Ticket] = c
+	}
+
+	tests := []struct {
+		ticket     string
+		wantStatus string
+		wantDone   int
+		wantTotal  int
+	}{
+		{"DOTFILES-1", "pending", 0, 2},
+		{"DOTFILES-2", "in_progress", 1, 2},
+		{"DOTFILES-3", "done", 2, 2},
+		{"DOTFILES-4", "blocked", 1, 3},
+		{"DOTFILES-5", "in_progress", 0, 2},
+	}
+	for _, tt := range tests {
+		c, ok := byTicket[tt.ticket]
+		if !ok {
+			t.Fatalf("missing card for %s", tt.ticket)
+		}
+		if c.Status != tt.wantStatus {
+			t.Errorf("%s: want Status=%s, got %s", tt.ticket, tt.wantStatus, c.Status)
+		}
+		if c.DoneSteps != tt.wantDone || c.TotalSteps != tt.wantTotal {
+			t.Errorf("%s: want %d/%d, got %d/%d", tt.ticket, tt.wantDone, tt.wantTotal, c.DoneSteps, c.TotalSteps)
+		}
+		if c.Project != "alpha" {
+			t.Errorf("%s: want Project=alpha, got %s", tt.ticket, c.Project)
+		}
+	}
+}
+
+func TestAggregatePlanKanban_DoneCutoff_ExcludesFullyDonePlan(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	now := time.Now().UTC()
+	oldDoneAt := now.AddDate(0, 0, -20).Format(time.RFC3339)
+	recentDoneAt := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
+	seedPlan(t, dir, "alpha", "DOTFILES-OLD", map[string]any{
+		"ticket":  "DOTFILES-OLD",
+		"summary": "old fully done plan",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "done", "done_at": oldDoneAt},
+			{"step": 2, "title": "b", "status": "done", "done_at": oldDoneAt},
+		},
+	})
+	seedPlan(t, dir, "alpha", "DOTFILES-NEW", map[string]any{
+		"ticket":  "DOTFILES-NEW",
+		"summary": "recent fully done plan",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "done", "done_at": oldDoneAt},
+			{"step": 2, "title": "b", "status": "done", "done_at": recentDoneAt},
+		},
+	})
+
+	cutoff := now.AddDate(0, 0, -14)
+	cards, hiddenOlder := AggregatePlanKanban(cutoff)
+
+	if hiddenOlder != 1 {
+		t.Fatalf("want hiddenOlder=1, got %d", hiddenOlder)
+	}
+	for _, c := range cards {
+		if c.Ticket == "DOTFILES-OLD" {
+			t.Fatalf("old fully-done plan leaked into visible cards: %+v", c)
+		}
+	}
+	found := false
+	for _, c := range cards {
+		if c.Ticket == "DOTFILES-NEW" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("recent fully-done plan missing from visible cards")
+	}
+}
+
 // ── AggregateEvents ──────────────────────────────────────────────────────────
 
 func TestAggregateEvents_ProjectFilterAndSort(t *testing.T) {

@@ -108,6 +108,7 @@ func render(w http.ResponseWriter, r *http.Request, page string, data any) {
 		"globalTabs":      globalTabs,
 		"add":             func(a, b int) int { return a + b },
 		"sub":             func(a, b int) int { return a - b },
+		"percent":         func(n, d int) int { return n * 100 / d },
 		"groupColorClass": groupColorClass,
 		"dateOnly":        dateOnly,
 		"relAge":          relAge,
@@ -158,7 +159,7 @@ func globalTabs() []navLink {
 // the template can render a real sub-heading per project within the column.
 type kanbanProjectGroup struct {
 	Project string
-	Cards   []KanbanCard
+	Cards   []PlanCard
 }
 
 // kanbanColumn is one of the 4 fixed Kanban columns (Pending/In
@@ -180,9 +181,9 @@ type dashboardKanbanData struct {
 }
 
 // groupCardsByProject buckets cards by Project, sorted alphabetically by
-// project name, with cards inside each group sorted by ticket then step.
-func groupCardsByProject(cards []KanbanCard) []kanbanProjectGroup {
-	byProject := map[string][]KanbanCard{}
+// project name, with cards inside each group sorted by ticket.
+func groupCardsByProject(cards []PlanCard) []kanbanProjectGroup {
+	byProject := map[string][]PlanCard{}
 	var projects []string
 	for _, c := range cards {
 		if _, ok := byProject[c.Project]; !ok {
@@ -195,10 +196,7 @@ func groupCardsByProject(cards []KanbanCard) []kanbanProjectGroup {
 	for _, p := range projects {
 		cs := byProject[p]
 		sort.SliceStable(cs, func(i, j int) bool {
-			if cs[i].Ticket != cs[j].Ticket {
-				return cs[i].Ticket < cs[j].Ticket
-			}
-			return cs[i].Step < cs[j].Step
+			return cs[i].Ticket < cs[j].Ticket
 		})
 		groups = append(groups, kanbanProjectGroup{Project: p, Cards: cs})
 	}
@@ -208,7 +206,7 @@ func groupCardsByProject(cards []KanbanCard) []kanbanProjectGroup {
 func handleDashboardKanban(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	cutoff := time.Now().Add(-doneCutoffWindow)
-	cards, hiddenOlder := AggregateKanban(cutoff)
+	cards, hiddenOlder := AggregatePlanKanban(cutoff)
 
 	columns := []kanbanColumn{
 		{Header: "Pending", Status: "pending"},
@@ -216,7 +214,7 @@ func handleDashboardKanban(w http.ResponseWriter, r *http.Request) {
 		{Header: "Done (14d)", Status: "done"},
 		{Header: "Blocked", Status: "blocked"},
 	}
-	byStatus := map[string][]KanbanCard{}
+	byStatus := map[string][]PlanCard{}
 	for _, c := range cards {
 		byStatus[c.Status] = append(byStatus[c.Status], c)
 	}
