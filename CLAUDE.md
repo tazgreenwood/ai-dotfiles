@@ -75,7 +75,7 @@ Codebase = user-facing skills + supporting MCP tools:
 
 ## Commands
 
-- Run agent evals: `./scripts/run-agent-evals.sh` (`--update` to record a baseline, `--budget N` to cap spend). Drives the real `code-review-workflow.js` graph against `evals/fixtures/`; exits non-zero on regression. Costs real money — see `evals/README.md`.
+- Run agent evals: `/eval` in a live session (manual, in-session only — no headless script; a `claude -p` subprocess can't approve the Workflow tool's permission gate, see `evals/README.md`). Drives the real `code-review-workflow.js` graph against `evals/fixtures/`, scores via `scripts/score-eval.js`; exits non-zero on regression. Costs real money.
 - Build registry MCP server: `cd claude/mcp/server && go build -o registry`
 - Build bitbucket MCP server: `cd claude/mcp/bitbucket && go build -o bitbucket`
 - Run server: `./registry` or `./bitbucket` (listens stdin/stdout, JSON-RPC)

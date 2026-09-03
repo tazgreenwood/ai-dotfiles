@@ -9,22 +9,23 @@ change.
 
 ## Running
 
-```bash
-./scripts/run-agent-evals.sh              # score against baseline.json
-./scripts/run-agent-evals.sh --update     # record a new baseline
-./scripts/run-agent-evals.sh --budget 2.0 # cap total spend (default 2.00)
-```
+Run `/eval` in a live Claude Code session. Manual and in-session only —
+**there is no headless script.** A `claude -p` subprocess cannot approve the
+Workflow tool's permission gate non-interactively, so a bash-script runner
+silently no-ops on every fixture while still spending real money on refusal
+prose (measured 2026-09-03: $1.70 burned, every fixture scored 0). Invoking
+the `/eval` skill is itself the explicit opt-in the Workflow tool requires;
+each fixture's review-graph run then shows its normal per-call approval.
 
-Exits non-zero when the aggregate score drops below the recorded baseline minus
-a tolerance.
+Exits (via `scripts/score-eval.js`) non-zero when the aggregate score drops
+below the recorded baseline minus a tolerance (default 0.05).
 
 **Runs cost real money.** Each case drives `code-review-workflow.js` in full —
 four `@review-dimension` agents plus an adversarial refuter on every
 BLOCKER/MAJOR — so a four-case run is on the order of several dollars, not
-cents. One run per case by default; `--repeat` is opt-in; `--budget` caps the
-total and the actual spend is printed.
+cents.
 
-The runner deliberately drives the **real workflow**, not a plain review prompt.
+The skill deliberately drives the **real workflow**, not a plain review prompt.
 An earlier version used a generic prompt and scored 0.50 — but two of those
 failures were artifacts of the harness (no refuter pass exists in a single
 review call, so `demote-refutable-major` could never pass). A corpus that does
