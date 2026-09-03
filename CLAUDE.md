@@ -66,7 +66,10 @@ Codebase = user-facing skills + supporting MCP tools:
 - **Data storage**: Single SQLite DB (WAL mode) at `~/.config/registry/data/registry.db`, replacing per-project JSON files
 - **Dependencies**:
   - `modernc.org/sqlite` (pure-Go SQLite driver, no cgo, used by registry MCP server)
-- **Test command**: `cd claude/ui && go test ./...`
+- **Test commands** — three separate Go modules, each with its own `go.mod`. There is no single root command, and citing only the first is how DOTFILES-40 nearly ran its whole build against the wrong module:
+  - `cd claude/ui && go test ./...` — registry-ui
+  - `cd claude/mcp/server && go test ./...` — registry MCP server (store, tool handlers, plan validation)
+  - `cd claude/mcp/bitbucket && go test ./...` — bitbucket MCP server
 
 ---
 
@@ -174,22 +177,16 @@ Queries audit entries by date range. Dates ISO 8601 (YYYY-MM-DD), inclusive.
 
 **Date comparison logic**: Grabs first 10 chars of `date` field (or `_recorded_at` if missing), does lexicographic string compare. Works fine — ISO dates sort chronologically.
 
-#### `registry_report_issue(name: string, issue: map[string]any) -> {ok: bool, total_entries: int} | error`
-Appends issue report entry to project's issue log in registry. Logs failures, blockers, incidents during skill execution.
+#### `registry_report_issue(project?, tool, error, severity?, context?) -> {ok: bool, total_entries: int} | error`
+**This contract was documented wrongly until 2026-09-02 and the wrong version is not accepted by the server.** It is a *registry-failure* reporter, not a general issue log: its purpose is "a registry MCP call failed, record that". Real arguments, all top-level (NOT nested under an `issue` object):
 
-**Issue schema**:
-```json
-{
-  "ticket": "string",
-  "severity": "critical|high|medium|low",
-  "category": "string",
-  "title": "string",
-  "description": "string",
-  "context": "string (optional)"
-}
-```
+- `tool` — name of the registry tool that failed (**required**)
+- `error` — the error message (**required**)
+- `project` — defaults to `"registry"`
+- `severity` — `error` | `warning`, default `error`
+- `context` — what you were trying to do
 
-Caller gives all fields; `_reported_at` (RFC3339) added auto.
+The old documented shape (`issue: {ticket, severity: critical|high|medium|low, category, title, description}`) fails input validation on `tool` and `error`. There is **no** general per-ticket issue log — for a blocker or an incident tied to a ticket, write an event instead: `registry_write_event(project, "ship_blocked"|"security_debt"|..., data, tags)`.
 
 #### `registry_write_event(name: string, type: string, data: map[string]any, tags?: []string) -> {ok: bool, total_entries: int} | error`
 Appends a structured interaction event to the project's event log. `type` examples: `pr_review`, `investigation`, `idea_validation`, `review_learning`. `data` shape depends on `type` — no fixed schema, unlike audit/issues.
@@ -228,6 +225,34 @@ The **single enforcement point** for `/lead build`'s refusal guards, which used 
 The `agent_runs` resume spine behind `/lead build`. One row ties proposal → plan → build → ship → PR so an interrupted chain can be **resumed** rather than restarted. `phase` is `planning|building|shipping|done|blocked`; `status` is `running|paused|done|failed`; `cursor` is free-form JSON (in practice `{ticket, branch, last_step, pr_url}`).
 
 `registry_update_run` writes phase, status, cursor, note and ticket in a **single statement** — deliberately not the `UpdateStep` read-modify-write, since this is the row a concurrent resume reads. **Omitting `cursor` or `ticket` leaves the stored value unchanged**: a phase-only advance that blanked the cursor would make a resume re-run completed steps, and the ticket can only ever arrive on a later advance because the run is opened *before* the key is allocated. Writes are scoped to the caller's project.
+
+#### `registry_write_inbox(inbox: {source, source_channel, source_permalink, source_ref, raw_text}) -> {ok: bool, id: int} | error`
+Captures an incoming ask into the `inbox` table — the queue *upstream* of proposals. Capture involves **no LLM**: a message too vague to plan is still safely captured, which is the whole reason the table exists separately from `proposals`.
+
+Everything about what has been *decided* is server-owned and **silently ignored if sent**: `id`, `created_at`, `updated_at`, `status` (always `new`), `triage`, `project`, `proposal_id`, `run_id`, `note`. That list is enforced in `registryWriteInbox`, not merely documented — a caller was previously able to pre-link a fresh row to an arbitrary existing proposal or run, because `json.Unmarshal` fills any extra key the schema does not mention.
+
+`project` is deliberately **not** settable here: capture happens *before* routing, so a project set at capture time is an invisible mis-route. Triage attaches it later.
+
+`raw_text`, `source_channel` and `source_permalink` are all required and enforced in `CreateInbox` — a row with no text is untriageable, one with no permalink is a queue entry nobody can act on.
+
+A duplicate `(source, source_ref)` returns `inbox item already exists for source %q source_ref %q`. **That UNIQUE index is the sweep's dedup cursor** — callers treat the error as "already seen", not a failure.
+
+#### `registry_get_inbox(status?) -> {inbox: [...]}`
+Returns inbox rows across **all** projects, newest first. Deliberately not project-scoped: a freshly captured row has no project yet, so a scoped listing would hide exactly the rows still needing triage. `status` filters to one of `new|triaged|routed|closed`.
+
+**`/lead check`'s triage work list is `registry_get_inbox("new")` ∪ `registry_get_inbox("triaged")`** — never the workflow's `new_requests`, which holds only rows created in that run. Using `new_requests` as the work list stranded captured rows permanently (they returned as `already_seen` forever), which is the bug that made this tool's zero-caller state a shipping BLOCKER.
+
+#### `registry_update_inbox(id, status?, triage?, project?, note?, proposal_id?) -> {ok: bool}`
+Advances an inbox row in a **single statement**, COALESCE-ing each field so an omitted one keeps its stored value — same reasoning as `registry_update_run`: this is a row a concurrent sweep reads, so a status-only advance must not blank the project, the class or the proposal link. An empty string means "leave alone", never "clear".
+
+`status: "triaged"` **requires** a `triage` class, enforced by a guard in the UPDATE's `WHERE` clause (so the happy path stays one statement). A class-less `triaged` row is unresumable — the sweep acts on the class a row carries — so it would be revisited every sweep forever.
+
+Valid `status`: `new|triaged|routed|closed`. Valid `triage`: `investigate|plan|answer|ask|drop`.
+
+#### `registry_worklist() -> {worklist: [...]}`
+The cross-project sibling of `registry_index()`, answering one question: **what is in flight everywhere, and what is each thing waiting on.** Returns every open inbox row (`status != 'closed'`), every `pending` proposal, and every `running`/`paused` run, grouped by project.
+
+**Three queries total** — one per table, joined in memory — regardless of project count. Carries ids, a status, a short summary and a `waiting_on` string and *nothing else*: no proposal payloads, no plan bodies, no run cursors. Same constraint as `registry_index()` and for the same reason: a view called on every sweep must not drag whole plans into context.
 
 #### `registry_write_proposal(name: string, proposal: map[string]any) -> {ok: bool, id: int} | error`
 Creates a proposal — a unit of work awaiting a human decision. Caller supplies `source`, `source_channel`, `source_ref`, `source_permalink` (all required, non-empty), `kind` (`plan|fix|review|improvement|registration`), `summary`, `payload` (the full plan JSON), and optionally `notified_at` (RFC3339).
@@ -281,6 +306,9 @@ Full architecture-decision history lives in the registry event log, not here —
 - **Agent run**: A row in `agent_runs` — the resumable record of one `/lead build` chain (proposal → plan → build → ship → PR). Carries a `cursor` so `/lead build --resume <id>` re-enters where the chain stopped instead of restarting; a chain that cannot resume cannot survive a crash, a rate limit, a sleeping laptop, or a mid-build question. Query stuck work with `registry_get_runs(project, "paused"|"failed")` — the reason is in `note`.
 - **Question-pause**: When a `/lead build` step hits genuine mid-build ambiguity it commits what is done, sets the run `paused` with the question in `note`, asks in the proposal's Slack thread, and stops — never guessing, never hanging. The next `--resume` reads the reply via `lead-workflow` `mode: "answers"` and continues. Foreseeable ambiguity belongs in the proposal's `assumptions`, where the human sees it before approving.
 - **Project index**: The `registry_index()` view — name, one-line `purpose`, repo, `local_path` and active plan per project. Read by `/lead` STEP 1a to route a request to the right project without opening any other project's context. Ambiguity stops and asks rather than guessing; a mis-route is always visible because the proposal names its project.
+- **Inbox row**: A row in the `inbox` table — a captured ask, before anyone has decided what it is. Sits *upstream* of a proposal. `project` is NULLABLE because **capture happens before routing**: four asks dumped during standup must not require knowing which repo each belongs to. Statuses `new → triaged → routed|closed`; a `triaged` row also carries exactly one class. Written with no LLM involved, so a message too vague to plan is still captured.
+- **Triage class**: One of `investigate|plan|answer|ask|drop`, assigned per inbox row by `/lead check`. A closed set — if two look plausible the answer is `ask`. **Written before the action is taken**, which is the resumability contract: a sweep killed between classify and act leaves the judgment recorded, so the re-run resumes at the action instead of re-designing, re-posting and re-notifying. `ask` is the only terminal class awaiting a *human* rather than awaiting action; nothing in this repo reads a human answer to an inbox `ask`, so relabelling a row to `ask` to defer it silently drops the work.
+- **@sweep-investigator**: The read-only investigator (`claude/agents/sweep-investigator.md`, grant `Read, Grep, Glob`) used by `/lead check`'s `investigate` class. Exists because the sweep runs **unattended on attacker-influenceable Slack text**, and `@investigator` holds `Bash`, `WebSearch` and `WebFetch`. **The tool grant is the enforcement; the caller's prose promise never was** — DOTFILES-40's first `/ship` was BLOCKed for asserting "/investigate is read-only" without reading that agent's frontmatter, where "read-only" means *never writes code*, not *no shell*. Known residual, tracked as DOTFILES-41: the `general-purpose` relays in `lead-workflow.js` and the main skill session still hold `Bash` on the sweep path, bounded by prose only. Never write an unqualified "no sweep path reaches a shell" claim while that is true.
 - **Proposal**: A row in the `proposals` table — work awaiting a human decision, distinct from a plan (approved work) and an audit entry (shipped work). Statuses: `pending`, `approved`, `rejected`, `superseded`. Approval sets status **only**; wiring approval to `/build` is a deliberate later phase. Viewable at `/proposals` in registry-ui.
 - **Supersede chain**: A proposal revised after human pushback is never overwritten — a new row is written and the old one moves to `superseded` with `superseded_by` pointing at the successor and the human's note stored as `decision_note`. All three fields move in one transaction, and only a `pending` row can be superseded. Preserves *why* a revision happened, which is the point of the chain.
 - **Resource cache**: External integrations (Slack channels, Grafana dashboards, Bitbucket repos, AWS log groups, etc.) stored under `project.resources` in registry. Organized by category (grafana, slack, aws, bitbucket, confluence, jira, scripts).
