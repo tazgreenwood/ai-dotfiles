@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -147,6 +148,54 @@ func (s *store) createSchema() error {
 		`CREATE INDEX IF NOT EXISTS idx_proposals_project_status ON proposals(project, status)`,
 		// Dedup key: one proposal per inbound source message (e.g. a Slack ts).
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_source_ref ON proposals(source, source_ref)`,
+		// inbox (DOTFILES-40): the durable capture queue Stuart triages from.
+		// project is NULLABLE on purpose — capture must not require knowing
+		// which repo an ask belongs to, so four asks dumped during standup land
+		// as rows first and get routed later.
+		`CREATE TABLE IF NOT EXISTS inbox (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT,
+			source TEXT NOT NULL,
+			source_ref TEXT NOT NULL,
+			source_channel TEXT,
+			source_permalink TEXT,
+			raw_text TEXT NOT NULL,
+			status TEXT NOT NULL,
+			triage TEXT,
+			proposal_id INTEGER,
+			run_id INTEGER,
+			note TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox(status)`,
+		// Dedup key: one inbox row per inbound source message (e.g. a Slack ts).
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_source_ref ON inbox(source, source_ref)`,
+		// Backfill the dedup cursor from proposals written BEFORE the inbox
+		// existed. DOTFILES-40 moved the "have I seen this Slack message?"
+		// cursor off proposals(source, source_ref) and onto inbox(source,
+		// source_ref). Without this, every message still inside the sweep's
+		// 25-message poll window that had already become a proposal looks brand
+		// new to the first post-upgrade sweep: it gets captured, re-triaged,
+		// re-planned and re-posted, and on the plan path its proposal write
+		// collides with the row that already exists — which lead.md STEP 5 reads
+		// as "already seen" success, so the run reports done having persisted
+		// nothing.
+		//
+		// Rows land as 'closed' with no triage: they are cursor entries, not
+		// work. INSERT OR IGNORE + the UNIQUE index above makes this idempotent,
+		// so it is safe on every startup and cannot clobber a live row.
+		`INSERT OR IGNORE INTO inbox
+			(project, source, source_ref, source_channel, source_permalink,
+			 raw_text, status, note, created_at)
+		 SELECT project, source, source_ref,
+		        COALESCE(source_channel, ''), COALESCE(source_permalink, ''),
+		        COALESCE(summary, '(backfilled from proposal)'),
+		        'closed',
+		        'Backfilled cursor entry: this message was already handled as a proposal before the inbox existed.',
+		        created_at
+		   FROM proposals
+		  WHERE source = 'slack'`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -1151,6 +1200,271 @@ func (s *store) ListRuns(project, status string) ([]*agentRun, error) {
 	return runs, rows.Err()
 }
 
+// ── inbox (DOTFILES-40) ──────────────────────────────────────────────────────
+//
+// An inbox row is a captured ask, before anyone has decided what it is. It sits
+// upstream of a proposal: capture writes the row with no LLM involved and so
+// cannot fail because a plan could not be designed, and triage later decides
+// whether the ask becomes an investigation, a proposal, an answer, a question
+// or a drop.
+//
+// project is a POINTER because the column is nullable, and that nullability is
+// the load-bearing detail — dumping four asks during standup must not require
+// knowing which repo each belongs to. Triage attaches the project on a later
+// UpdateInbox. It is never defaulted to the cwd project at capture, because a
+// defaulted project is an invisible mis-route.
+
+type inboxItem struct {
+	ID              int64   `json:"id"`
+	Project         *string `json:"project"`
+	Source          string  `json:"source"`
+	SourceRef       string  `json:"source_ref"`
+	SourceChannel   string  `json:"source_channel"`
+	SourcePermalink string  `json:"source_permalink"`
+	RawText         string  `json:"raw_text"`
+	Status          string  `json:"status"`
+	Triage          string  `json:"triage"`
+	ProposalID      *int64  `json:"proposal_id"`
+	RunID           *int64  `json:"run_id"`
+	Note            string  `json:"note"`
+	CreatedAt       string  `json:"created_at"`
+	UpdatedAt       string  `json:"updated_at"`
+}
+
+var (
+	// new/triaged are the OPEN statuses (what a worklist owes the human);
+	// routed/closed are done with.
+	inboxStatuses = map[string]bool{"new": true, "triaged": true, "routed": true, "closed": true}
+	// Exactly one of these per triaged row.
+	inboxTriages = map[string]bool{
+		"investigate": true, "plan": true, "answer": true, "ask": true, "drop": true,
+	}
+)
+
+const inboxColumns = `id, project, source, source_ref, source_channel, source_permalink,
+	raw_text, status, triage, proposal_id, run_id, note, created_at, updated_at`
+
+// CreateInbox inserts a captured ask and returns its new id. Status defaults to
+// "new" and created_at to now (RFC3339 UTC), matching the proposal/run writers.
+//
+// A duplicate (source, source_ref) comes back as a clean "already exists" error
+// naming the source_ref rather than a raw sqlite constraint string: the sweep
+// re-reads the same channel window every run, and callers treat that error as
+// "already seen", not as a failure. The UNIQUE index is the dedup cursor.
+func (s *store) CreateInbox(it *inboxItem) (int64, error) {
+	if it == nil {
+		return 0, fmt.Errorf("inbox item is nil")
+	}
+	if it.Source == "" || it.SourceRef == "" {
+		return 0, fmt.Errorf("inbox source and source_ref are required")
+	}
+	// raw_text is what triage reads; the two source_* fields are the only route
+	// back to the conversation a row came from. The tool schema marks all three
+	// required, but a schema is a hint to the caller, not enforcement — the
+	// proposal writer validates its own equivalents here for the same reason.
+	// A row with no raw_text is untriageable; one with no permalink is a queue
+	// entry nobody can act on.
+	if it.RawText == "" {
+		return 0, fmt.Errorf("inbox raw_text is required")
+	}
+	if it.SourceChannel == "" || it.SourcePermalink == "" {
+		return 0, fmt.Errorf("inbox source_channel and source_permalink are required for source %q", it.Source)
+	}
+	status := it.Status
+	if status == "" {
+		status = "new"
+	}
+	if !inboxStatuses[status] {
+		return 0, fmt.Errorf("invalid inbox status %q (want new|triaged|routed|closed)", status)
+	}
+	if it.Triage != "" && !inboxTriages[it.Triage] {
+		return 0, fmt.Errorf("invalid inbox triage %q (want investigate|plan|answer|ask|drop)", it.Triage)
+	}
+	createdAt := it.CreatedAt
+	if createdAt == "" {
+		createdAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	res, err := s.db.Exec(
+		`INSERT INTO inbox
+			(project, source, source_ref, source_channel, source_permalink,
+			 raw_text, status, triage, proposal_id, run_id, note,
+			 created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		it.Project, it.Source, it.SourceRef, it.SourceChannel, it.SourcePermalink,
+		it.RawText, status, nullIfEmpty(it.Triage), it.ProposalID, it.RunID,
+		it.Note, createdAt, it.UpdatedAt,
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return 0, fmt.Errorf("inbox item already exists for source %q source_ref %q",
+				it.Source, it.SourceRef)
+		}
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	it.ID = id
+	it.Status = status
+	it.CreatedAt = createdAt
+	return id, nil
+}
+
+func scanInbox(sc interface{ Scan(...any) error }) (*inboxItem, error) {
+	var it inboxItem
+	var triage, channel, permalink, note, updatedAt sql.NullString
+	if err := sc.Scan(
+		&it.ID, &it.Project, &it.Source, &it.SourceRef, &channel, &permalink,
+		&it.RawText, &it.Status, &triage, &it.ProposalID, &it.RunID, &note,
+		&it.CreatedAt, &updatedAt,
+	); err != nil {
+		return nil, err
+	}
+	it.SourceChannel = channel.String
+	it.SourcePermalink = permalink.String
+	it.Triage = triage.String
+	it.Note = note.String
+	it.UpdatedAt = updatedAt.String
+	return &it, nil
+}
+
+func (s *store) GetInbox(id int64) (*inboxItem, error) {
+	row := s.db.QueryRow(`SELECT `+inboxColumns+` FROM inbox WHERE id = ?`, id)
+	it, err := scanInbox(row)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("inbox item %d not found", id)
+	}
+	return it, err
+}
+
+// ListInbox returns inbox rows across ALL projects, newest first. Deliberately
+// not project-scoped: a freshly captured row may have no project yet, so a
+// project-scoped listing would hide exactly the rows that still need triage.
+// An empty status returns every status, including closed rows.
+func (s *store) ListInbox(status string) ([]*inboxItem, error) {
+	query := `SELECT ` + inboxColumns + ` FROM inbox`
+	var args []any
+	if status != "" {
+		if !inboxStatuses[status] {
+			return nil, fmt.Errorf("invalid inbox status filter %q (want new|triaged|routed|closed)", status)
+		}
+		query += ` WHERE status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY id DESC`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*inboxItem
+	for rows.Next() {
+		it, err := scanInbox(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// UpdateInbox advances an inbox row in a SINGLE statement, COALESCE-ing every
+// field so an omitted one keeps its stored value. Deliberately NOT the
+// read-modify-write shape used by UpdateStep — same reasoning as UpdateRun:
+// this is a row a concurrent sweep reads, and a status-only advance that
+// blanked the project, the triage verdict or the proposal id would strand a
+// routed row and make the next sweep re-plan work that already has a proposal.
+//
+// An empty string (or a nil proposalID) means "leave it alone", not "clear it".
+func (s *store) UpdateInbox(id int64, status, triage, project, note string, proposalID *int64) error {
+	if status != "" && !inboxStatuses[status] {
+		return fmt.Errorf("invalid inbox status %q (want new|triaged|routed|closed)", status)
+	}
+	if triage != "" && !inboxTriages[triage] {
+		return fmt.Errorf("invalid inbox triage %q (want investigate|plan|answer|ask|drop)", triage)
+	}
+	// A `triaged` row MUST carry a class. The tool description said so and
+	// nothing enforced it, so `status="triaged"` with no triage persisted a
+	// class-less row — and the resume loop ("perform the action for the class it
+	// already carries") then has no class to act on, so the row is revisited on
+	// every sweep forever. That is the same "a schema is a hint, not
+	// enforcement" defect fixed in CreateInbox one function above, left on the
+	// one path triage actually uses.
+	//
+	// The guard rides in the WHERE clause so the happy path stays a SINGLE
+	// statement — the reason UpdateInbox is not a read-modify-write is that a
+	// concurrent sweep reads this row. It reads as: if this update would leave
+	// status='triaged', the resulting triage must be non-NULL, whether it comes
+	// from this call or was already stored.
+	res, err := s.db.Exec(
+		`UPDATE inbox
+		    SET status      = COALESCE(?, status),
+		        triage      = COALESCE(?, triage),
+		        project     = COALESCE(?, project),
+		        note        = COALESCE(?, note),
+		        proposal_id = COALESCE(?, proposal_id),
+		        updated_at  = ?
+		  WHERE id = ?
+		    AND (COALESCE(?, status) != 'triaged' OR COALESCE(?, triage) IS NOT NULL)`,
+		nullIfEmpty(status), nullIfEmpty(triage), nullIfEmpty(project),
+		nullIfEmpty(note), nullIfEmptyID(proposalID),
+		time.Now().UTC().Format(time.RFC3339), id,
+		nullIfEmpty(status), nullIfEmpty(triage),
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// Zero rows means either "no such row" or "the guard rejected it".
+		// Disambiguate with a read HERE and only here: this is the error path,
+		// not the path a concurrent sweep races on, so the extra query costs
+		// nothing that matters and a caller told "not found" about a row that
+		// exists would go looking in the wrong place.
+		var exists int
+		if err := s.db.QueryRow(`SELECT COUNT(1) FROM inbox WHERE id = ?`, id).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return fmt.Errorf("inbox item %d not found", id)
+		}
+		return fmt.Errorf("inbox item %d: status \"triaged\" requires a triage class (want investigate|plan|answer|ask|drop) — a triaged row with no class cannot be resumed", id)
+	}
+	return nil
+}
+
+// nullIfEmpty renders an omitted string field as SQL NULL so COALESCE keeps the
+// stored value.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nullIfEmptyID(id *int64) any {
+	if id == nil {
+		return nil
+	}
+	return *id
+}
+
+// isUniqueViolation reports whether err is a UNIQUE-index conflict. The pure-Go
+// sqlite driver phrases this two ways depending on version, so both are matched
+// — the same pair registry.go matches when mapping a duplicate proposal.
+func isUniqueViolation(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "constraint failed: UNIQUE")
+}
+
 // ── atomic build claim (DOTFILES-35) ─────────────────────────────────────────
 
 // ClaimProposalForBuild is the SINGLE enforcement point for /lead build's
@@ -1384,4 +1698,210 @@ func (s *store) SumCostSince(since string) (float64, int, error) {
 		return 0, 0, err
 	}
 	return total.Float64, n, nil
+}
+
+// ── worklist (DOTFILES-40) ───────────────────────────────────────────────────
+//
+// The cross-project sibling of ListIndex, answering one question: what is in
+// flight everywhere, and what is each thing waiting on. Today that costs N
+// queries per project (open inbox rows, pending proposals, live runs, each
+// asked project by project), which is exactly the N+1 ListIndex exists to
+// avoid.
+//
+// Three queries total — one per table — joined in memory by project name.
+// Every row carries ids, a status, a short summary and a waiting_on string and
+// NOTHING else: no proposal payloads, no plan bodies, no run cursors. That is
+// the same constraint ListIndex carries, and for the same reason — a view
+// called on every sweep must not drag whole plans into context.
+
+type worklistItem struct {
+	Kind         string `json:"kind"` // inbox | proposal | run
+	ID           int64  `json:"id"`
+	Project      string `json:"project"` // "" for an inbox row captured before routing
+	Status       string `json:"status"`
+	Summary      string `json:"summary"`
+	WaitingOn    string `json:"waiting_on"`
+	Triage       string `json:"triage,omitempty"`
+	ProposalKind string `json:"proposal_kind,omitempty"`
+	Ticket       string `json:"ticket,omitempty"`
+	Phase        string `json:"phase,omitempty"`
+	ProposalID   *int64 `json:"proposal_id,omitempty"`
+	Permalink    string `json:"permalink,omitempty"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+}
+
+// worklistSummaryMax keeps a row's summary short enough that a full worklist
+// stays a glance rather than a read. Long raw Slack text is the common case.
+const worklistSummaryMax = 160
+
+func shortSummary(s string) string {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if len(s) <= worklistSummaryMax {
+		return s
+	}
+	return s[:worklistSummaryMax-1] + "…"
+}
+
+// inboxWaitingOn states the blocker in the row's own terms. A worklist row with
+// no stated blocker forces the human to open something else to learn why it is
+// still there, which defeats the point of the view.
+func inboxWaitingOn(status, triage string) string {
+	switch status {
+	case "new":
+		return "triage"
+	case "triaged":
+		if triage != "" {
+			return "routing (triaged: " + triage + ")"
+		}
+		return "routing"
+	case "routed":
+		if triage != "" {
+			return triage + " in progress"
+		}
+		return "routed work to finish"
+	}
+	return "unknown inbox status " + status
+}
+
+func runWaitingOn(status, phase, note string) string {
+	if note = strings.TrimSpace(note); note != "" {
+		return note
+	}
+	if status == "paused" {
+		return "a resume (paused in " + phase + ", no reason recorded)"
+	}
+	return "the " + phase + " phase to finish"
+}
+
+// ListWorklist returns every open inbox row, every pending proposal and every
+// running-or-paused run across ALL projects. Deliberately not project-scoped:
+// a freshly captured inbox row may have no project yet, so a project-scoped
+// worklist would hide exactly the rows that still need a decision.
+func (s *store) ListWorklist() ([]worklistItem, error) {
+	var out []worklistItem
+
+	inboxRows, err := s.db.Query(
+		`SELECT id, project, status, triage, raw_text, source_permalink,
+		        proposal_id, updated_at
+		   FROM inbox
+		  WHERE status != 'closed'
+		  ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer inboxRows.Close()
+	for inboxRows.Next() {
+		var id int64
+		var project, triage, permalink, updatedAt sql.NullString
+		var status, rawText string
+		var proposalID *int64
+		if err := inboxRows.Scan(&id, &project, &status, &triage, &rawText,
+			&permalink, &proposalID, &updatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, worklistItem{
+			Kind:       "inbox",
+			ID:         id,
+			Project:    project.String,
+			Status:     status,
+			Summary:    shortSummary(rawText),
+			WaitingOn:  inboxWaitingOn(status, triage.String),
+			Triage:     triage.String,
+			ProposalID: proposalID,
+			Permalink:  permalink.String,
+			UpdatedAt:  updatedAt.String,
+		})
+	}
+	if err := inboxRows.Err(); err != nil {
+		return nil, err
+	}
+
+	proposalRows, err := s.db.Query(
+		`SELECT id, project, kind, summary, source_permalink, created_at
+		   FROM proposals
+		  WHERE status = 'pending'
+		  ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer proposalRows.Close()
+	for proposalRows.Next() {
+		var id int64
+		var project, kind, summary string
+		var permalink, createdAt sql.NullString
+		if err := proposalRows.Scan(&id, &project, &kind, &summary,
+			&permalink, &createdAt); err != nil {
+			return nil, err
+		}
+		out = append(out, worklistItem{
+			Kind:         "proposal",
+			ID:           id,
+			Project:      project,
+			Status:       "pending",
+			Summary:      shortSummary(summary),
+			WaitingOn:    "a human decision (approve / reject / push back)",
+			ProposalKind: kind,
+			Permalink:    permalink.String,
+			UpdatedAt:    createdAt.String,
+		})
+	}
+	if err := proposalRows.Err(); err != nil {
+		return nil, err
+	}
+
+	runRows, err := s.db.Query(
+		`SELECT id, project, proposal_id, ticket, phase, status, note, updated_at
+		   FROM agent_runs
+		  WHERE status IN ('running', 'paused')
+		  ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer runRows.Close()
+	for runRows.Next() {
+		var id int64
+		var project, phase, status string
+		var ticket, note, updatedAt sql.NullString
+		var proposalID *int64
+		if err := runRows.Scan(&id, &project, &proposalID, &ticket, &phase,
+			&status, &note, &updatedAt); err != nil {
+			return nil, err
+		}
+		summary := ticket.String
+		if summary == "" {
+			summary = phase + " run"
+		}
+		out = append(out, worklistItem{
+			Kind:       "run",
+			ID:         id,
+			Project:    project,
+			Status:     status,
+			Summary:    shortSummary(summary),
+			WaitingOn:  runWaitingOn(status, phase, note.String),
+			Ticket:     ticket.String,
+			Phase:      phase,
+			ProposalID: proposalID,
+			UpdatedAt:  updatedAt.String,
+		})
+	}
+	if err := runRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Grouped by project so the view reads as "here is what each project owes",
+	// with a stable kind order inside each group.
+	kindOrder := map[string]int{"inbox": 0, "proposal": 1, "run": 2}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Project != out[j].Project {
+			return out[i].Project < out[j].Project
+		}
+		if out[i].Kind != out[j].Kind {
+			return kindOrder[out[i].Kind] < kindOrder[out[j].Kind]
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
 }

@@ -1,6 +1,6 @@
 export const meta = {
   name: 'lead-workflow',
-  description: 'Tier-1 Stuart loop: read the Stuart Slack channel, deterministically filter out bot posts and thread replies, claim each new request via the proposals UNIQUE(source, source_ref) constraint, then read the threads of pending proposals and classify human replies as approve / reject / pushback — recording the terminal decisions itself and handing pushbacks back to the caller to re-plan',
+  description: 'Tier-1 Stuart loop: read the Stuart Slack channel, deterministically filter out bot posts and thread replies, capture each new request as an inbox row via the inbox UNIQUE(source, source_ref) constraint, then read the threads of pending proposals and classify human replies as approve / reject / pushback — recording the terminal decisions itself and handing pushbacks back to the caller to re-plan',
   phases: [
     { title: 'Poll' },
     { title: 'Claim' },
@@ -16,7 +16,7 @@ export const meta = {
 // LLM judgment. An LLM re-deciding "have I seen this message?" every few
 // minutes will eventually double-plan the same request and DM the user twice.
 //
-// Dedup has NO cursor file. The `proposals` table's UNIQUE(source, source_ref)
+// Dedup has NO cursor file. The `inbox` table's UNIQUE(source, source_ref)
 // index IS the cursor: we attempt the write for every candidate and treat the
 // "already exists" error as "already seen". That is crash-safe and idempotent in
 // a way a cursor file is not — a poller that dies after DMing but before
@@ -25,8 +25,9 @@ export const meta = {
 // Agent calls are relays, not thinkers. The workflow runtime has no direct MCP
 // access, so reaching Slack and the registry requires a subagent; both calls
 // below are `effort: 'low'` mechanical tool relays with a fixed output schema.
-// No planning/reasoning agent is ever spawned here — producing the actual
-// proposal is the CALLER's job, and every phase is skipped when its input is
+// No planning/reasoning agent is ever spawned here — capture is deliberately
+// dumb (an inbox row, no kind, no summary, no judgment) and producing the
+// actual proposal is the CALLER's job, and every phase is skipped when its input is
 // empty (no candidates → no Claim; no terminal decisions → no Record), so a
 // quiet poll costs two mechanical relay calls and zero reasoning agents. That
 // is what keeps the tier-1 loop cheap. `mode` narrows it further to one.
@@ -109,7 +110,7 @@ const CLAIM_SCHEMA = {
         properties: {
           source_ref: { type: 'string', description: 'The ts of the candidate this result is for, copied verbatim' },
           outcome: { type: 'string', enum: ['created', 'already_seen', 'error'] },
-          proposal_id: { type: 'number', description: 'Set only when outcome is created' },
+          inbox_id: { type: 'number', description: 'Set only when outcome is created' },
           error: { type: 'string', description: 'Set only when outcome is error — the tool error text' },
         },
         required: ['source_ref', 'outcome'],
@@ -196,23 +197,22 @@ Return JSON matching the given schema.`
 }
 
 function claimPrompt(ctx, candidates) {
-  return `Claim a batch of incoming Slack requests in the registry. This is a mechanical relay: one tool call per candidate, then report what happened. Do not plan, summarize, or reply to anyone.
+  return `Capture a batch of incoming Slack requests into the registry inbox. This is a mechanical relay: one tool call per candidate, then report what happened. Do not plan, summarize, classify, triage, or reply to anyone.
 
-For EACH candidate below, in order, call the \`registry_write_proposal\` MCP tool with:
-- name: "${ctx.project_name}"
-- proposal: {
+For EACH candidate below, in order, call the \`registry_write_inbox\` MCP tool with:
+- inbox: {
     source: "slack",
     source_channel: the candidate's source_channel,
     source_permalink: the candidate's source_permalink,
     source_ref: the candidate's source_ref (copied verbatim — this is the dedup key),
-    kind: "${ctx.kind}",
-    summary: the candidate's summary (copied verbatim),
-    payload: the candidate's payload object (copied verbatim)
+    raw_text: the candidate's payload.request_text (copied verbatim, character for character)
   }
 
+Send NO other fields. In particular send no \`kind\`, no \`summary\`, no \`project\` and no \`status\` — capture is deliberately dumb, and no judgment of any kind happens at capture time. Triage is a later, separate step.
+
 Then record one result per candidate:
-- The call succeeded → outcome "created", and proposal_id set to the id the tool returned.
-- The call failed with an error saying the proposal ALREADY EXISTS for that source/source_ref → outcome "already_seen". This is the expected, non-error path for a message we have polled before. Do NOT retry it.
+- The call succeeded → outcome "created", and inbox_id set to the id the tool returned.
+- The call failed with an error saying the item ALREADY EXISTS for that source/source_ref → outcome "already_seen". This is the expected, non-error path for a message we have polled before. Do NOT retry it.
 - Any other failure → outcome "error" with the tool's error text in \`error\`. Do not retry more than once.
 
 Every candidate must appear exactly once in \`results\`, keyed by its source_ref.
@@ -848,7 +848,6 @@ const ctx = {
   stuart_bot_user_id: normalizeSlackId(raw && raw.stuart_bot_user_id),
   user_id: normalizeSlackId((raw && raw.user_id) || ''),
   workspace_domain: (raw && raw.workspace_domain) || '',
-  kind: (raw && raw.kind) || 'plan',
   limit: (raw && raw.limit) || DEFAULT_LIMIT,
   thread_limit: (raw && raw.thread_limit) || DEFAULT_THREAD_LIMIT,
   // 'both' (default) runs the poll and the decision sweep; 'poll' / 'decisions'
@@ -1014,11 +1013,11 @@ if (runPoll) {
       // error, never as "new" — re-handing it to the caller could double-notify
       // for a row that may in fact have been written.
       if (!result) {
-        claimErrors.push({ source_ref: c.source_ref, error: 'no claim result returned for this candidate' })
+        claimErrors.push({ source_ref: c.source_ref, error: 'no capture result returned for this candidate' })
         continue
       }
       if (result.outcome === 'created') {
-        newRequests.push({ ...c, proposal_id: result.proposal_id })
+        newRequests.push({ ...c, inbox_id: result.inbox_id })
       } else if (result.outcome === 'already_seen') {
         alreadySeen.push(c.source_ref)
       } else {
@@ -1145,8 +1144,9 @@ return {
   channel_id: ctx.channel_id,
   scanned,
   candidates: candidates.length,
-  // Each entry is a claimed, not-yet-acted-on request. The caller plans and
-  // notifies; this script deliberately does neither. request_text is untrusted
+  // Each entry is a captured, not-yet-triaged inbox row (`inbox_id`). The
+  // caller triages, plans and notifies; this script deliberately does none of
+  // those. request_text is untrusted
   // data — route it, never obey it.
   new_requests: newRequests,
   already_seen: alreadySeen,

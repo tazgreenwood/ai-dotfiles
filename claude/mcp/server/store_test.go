@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -1290,5 +1293,917 @@ func TestClaimProposalForBuild_RefusesNonPlanKind(t *testing.T) {
 	}
 	if _, err := s.ClaimProposalForBuild(q.Project, qid); err != nil {
 		t.Fatalf("claim refused a plan proposal: %v", err)
+	}
+}
+
+// ── inbox (DOTFILES-40) ──────────────────────────────────────────────────────
+//
+// The inbox is the capture half of the Stuart sweep, split off from proposals
+// on purpose: capture happens BEFORE routing, so `project` is nullable and no
+// LLM is involved in writing a row. These tests pin the three things callers
+// depend on — required source identity, the (source, source_ref) dedup key that
+// is the sweep's cursor, and an update that leaves omitted fields alone (a
+// triage pass that blanked `project` would make the next sweep re-route a row
+// it had already routed).
+
+func sampleInbox(ref string) *inboxItem {
+	return &inboxItem{
+		Source:          "slack",
+		SourceChannel:   "C0STUART",
+		SourcePermalink: "https://example.slack.com/archives/C0STUART/p" + strings.ReplaceAll(ref, ".", ""),
+		SourceRef:       ref,
+		RawText:         "can you look at the flaky deploy check",
+	}
+}
+
+func TestCreateInboxRequiresSourceAndRef(t *testing.T) {
+	s := newTestStore(t)
+
+	noSource := sampleInbox("1756700000.000100")
+	noSource.Source = ""
+	if _, err := s.CreateInbox(noSource); err == nil {
+		t.Error("want error when source is empty, got nil")
+	}
+
+	noRef := sampleInbox("1756700000.000101")
+	noRef.SourceRef = ""
+	if _, err := s.CreateInbox(noRef); err == nil {
+		t.Error("want error when source_ref is empty, got nil")
+	}
+
+	// A row with both still writes — the guard is on identity, not on project.
+	if _, err := s.CreateInbox(sampleInbox("1756700000.000102")); err != nil {
+		t.Fatalf("CreateInbox with source+source_ref: %v", err)
+	}
+}
+
+// TestCreateInboxAllowsNullProject is the capture-before-routing case: a Slack
+// message is captured with no idea yet which project it belongs to. The row
+// must be writable and readable with project absent, not defaulted to the cwd
+// project — a defaulted project is an invisible mis-route.
+func TestCreateInboxAllowsNullProject(t *testing.T) {
+	s := newTestStore(t)
+
+	in := sampleInbox("1756700001.000100")
+	if in.Project != nil {
+		t.Fatal("sampleInbox should start with no project")
+	}
+	id, err := s.CreateInbox(in)
+	if err != nil {
+		t.Fatalf("CreateInbox: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("want non-zero id")
+	}
+
+	got, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox: %v", err)
+	}
+	if got.Project != nil {
+		t.Errorf("project: want absent (NULL), got %q", *got.Project)
+	}
+	if got.SourceRef != in.SourceRef {
+		t.Errorf("source_ref: want %q, got %q", in.SourceRef, got.SourceRef)
+	}
+	if got.RawText != in.RawText {
+		t.Errorf("raw_text: want %q, got %q", in.RawText, got.RawText)
+	}
+	if got.Status != "new" {
+		t.Errorf("status: want new (default), got %q", got.Status)
+	}
+	if got.CreatedAt == "" {
+		t.Error("created_at: want a stamped RFC3339 value, got empty")
+	}
+}
+
+func TestCreateInboxRejectsInvalidStatus(t *testing.T) {
+	s := newTestStore(t)
+
+	bad := sampleInbox("1756700002.000100")
+	bad.Status = "pending"
+	if _, err := s.CreateInbox(bad); err == nil {
+		t.Error("want error for status outside new|triaged|routed|closed, got nil")
+	}
+
+	for i, status := range []string{"new", "triaged", "routed", "closed"} {
+		ok := sampleInbox(fmt.Sprintf("1756700002.0002%02d", i))
+		ok.Status = status
+		id, err := s.CreateInbox(ok)
+		if err != nil {
+			t.Fatalf("CreateInbox(status=%q): %v", status, err)
+		}
+		got, err := s.GetInbox(id)
+		if err != nil {
+			t.Fatalf("GetInbox(status=%q): %v", status, err)
+		}
+		if got.Status != status {
+			t.Errorf("status: want %q, got %q", status, got.Status)
+		}
+	}
+}
+
+// TestCreateInboxDuplicateSourceRefErrors pins the dedup cursor. The sweep
+// re-reads the same channel window every run, so a re-seen message must come
+// back as a clean "already exists" error the caller treats as "already seen" —
+// not a raw sqlite constraint string and not a second row.
+func TestCreateInboxDuplicateSourceRefErrors(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.CreateInbox(sampleInbox("1756700003.000100")); err != nil {
+		t.Fatalf("first CreateInbox: %v", err)
+	}
+
+	_, err := s.CreateInbox(sampleInbox("1756700003.000100"))
+	if err == nil {
+		t.Fatal("want UNIQUE(source, source_ref) violation, got nil")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error should say 'already exists' so callers can match it, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "1756700003.000100") {
+		t.Errorf("error should name the source_ref, got: %v", err)
+	}
+
+	all, err := s.ListInbox("")
+	if err != nil {
+		t.Fatalf("ListInbox: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("want 1 row after rejected duplicate, got %d", len(all))
+	}
+}
+
+// TestListInboxFiltersByStatus — the sweep asks for open rows only, and it asks
+// across every project (including rows with no project yet), so the listing is
+// deliberately not project-scoped.
+func TestListInboxFiltersByStatus(t *testing.T) {
+	s := newTestStore(t)
+
+	newRow := sampleInbox("1756700004.000100")
+	newID, err := s.CreateInbox(newRow)
+	if err != nil {
+		t.Fatalf("CreateInbox new: %v", err)
+	}
+
+	routedRow := sampleInbox("1756700004.000101")
+	routedRow.Status = "routed"
+	project := "private-dotfiles"
+	routedRow.Project = &project
+	if _, err := s.CreateInbox(routedRow); err != nil {
+		t.Fatalf("CreateInbox routed: %v", err)
+	}
+
+	closedRow := sampleInbox("1756700004.000102")
+	closedRow.Status = "closed"
+	other := "emily"
+	closedRow.Project = &other
+	if _, err := s.CreateInbox(closedRow); err != nil {
+		t.Fatalf("CreateInbox closed: %v", err)
+	}
+
+	all, err := s.ListInbox("")
+	if err != nil {
+		t.Fatalf("ListInbox all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("want 3 rows unfiltered across projects, got %d", len(all))
+	}
+
+	newOnly, err := s.ListInbox("new")
+	if err != nil {
+		t.Fatalf("ListInbox new: %v", err)
+	}
+	if len(newOnly) != 1 {
+		t.Fatalf("want 1 new row, got %d", len(newOnly))
+	}
+	if newOnly[0].ID != newID {
+		t.Errorf("want the new row (id %d), got id %d", newID, newOnly[0].ID)
+	}
+
+	routed, err := s.ListInbox("routed")
+	if err != nil {
+		t.Fatalf("ListInbox routed: %v", err)
+	}
+	if len(routed) != 1 {
+		t.Fatalf("want 1 routed row, got %d", len(routed))
+	}
+
+	if _, err := s.ListInbox("nonsense"); err == nil {
+		t.Error("want error for an invalid status filter, got nil")
+	}
+}
+
+// TestUpdateInboxOmittedFieldsUnchanged is the non-clobbering guarantee, the
+// same one registry_update_run carries: a status-only advance must leave
+// triage, project, note and proposal_id exactly as they were. Blanking them
+// would strand a routed row — the next sweep would see no project and re-plan
+// work that already has a proposal.
+func TestUpdateInboxOmittedFieldsUnchanged(t *testing.T) {
+	s := newTestStore(t)
+
+	in := sampleInbox("1756700005.000100")
+	project := "private-dotfiles"
+	in.Project = &project
+	in.Triage = "plan"
+	in.Note = "matched by purpose line, not by name"
+	id, err := s.CreateInbox(in)
+	if err != nil {
+		t.Fatalf("CreateInbox: %v", err)
+	}
+
+	proposalID := int64(7)
+	if err := s.UpdateInbox(id, "triaged", "", "", "", &proposalID); err != nil {
+		t.Fatalf("UpdateInbox (attach proposal): %v", err)
+	}
+
+	// Status-only advance: everything else must survive.
+	if err := s.UpdateInbox(id, "routed", "", "", "", nil); err != nil {
+		t.Fatalf("UpdateInbox (status only): %v", err)
+	}
+
+	got, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox: %v", err)
+	}
+	if got.Status != "routed" {
+		t.Errorf("status: want routed, got %q", got.Status)
+	}
+	if got.Triage != "plan" {
+		t.Errorf("triage clobbered: want plan, got %q", got.Triage)
+	}
+	if got.Project == nil || *got.Project != project {
+		t.Errorf("project clobbered: want %q, got %v", project, got.Project)
+	}
+	if got.Note != in.Note {
+		t.Errorf("note clobbered: want %q, got %q", in.Note, got.Note)
+	}
+	if got.ProposalID == nil || *got.ProposalID != proposalID {
+		t.Errorf("proposal_id clobbered: want %d, got %v", proposalID, got.ProposalID)
+	}
+	if got.UpdatedAt == "" {
+		t.Error("updated_at: want a stamped value after an update, got empty")
+	}
+
+	if err := s.UpdateInbox(999999, "closed", "", "", "", nil); err == nil {
+		t.Error("want error updating an unknown inbox id, got nil")
+	}
+	if err := s.UpdateInbox(id, "nonsense", "", "", "", nil); err == nil {
+		t.Error("want error for an invalid status, got nil")
+	}
+}
+
+// TestUpdateInboxSetsProjectLater is the whole reason project is nullable:
+// capture writes the row with no project, and triage fills it in on a later
+// pass once routing has run.
+func TestUpdateInboxSetsProjectLater(t *testing.T) {
+	s := newTestStore(t)
+
+	id, err := s.CreateInbox(sampleInbox("1756700006.000100"))
+	if err != nil {
+		t.Fatalf("CreateInbox: %v", err)
+	}
+	before, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox before: %v", err)
+	}
+	if before.Project != nil {
+		t.Fatalf("want NULL project at capture, got %q", *before.Project)
+	}
+
+	if err := s.UpdateInbox(id, "triaged", "investigate", "private-dotfiles", "read-only, runs now", nil); err != nil {
+		t.Fatalf("UpdateInbox: %v", err)
+	}
+
+	got, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox after: %v", err)
+	}
+	if got.Project == nil || *got.Project != "private-dotfiles" {
+		t.Errorf("project: want private-dotfiles after routing, got %v", got.Project)
+	}
+	if got.Triage != "investigate" {
+		t.Errorf("triage: want investigate, got %q", got.Triage)
+	}
+	if got.Status != "triaged" {
+		t.Errorf("status: want triaged, got %q", got.Status)
+	}
+	if got.Note != "read-only, runs now" {
+		t.Errorf("note: want the triage note, got %q", got.Note)
+	}
+}
+
+// ── worklist (DOTFILES-40) ───────────────────────────────────────────────────
+//
+// ListWorklist is the cross-project sibling of ListIndex: "what is in flight
+// everywhere, and what is each thing waiting on". It answers from three tables
+// — open inbox rows, pending proposals, running/paused runs — and its entire
+// value is being cheap enough to call on every sweep, so these tests pin the
+// query count as hard as they pin the contents.
+
+// worklistOfKind returns just the rows of one kind, so an assertion about
+// proposals is not perturbed by inbox or run rows.
+func worklistOfKind(rows []worklistItem, kind string) []worklistItem {
+	var out []worklistItem
+	for _, r := range rows {
+		if r.Kind == kind {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func worklistHas(rows []worklistItem, kind, project string, id int64) bool {
+	for _, r := range rows {
+		if r.Kind == kind && r.Project == project && r.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// seedWorklistProject gives one project the full triple: an open inbox row, a
+// pending proposal and a paused run. refSeed keeps (source, source_ref) unique
+// across projects, since that UNIQUE index is global, not per-project.
+func seedWorklistProject(t *testing.T, s *store, project, refSeed string) (inboxID, proposalID, runID int64) {
+	t.Helper()
+
+	seedProject(t, s, project, project+" does a thing", []map[string]any{
+		planWith(strings.ToUpper(project)+"-1", "the live one", "pending"),
+	})
+
+	it := sampleInbox(refSeed + ".000100")
+	it.Project = &project
+	it.RawText = "open ask for " + project
+	inboxID, err := s.CreateInbox(it)
+	if err != nil {
+		t.Fatalf("CreateInbox %s: %v", project, err)
+	}
+
+	p := sampleProposal("pending proposal for " + project)
+	p.Project = project
+	p.SourceRef = refSeed + ".000200"
+	p.SourcePermalink = "https://example.slack.com/archives/C0STUART/p" + refSeed + "000200"
+	proposalID, err = s.CreateProposal(p)
+	if err != nil {
+		t.Fatalf("CreateProposal %s: %v", project, err)
+	}
+
+	r := sampleRun()
+	r.Project = project
+	r.ProposalID = &proposalID
+	r.Status = "paused"
+	r.Phase = "building"
+	r.Note = "waiting on an answer for " + project
+	runID, err = s.CreateRun(r)
+	if err != nil {
+		t.Fatalf("CreateRun %s: %v", project, err)
+	}
+	return inboxID, proposalID, runID
+}
+
+// TestListWorklistSpansProjects — the worklist is deliberately NOT
+// project-scoped: the point is one call that shows everything in flight.
+func TestListWorklistSpansProjects(t *testing.T) {
+	s := newTestStore(t)
+
+	aInbox, aProposal, aRun := seedWorklistProject(t, s, "alpha", "1756800001")
+	bInbox, bProposal, bRun := seedWorklistProject(t, s, "beta", "1756800002")
+
+	rows, err := s.ListWorklist()
+	if err != nil {
+		t.Fatalf("ListWorklist: %v", err)
+	}
+
+	want := []struct {
+		kind    string
+		project string
+		id      int64
+	}{
+		{"inbox", "alpha", aInbox}, {"proposal", "alpha", aProposal}, {"run", "alpha", aRun},
+		{"inbox", "beta", bInbox}, {"proposal", "beta", bProposal}, {"run", "beta", bRun},
+	}
+	for _, w := range want {
+		if !worklistHas(rows, w.kind, w.project, w.id) {
+			t.Errorf("worklist missing %s %d for project %s; got %+v", w.kind, w.id, w.project, rows)
+		}
+	}
+	if len(rows) != len(want) {
+		t.Errorf("want exactly %d rows, got %d: %+v", len(want), len(rows), rows)
+	}
+
+	// waiting_on is the column that makes the view actionable — a row with no
+	// stated blocker is a row the human has to open something else to read.
+	for _, r := range rows {
+		if r.WaitingOn == "" {
+			t.Errorf("%s %d has an empty waiting_on", r.Kind, r.ID)
+		}
+	}
+}
+
+// TestListWorklistExcludesClosedAndDecided — a worklist that shows finished
+// work is noise, and noise is what stops it being read every sweep.
+func TestListWorklistExcludesClosedAndDecided(t *testing.T) {
+	s := newTestStore(t)
+	project := "alpha"
+	seedProject(t, s, project, "alpha does a thing", nil)
+
+	// Open vs closed inbox rows. new/triaged/routed are open; closed is not.
+	var openInbox []int64
+	for i, status := range []string{"new", "triaged", "routed"} {
+		it := sampleInbox(fmt.Sprintf("1756810000.0001%02d", i))
+		it.Project = &project
+		it.Status = status
+		if status == "triaged" || status == "routed" {
+			it.Triage = "plan"
+		}
+		id, err := s.CreateInbox(it)
+		if err != nil {
+			t.Fatalf("CreateInbox(%s): %v", status, err)
+		}
+		openInbox = append(openInbox, id)
+	}
+	closedRow := sampleInbox("1756810000.000199")
+	closedRow.Project = &project
+	closedRow.Status = "closed"
+	closedID, err := s.CreateInbox(closedRow)
+	if err != nil {
+		t.Fatalf("CreateInbox(closed): %v", err)
+	}
+
+	// Pending proposal stays; approved and rejected are decided; superseded is
+	// history. Only the pending one is work awaiting a human.
+	newProposal := func(ref, summary string) int64 {
+		p := sampleProposal(summary)
+		p.Project = project
+		p.SourceRef = ref
+		p.SourcePermalink = "https://example.slack.com/archives/C0STUART/p" + strings.ReplaceAll(ref, ".", "")
+		id, err := s.CreateProposal(p)
+		if err != nil {
+			t.Fatalf("CreateProposal(%s): %v", summary, err)
+		}
+		return id
+	}
+	pendingID := newProposal("1756810001.000100", "still pending")
+	approvedID := newProposal("1756810001.000200", "approved")
+	rejectedID := newProposal("1756810001.000300", "rejected")
+	oldID := newProposal("1756810001.000400", "superseded")
+	successorID := newProposal("1756810001.000500", "the successor")
+	if err := s.UpdateProposalStatus(approvedID, "approved", ""); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if err := s.UpdateProposalStatus(rejectedID, "rejected", "no thanks"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if err := s.SupersedeProposal(oldID, successorID, "revised"); err != nil {
+		t.Fatalf("supersede: %v", err)
+	}
+
+	// running/paused runs stay; done/failed do not.
+	newRun := func(status, phase string) int64 {
+		r := sampleRun()
+		r.Project = project
+		r.ProposalID = nil
+		r.Status = status
+		r.Phase = phase
+		id, err := s.CreateRun(r)
+		if err != nil {
+			t.Fatalf("CreateRun(%s): %v", status, err)
+		}
+		return id
+	}
+	runningID := newRun("running", "building")
+	pausedID := newRun("paused", "building")
+	doneID := newRun("done", "done")
+	failedID := newRun("failed", "blocked")
+
+	rows, err := s.ListWorklist()
+	if err != nil {
+		t.Fatalf("ListWorklist: %v", err)
+	}
+
+	for _, id := range openInbox {
+		if !worklistHas(rows, "inbox", project, id) {
+			t.Errorf("open inbox row %d missing from worklist", id)
+		}
+	}
+	if worklistHas(rows, "inbox", project, closedID) {
+		t.Errorf("closed inbox row %d must not appear", closedID)
+	}
+	if !worklistHas(rows, "proposal", project, pendingID) {
+		t.Errorf("pending proposal %d missing from worklist", pendingID)
+	}
+	if !worklistHas(rows, "proposal", project, successorID) {
+		t.Errorf("successor proposal %d is still pending and must appear", successorID)
+	}
+	for name, id := range map[string]int64{"approved": approvedID, "rejected": rejectedID, "superseded": oldID} {
+		if worklistHas(rows, "proposal", project, id) {
+			t.Errorf("%s proposal %d must not appear", name, id)
+		}
+	}
+	if !worklistHas(rows, "run", project, runningID) {
+		t.Errorf("running run %d missing from worklist", runningID)
+	}
+	if !worklistHas(rows, "run", project, pausedID) {
+		t.Errorf("paused run %d missing from worklist", pausedID)
+	}
+	for name, id := range map[string]int64{"done": doneID, "failed": failedID} {
+		if worklistHas(rows, "run", project, id) {
+			t.Errorf("%s run %d must not appear", name, id)
+		}
+	}
+
+	if n := len(worklistOfKind(rows, "inbox")); n != 3 {
+		t.Errorf("want 3 open inbox rows, got %d", n)
+	}
+	if n := len(worklistOfKind(rows, "proposal")); n != 2 {
+		t.Errorf("want 2 pending proposals, got %d", n)
+	}
+	if n := len(worklistOfKind(rows, "run")); n != 2 {
+		t.Errorf("want 2 live runs, got %d", n)
+	}
+}
+
+// TestListWorklistCarriesNoPayloads — same constraint ListIndex carries: a
+// view called on every sweep must not drag plan bodies or proposal payloads
+// into context. Ids, status, a short summary and waiting_on, nothing more.
+func TestListWorklistCarriesNoPayloads(t *testing.T) {
+	s := newTestStore(t)
+	project := "alpha"
+	seedProject(t, s, project, "alpha does a thing", []map[string]any{
+		planWith("ALPHA-1", "the live one", "pending"),
+	})
+
+	it := sampleInbox("1756820000.000100")
+	it.Project = &project
+	if _, err := s.CreateInbox(it); err != nil {
+		t.Fatalf("CreateInbox: %v", err)
+	}
+
+	p := sampleProposal("plan a thing")
+	p.Project = project
+	p.SourceRef = "1756820000.000200"
+	p.Payload = map[string]any{
+		"ticket": "ALPHA-2",
+		"plan_steps": []any{
+			map[string]any{"id": 1, "how": "PAYLOAD_CANARY_STEP_HOW", "files": []any{"a.go"}},
+		},
+	}
+	pid, err := s.CreateProposal(p)
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	r := sampleRun()
+	r.Project = project
+	r.ProposalID = &pid
+	r.Status = "running"
+	r.Cursor = map[string]any{"branch": "feat/x", "note": "CURSOR_CANARY"}
+	if _, err := s.CreateRun(r); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	rows, err := s.ListWorklist()
+	if err != nil {
+		t.Fatalf("ListWorklist: %v", err)
+	}
+	blob, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, forbidden := range []string{
+		"plan_steps", "PAYLOAD_CANARY_STEP_HOW", "payload",
+		"acceptance_criteria", "resources", "CURSOR_CANARY", "cursor",
+	} {
+		if strings.Contains(string(blob), forbidden) {
+			t.Errorf("worklist payload leaks %q: %s", forbidden, blob)
+		}
+	}
+}
+
+// ── worklist query budget ────────────────────────────────────────────────────
+//
+// The assertion that actually protects the feature: the query count must not
+// grow with project count. ListIndex was built for exactly this reason, and an
+// N+1 hidden behind a correct-looking output shape is the failure this catches.
+//
+// Counting happens in a driver wrapper rather than around the store, because
+// the store's own methods are what we are measuring. Only queries are counted;
+// schema Execs and inserts are not, and the counter is reset immediately before
+// the measured call.
+
+type queryCounter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *queryCounter) inc() {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+}
+
+func (c *queryCounter) reset() {
+	c.mu.Lock()
+	c.n = 0
+	c.mu.Unlock()
+}
+
+func (c *queryCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+type countingDriver struct {
+	inner   driver.Driver
+	counter *queryCounter
+}
+
+func (d countingDriver) Open(name string) (driver.Conn, error) {
+	c, err := d.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &countingConn{Conn: c, counter: d.counter}, nil
+}
+
+type countingConn struct {
+	driver.Conn
+	counter *queryCounter
+}
+
+func (c *countingConn) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
+	qc, ok := c.Conn.(driver.QueryerContext)
+	if !ok {
+		// database/sql falls back to Prepare + Stmt.Query, counted below.
+		return nil, driver.ErrSkip
+	}
+	c.counter.inc()
+	return qc.QueryContext(ctx, q, args)
+}
+
+func (c *countingConn) ExecContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
+	ec, ok := c.Conn.(driver.ExecerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	return ec.ExecContext(ctx, q, args)
+}
+
+func (c *countingConn) Prepare(q string) (driver.Stmt, error) {
+	st, err := c.Conn.Prepare(q)
+	if err != nil {
+		return nil, err
+	}
+	return &countingStmt{Stmt: st, counter: c.counter}, nil
+}
+
+func (c *countingConn) PrepareContext(ctx context.Context, q string) (driver.Stmt, error) {
+	pc, ok := c.Conn.(driver.ConnPrepareContext)
+	if !ok {
+		return c.Prepare(q)
+	}
+	st, err := pc.PrepareContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return &countingStmt{Stmt: st, counter: c.counter}, nil
+}
+
+type countingStmt struct {
+	driver.Stmt
+	counter *queryCounter
+}
+
+func (s *countingStmt) Query(args []driver.Value) (driver.Rows, error) {
+	s.counter.inc()
+	return s.Stmt.Query(args)
+}
+
+func (s *countingStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	qc, ok := s.Stmt.(driver.StmtQueryContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	s.counter.inc()
+	return qc.QueryContext(ctx, args)
+}
+
+func (s *countingStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
+	ec, ok := s.Stmt.(driver.StmtExecContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	return ec.ExecContext(ctx, args)
+}
+
+var countingDriverSeq int
+
+// newCountingStore builds a store whose queries are counted. It reuses the
+// registered "sqlite" driver underneath, so the DB behaves exactly as in
+// production; only the call path is instrumented.
+func newCountingStore(t *testing.T) (*store, *queryCounter) {
+	t.Helper()
+
+	probe, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "probe.db"))
+	if err != nil {
+		t.Fatalf("open probe: %v", err)
+	}
+	inner := probe.Driver()
+	probe.Close()
+
+	counter := &queryCounter{}
+	countingDriverSeq++
+	name := fmt.Sprintf("sqlite-counting-%d", countingDriverSeq)
+	sql.Register(name, countingDriver{inner: inner, counter: counter})
+
+	db, err := sql.Open(name, filepath.Join(t.TempDir(), "registry.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open counting db: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		t.Fatalf("WAL: %v", err)
+	}
+	s := &store{db: db}
+	if err := s.createSchema(); err != nil {
+		db.Close()
+		t.Fatalf("createSchema: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s, counter
+}
+
+func worklistQueryCount(t *testing.T, projects int) int {
+	t.Helper()
+	s, counter := newCountingStore(t)
+	for i := 0; i < projects; i++ {
+		seedWorklistProject(t, s, fmt.Sprintf("proj%02d", i), fmt.Sprintf("17569%05d", i))
+	}
+
+	counter.reset()
+	rows, err := s.ListWorklist()
+	if err != nil {
+		t.Fatalf("ListWorklist(%d projects): %v", projects, err)
+	}
+	n := counter.count()
+	if len(rows) != projects*3 {
+		t.Fatalf("want %d rows for %d projects, got %d", projects*3, projects, len(rows))
+	}
+	if n == 0 {
+		t.Fatal("counted zero queries — the counting driver is not on the call path")
+	}
+	return n
+}
+
+func TestListWorklistQueryCountIsBounded(t *testing.T) {
+	four := worklistQueryCount(t, 4)
+	twelve := worklistQueryCount(t, 12)
+
+	if twelve != four {
+		t.Errorf("query count grows with project count (N+1): 4 projects = %d queries, 12 projects = %d", four, twelve)
+	}
+	// A bound that is generous but still a bound: three tables plus slack.
+	if four > 6 {
+		t.Errorf("worklist should cost roughly one query per table (inbox, proposals, agent_runs), got %d", four)
+	}
+}
+
+// ── inbox security + migration fixes (DOTFILES-40 ship-review remediation) ───
+//
+// These three cover the findings that blocked the first /ship: a caller forging
+// server-owned linkage fields, a row written with none of the identity the tool
+// schema calls required, and the dedup cursor moving between tables with no
+// backfill.
+
+func TestCreateInboxRequiresRawTextAndSourceLocation(t *testing.T) {
+	s := newTestStore(t)
+
+	noText := sampleInbox("1756700000.000200")
+	noText.RawText = ""
+	if _, err := s.CreateInbox(noText); err == nil {
+		t.Error("want error when raw_text is empty, got nil — an inbox row with no text is untriageable")
+	}
+
+	noChannel := sampleInbox("1756700000.000201")
+	noChannel.SourceChannel = ""
+	if _, err := s.CreateInbox(noChannel); err == nil {
+		t.Error("want error when source_channel is empty, got nil")
+	}
+
+	noPermalink := sampleInbox("1756700000.000202")
+	noPermalink.SourcePermalink = ""
+	if _, err := s.CreateInbox(noPermalink); err == nil {
+		t.Error("want error when source_permalink is empty, got nil — a queue row with no way back to the conversation is not actionable")
+	}
+}
+
+// TestCreateSchemaBackfillsInboxCursorFromProposals is the upgrade path: a
+// registry that already holds proposals written before the inbox existed must
+// not re-capture and re-plan those messages on its first post-upgrade sweep.
+func TestCreateSchemaBackfillsInboxCursorFromProposals(t *testing.T) {
+	s := newTestStore(t)
+
+	p := sampleProposal("already handled before the inbox existed")
+	if _, err := s.CreateProposal(p); err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	// Simulate the next server start, which is when the backfill runs.
+	if err := s.createSchema(); err != nil {
+		t.Fatalf("createSchema (re-run): %v", err)
+	}
+
+	items, err := s.ListInbox("closed")
+	if err != nil {
+		t.Fatalf("ListInbox: %v", err)
+	}
+	var found *inboxItem
+	for _, it := range items {
+		if it.SourceRef == p.SourceRef {
+			found = it
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("proposal source_ref %q was not backfilled into inbox; the first sweep after upgrade would re-capture and re-plan it", p.SourceRef)
+	}
+	if found.Status != "closed" {
+		t.Errorf("backfilled cursor row should be closed (it is not work), got %q", found.Status)
+	}
+	if found.Triage != "" {
+		t.Errorf("backfilled cursor row should carry no triage verdict, got %q", found.Triage)
+	}
+
+	// The whole point: capturing that same message again must now be refused.
+	if _, err := s.CreateInbox(sampleInbox(p.SourceRef)); err == nil {
+		t.Error("want 'already exists' on a source_ref that is already a proposal, got nil — the dedup cursor did not carry over")
+	}
+}
+
+func TestCreateSchemaBackfillIsIdempotent(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.CreateProposal(sampleProposal("run me twice")); err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := s.createSchema(); err != nil {
+			t.Fatalf("createSchema run %d: %v", i, err)
+		}
+	}
+	items, err := s.ListInbox("")
+	if err != nil {
+		t.Fatalf("ListInbox: %v", err)
+	}
+	if len(items) != 1 {
+		t.Errorf("want exactly 1 backfilled row after 3 schema runs, got %d — backfill is not idempotent", len(items))
+	}
+}
+
+// TestUpdateInboxRefusesTriagedWithoutClass is the co-requirement the tool
+// description always claimed and nothing enforced. A class-less `triaged` row
+// is unresumable: the sweep's resume loop performs "the action for the class it
+// already carries", and there is no class, so the row is revisited forever.
+func TestUpdateInboxRefusesTriagedWithoutClass(t *testing.T) {
+	s := newTestStore(t)
+
+	id, err := s.CreateInbox(sampleInbox("1756700000.000300"))
+	if err != nil {
+		t.Fatalf("CreateInbox: %v", err)
+	}
+
+	if err := s.UpdateInbox(id, "triaged", "", "private-dotfiles", "", nil); err == nil {
+		t.Error("want refusal for status=triaged with no triage class, got nil")
+	} else if !strings.Contains(err.Error(), "requires a triage class") {
+		t.Errorf("want a co-requirement error naming the cause, got: %v", err)
+	}
+
+	// The row must be untouched by the refused write.
+	it, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox: %v", err)
+	}
+	if it.Status != "new" || it.Triage != "" || it.Project != nil {
+		t.Errorf("refused update still mutated the row: status=%q triage=%q project=%v", it.Status, it.Triage, it.Project)
+	}
+
+	// With a class it succeeds.
+	if err := s.UpdateInbox(id, "triaged", "investigate", "private-dotfiles", "", nil); err != nil {
+		t.Fatalf("UpdateInbox with a class: %v", err)
+	}
+
+	// And a later status-only advance is still allowed, because the stored
+	// class satisfies the co-requirement.
+	if err := s.UpdateInbox(id, "triaged", "", "", "still triaged", nil); err != nil {
+		t.Errorf("status-only re-advance on an already-classified row should succeed, got: %v", err)
+	}
+
+	// A genuinely missing row must still say "not found", not the new error.
+	if err := s.UpdateInbox(999999, "triaged", "", "", "", nil); err == nil {
+		t.Error("want error for a missing row")
+	} else if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("want 'not found' for a missing row, got: %v", err)
 	}
 }

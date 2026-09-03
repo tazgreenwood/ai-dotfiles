@@ -63,7 +63,7 @@ function acList(criteria) {
 
 function devPrompt(ctx, step, index, attempt, failureReason, cwd) {
   return `You are the developer agent. Implement exactly one plan step.
-${cwd ? `\nWork inside: ${cwd} (all commands must run there, not the main checkout)\n` : ''}
+${cwd ? `\nWork inside: ${cwd} (all commands must run there, not the main checkout)\n` : `\nStay on branch ${ctx.plan_data.branch} — it is already checked out. Do not create or switch to a different branch.\n`}
 ## Ticket
 ${ctx.ticket} — ${ctx.summary}
 
