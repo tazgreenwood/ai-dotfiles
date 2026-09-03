@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -799,6 +800,142 @@ func registryIsFakeTicket(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"is_fake": n <= counter && counter > 0})
 }
 
+// ── Findings-egress secret-pattern check (DOTFILES-41) ───────────────────────
+//
+// Stuart posts unattended, and what it posts is assembled from text it did not
+// write: Slack messages, investigation findings, file excerpts. A credential
+// that reaches a proposal body is exfiltrated the moment chat.postMessage
+// succeeds, and a Slack post cannot be un-sent. So every Stuart post is passed
+// through checkEgress FIRST and refused — not redacted, not truncated — when a
+// credential shape fires.
+//
+// This is Go rather than prose in a skill file for the same reason the sweep's
+// tool grants are frontmatter rather than promises: a prompt asking a model not
+// to post a secret is a request, and DOTFILES-40 shipped a BLOCK for treating
+// exactly that kind of request as an enforcement.
+//
+// Every pattern is compiled ONCE, at package init, into the table below.
+// checkEgress's body compiles nothing: it runs on every post, and a
+// regexp.MustCompile inside it would re-parse the whole set per call.
+//
+// The patterns deliberately require the full credential SHAPE, not the prefix
+// alone — `AKIA` needs its 16 trailing characters, `Bearer` needs 40+ token
+// characters. A prefix-only pattern would refuse the sentence "AKIA is the AWS
+// key prefix we screen for", and a check that blocks ordinary prose gets turned
+// off, which leaves no check at all.
+
+type egressPattern struct {
+	name string
+	re   *regexp.Regexp
+}
+
+var egressPatterns = []egressPattern{
+	// AWS long-term (AKIA) and temporary (ASIA) access key ids: prefix + 16.
+	{"aws_access_key", regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`)},
+	// Slack bot/user/app/refresh/legacy tokens: xoxb- xoxp- xoxa- xoxr- xoxs- xoxe-.
+	{"slack_token", regexp.MustCompile(`xox[abeprs]-[0-9A-Za-z-]{10,}`)},
+	// Any PEM private-key header, keyed (RSA/EC/OPENSSH/DSA) or bare.
+	{"pem_private_key", regexp.MustCompile(`-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----`)},
+	// GitHub tokens: ghp_ (PAT), gho_ (OAuth), ghu_/ghs_ (app), ghr_ (refresh).
+	{"github_pat", regexp.MustCompile(`gh[opsur]_[0-9A-Za-z]{20,}`)},
+	// Generic Authorization: Bearer <40+ token chars> — the JWT/opaque catch-all.
+	{"bearer_token", regexp.MustCompile(`(?i)bearer\s+[0-9A-Za-z._~+/=-]{40,}`)},
+	// Slack app-level tokens: xapp-<version>-<app id>-<num>-<hex>. A SEPARATE
+	// family from xox[abeprs]-, which does not match xapp- at all.
+	{"slack_app_token", regexp.MustCompile(`xapp-[0-9]-[0-9A-Za-z]+-[0-9]+-[0-9a-f]{32,}`)},
+	// Atlassian API tokens (JIRA/Confluence, which this repo drives): the ATATT
+	// prefix plus a long base64-ish body.
+	{"atlassian_api_token", regexp.MustCompile(`ATATT[0-9A-Za-z_=+/-]{20,}`)},
+	// Anthropic keys: sk-ant-<variant>-<body>. Listed before the generic sk-
+	// family so a refusal names the specific provider.
+	{"anthropic_api_key", regexp.MustCompile(`sk-ant-[0-9A-Za-z_-]{24,}`)},
+	// Generic sk- keys (OpenAI-style, incl. sk-proj-). The charset after the
+	// prefix deliberately EXCLUDES the hyphen and the prefix is \b-anchored:
+	// a hyphen-permissive prefix-only sk- pattern matches straight through
+	// ordinary prose like "risk-assumption-and-mitigation-planning-researcher".
+	{"generic_sk_api_key", regexp.MustCompile(`\bsk-(?:proj-)?[0-9A-Za-z]{32,}`)},
+	// Bare JWTs. bearer_token only fires on the literal keyword, so a token
+	// pasted on its own line was invisible. Anchored on the eyJ header plus the
+	// two-dot three-segment structure, never on eyJ alone — a base64 blob that
+	// happens to start with eyJ is not a token.
+	{"jwt", regexp.MustCompile(`eyJ[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}`)},
+	// Google API keys: AIza plus exactly 35 more chars.
+	{"google_api_key", regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`)},
+	// api_key / api-key / X-API-Key assigned a 40-hex secret. The keyword is
+	// REQUIRED: a bare 40-hex run is also the shape of every git object id.
+	{"api_key_assignment", regexp.MustCompile(`(?i)api[_-]?key["']?\s*[:=]\s*["']?[0-9a-f]{40}`)},
+}
+
+// checkEgress reports whether text is safe to post. `matched` names the
+// patterns that fired, in table order, and NEVER contains the matched
+// substring: this value travels back through a tool result into a transcript,
+// so echoing the secret to explain the refusal would recreate the leak the
+// refusal exists to prevent.
+func checkEgress(text string) (bool, []string) {
+	var matched []string
+	for _, p := range egressPatterns {
+		if p.re.MatchString(text) {
+			matched = append(matched, p.name)
+		}
+	}
+	return len(matched) == 0, matched
+}
+
+// registryCheckEgress is the tool wrapper. It returns pattern NAMES only — see
+// checkEgress. Callers treat clean:false as "do not post", never as "post with
+// the offending part removed": the caller cannot know which part matched, by
+// design.
+//
+// `path` exists because the post path writes the body to a temp file and posts
+// THAT file, while `text` is whatever the caller retyped into this call. Those
+// are two different strings, and only one of them leaves the machine: a
+// transcription slip or a deliberately mangled retype passes a `text` check
+// while the file still carries the credential. So when `path` is present the
+// file's real bytes are screened and `text` is ignored entirely — not OR-ed in,
+// which would let a dirty retype refuse a clean post and quietly re-introduce
+// the retyped string as an input.
+//
+// A path that cannot be read is an ERROR, never a clean result. "Could not
+// check" and "checked, nothing found" are the same value to a caller that only
+// reads `clean`, and collapsing them turns every unreadable body into a
+// permitted one.
+func registryCheckEgress(args map[string]any) ToolResult {
+	body, errMsg := egressBody(args)
+	if errMsg != "" {
+		return toolErr(errMsg)
+	}
+	clean, matched := checkEgress(body)
+	if matched == nil {
+		matched = []string{}
+	}
+	return toolOK(map[string]any{"clean": clean, "matched": matched})
+}
+
+// egressBody resolves which bytes get screened. `path` wins whenever it is
+// supplied and non-empty; an empty string means "not supplied", matching the
+// COALESCE convention used by the update tools. Returns a non-empty message on
+// failure so the caller can refuse rather than post.
+func egressBody(args map[string]any) (string, string) {
+	if raw, present := args["path"]; present {
+		path, ok := raw.(string)
+		if !ok {
+			return "", "path must be a string"
+		}
+		if path != "" {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return "", fmt.Sprintf("cannot read path %q: %v — an unreadable body is not a clean body; do not post", path, err)
+			}
+			return string(b), ""
+		}
+	}
+	text, ok := args["text"].(string)
+	if !ok {
+		return "", "path (string, preferred: the file whose bytes will be posted) or text (string) required"
+	}
+	return text, ""
+}
+
 func registryUnionFiles(args map[string]any) ToolResult {
 	raw, ok := args["file_groups"].([]any)
 	if !ok {
@@ -1138,6 +1275,17 @@ func registryTools() []Tool {
 					"prefix": map[string]any{"type": "string", "description": "Optional: override the auto-derived project prefix (default: last hyphen-segment of name, uppercased)"},
 				},
 				"required": []string{"name", "ticket"},
+			},
+		},
+		{
+			Name:        "registry_check_egress",
+			Description: "Deterministic credential-shape check for a body about to be posted to Slack. Prefer `path`: it reads that file and screens its real bytes, so what is checked is exactly what gets posted — a retyped `text` copy checks a string nobody sends. `path` wins when both are given; an unreadable `path` is an error, never a clean result. Returns clean:false plus the NAMES of the patterns that fired (never the matched text). A body that is not clean must be refused, not redacted. Covers AWS access keys (AKIA/ASIA), Slack tokens (xox[abeprs]- and xapp-), PEM private-key headers, GitHub tokens (ghp_/gho_/ghs_/ghu_/ghr_), generic Bearer tokens, Atlassian ATATT tokens, sk-ant- and generic sk- keys, bare JWTs, Google AIza keys and api_key=<hex40> assignments.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{"type": "string", "description": "Preferred: path to the file whose bytes will be posted. Read and screened as-is; ignores text."},
+					"text": map[string]any{"type": "string", "description": "The exact body that would be posted. Only for callers with no file."},
+				},
 			},
 		},
 		{

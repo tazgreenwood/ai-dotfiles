@@ -1940,9 +1940,9 @@ func TestRegistryUpdateInbox_AdvancesStatusSingleStatement(t *testing.T) {
 	id := writeTestInbox(t, "1756600100.000700", "to update")
 
 	result := registryUpdateInbox(map[string]any{
-		"id":     float64(id),
-		"status": "triaged",
-		"triage": "plan",
+		"id":      float64(id),
+		"status":  "triaged",
+		"triage":  "plan",
 		"project": "private-dotfiles",
 	})
 	if result.IsError {
@@ -2090,5 +2090,441 @@ func TestRegistryWriteInbox_IgnoresCallerSuppliedLinkageFields(t *testing.T) {
 	}
 	if it.Triage != "" {
 		t.Errorf("caller-supplied triage was persisted (%q); only triage may set a verdict", it.Triage)
+	}
+}
+
+// --- egress secret-pattern check (DOTFILES-41) ---
+//
+// checkEgress is the enforceable half of the findings-egress control: every
+// Stuart Slack post is passed through it before chat.postMessage. Contract:
+//
+//	checkEgress(text string) (clean bool, matched []string)
+//
+// `clean` is false when the body matches any credential pattern; `matched`
+// names the patterns that fired and MUST NEVER contain the matched substring —
+// echoing the secret into a tool result would recreate the leak in the
+// transcript the refusal was supposed to prevent.
+
+func TestCheckEgressCatchesCredentialShapes(t *testing.T) {
+	cases := []struct {
+		name        string
+		text        string
+		wantPattern string
+	}{
+		{
+			name:        "aws access key id",
+			text:        "here is the key AKIAIOSFODNN7EXAMPLE for the uploader",
+			wantPattern: "aws_access_key",
+		},
+		{
+			name:        "aws access key alone on a line",
+			text:        "AKIA1234567890ABCDEF",
+			wantPattern: "aws_access_key",
+		},
+		{
+			name:        "slack bot token",
+			text:        "token is " + "xoxb-1234567890123-1234567890123-" + "abcdefghijklmnopqrstuvwx",
+			wantPattern: "slack_token",
+		},
+		{
+			name:        "slack user token",
+			text:        "xoxp-9876543210987-9876543210987-" + "zyxwvutsrqponmlkjihgfedc",
+			wantPattern: "slack_token",
+		},
+		{
+			name:        "legacy Slack token",
+			text:        "xoxa-2-ABCDEFGHIJ-1234567890-" + "abcdefghijklmnopqrstuvwxyz012345",
+			wantPattern: "slack_token",
+		},
+		{
+			// xapp- is the app-level token family and is NOT matched by the
+			// xox[abeprs]- pattern: a test labelling xoxa- "app-level" made a
+			// real gap look covered.
+			name:        "slack app-level token",
+			text:        "SLACK_APP_TOKEN=" + "xapp-1-A012BCDEFGH-1234567890123-" + "abcdef0123456789abcdef0123456789",
+			wantPattern: "slack_app_token",
+		},
+		{
+			name:        "atlassian api token",
+			text:        "JIRA_API_TOKEN=ATATT3xFfGF0T4Nn8mQrS7uVwXyZ1234567890abcdefGH=",
+			wantPattern: "atlassian_api_token",
+		},
+		{
+			name:        "anthropic api key",
+			text:        "export ANTHROPIC_API_KEY=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEf",
+			wantPattern: "anthropic_api_key",
+		},
+		{
+			name:        "generic sk- api key",
+			text:        "the config still has sk-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 in it",
+			wantPattern: "generic_sk_api_key",
+		},
+		{
+			// bearer_token requires the literal keyword; a token pasted on its
+			// own was invisible before this family existed.
+			name:        "bare jwt with no bearer keyword",
+			text:        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+			wantPattern: "jwt",
+		},
+		{
+			name:        "google api key",
+			text:        "maps key AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R is in the client bundle",
+			wantPattern: "google_api_key",
+		},
+		{
+			name:        "api_key assignment with hex secret",
+			text:        "api_key=4f2c1a9b8e7d6c5b4a39281706f5e4d3c2b1a098",
+			wantPattern: "api_key_assignment",
+		},
+		{
+			name:        "API-KEY header form with hex secret",
+			text:        `curl -H 'X-API-Key: "0123456789abcdef0123456789abcdef01234567"' https://internal/api`,
+			wantPattern: "api_key_assignment",
+		},
+		{
+			name:        "slack refresh token",
+			text:        "xoxr-1111111111111-2222222222222-" + "abcdefghijklmnopqrstuvwx",
+			wantPattern: "slack_token",
+		},
+		{
+			name:        "pem rsa private key header",
+			text:        "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n",
+			wantPattern: "pem_private_key",
+		},
+		{
+			name:        "pem openssh private key header",
+			text:        "attached:\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk...\n",
+			wantPattern: "pem_private_key",
+		},
+		{
+			name:        "github personal access token",
+			text:        "use ghp_1234567890abcdefghijklmnopqrstuvwxyz to clone",
+			wantPattern: "github_pat",
+		},
+		{
+			name:        "github oauth token",
+			text:        "gho_abcdefghijklmnopqrstuvwxyz1234567890",
+			wantPattern: "github_pat",
+		},
+		{
+			name:        "generic bearer token",
+			text:        "curl -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abcdefghijklmnop'",
+			wantPattern: "bearer_token",
+		},
+		{
+			name:        "dotenv style assignment",
+			text:        "SLACK_BOT_TOKEN=" + "xoxb-1234567890123-1234567890123-" + "abcdefghijklmnopqrstuvwx",
+			wantPattern: "slack_token",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clean, matched := checkEgress(tc.text)
+			if clean {
+				t.Fatalf("checkEgress reported clean for %s; a credential-shaped body must be refused, not posted", tc.name)
+			}
+			found := false
+			for _, m := range matched {
+				if m == tc.wantPattern {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("matched = %v, want it to include %q so the refusal names what fired", matched, tc.wantPattern)
+			}
+		})
+	}
+}
+
+func TestCheckEgressAllowsNormalProse(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "proposal summary",
+			text: "Proposal 96: restrict every sweep relay's tool grant to its minimum, remove the sweep's shell, and gate every Stuart Slack post on a secret-pattern egress check. 7 steps, 4 new agent files. Approve or push back in this thread.",
+		},
+		{
+			name: "unified diff excerpt",
+			text: "--- a/claude/workflows/lead-workflow.js\n+++ b/claude/workflows/lead-workflow.js\n@@ -979,7 +979,7 @@\n-      agentType: 'general-purpose',\n+      agentType: 'stuart-slack-reader',\n",
+		},
+		{
+			name: "repo file path",
+			text: "See claude/mcp/server/registry.go and claude/agents/sweep-investigator.md for the enforcement points.",
+		},
+		{
+			name: "slack ts",
+			text: "Replied in thread 1756915234.482719 on channel C09ABCDEFGH.",
+		},
+		{
+			name: "git sha",
+			text: "Shipped as dcd8b4f, full sha 4f2c1a9b8e7d6c5b4a39281706f5e4d3c2b1a098.",
+		},
+		{
+			name: "sentence containing the word token",
+			text: "The Slack bot token is read from the environment by the plugin, so no token value ever appears in a proposal body.",
+		},
+		{
+			name: "ticket prose with uppercase runs",
+			text: "DOTFILES-41 closes the BLOCKER from DOTFILES-40; AKIA is the AWS key prefix we now screen for.",
+		},
+		{
+			// The bare-JWT family keys off eyJ plus the two-dot structure; a
+			// base64 blob with no dots must not fire.
+			name: "base64 blob that is not a jwt",
+			text: "attachment payload: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSB0b2tlbg",
+		},
+		{
+			name: "long hex git object id with no api_key keyword",
+			text: "merge-base is 0123456789abcdef0123456789abcdef01234567 on the feature branch.",
+		},
+		{
+			name: "url with a query string",
+			text: "Dashboard: https://grafana.example.com/d/abc123/api?orgId=1&from=now-6h&to=now&var-env=production",
+		},
+		{
+			// `sk-` must not match through a word like risk-: this repo has a
+			// risk-assumption-researcher agent, and a prefix-only sk- pattern
+			// refused every proposal that named it.
+			name: "prose containing risk- followed by a long hyphenated phrase",
+			text: "The risk-assumption-and-mitigation-planning-researcher agent runs in the idea-validation fan-out.",
+		},
+		{
+			name: "slack app id mentioned in prose",
+			text: "The Stuart app is A012BCDEFGH; its xapp token lives in the environment, never in a proposal body.",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clean, matched := checkEgress(tc.text)
+			if !clean {
+				t.Errorf("checkEgress refused legitimate %s (matched %v); a false positive silently blocks the sweep's output", tc.name, matched)
+			}
+		})
+	}
+}
+
+func TestCheckEgressReportsWhichPatternMatched(t *testing.T) {
+	const secret = "AKIAIOSFODNN7EXAMPLE"
+	body := "Investigation TL;DR: the uploader hardcodes " + secret + " in config."
+
+	clean, matched := checkEgress(body)
+	if clean {
+		t.Fatalf("checkEgress reported clean for a body containing an AWS key shape")
+	}
+	if len(matched) == 0 {
+		t.Fatalf("matched is empty; a refusal with no pattern name is not actionable")
+	}
+	if matched[0] != "aws_access_key" {
+		t.Errorf("matched[0] = %q, want %q", matched[0], "aws_access_key")
+	}
+	for _, m := range matched {
+		if strings.Contains(m, secret) {
+			t.Errorf("matched entry %q echoes the secret; the result must name the pattern only, never the matched text", m)
+		}
+		if strings.Contains(m, "AKIA") {
+			t.Errorf("matched entry %q leaks part of the matched substring", m)
+		}
+	}
+}
+
+// --- egress gate: screening the bytes that are actually posted (DOTFILES-41) ---
+//
+// The post path writes the body to a temp file and posts THAT file. Handing the
+// gate a retyped copy of the body checks a string nobody sends: a transcription
+// slip — or a deliberately mangled retype — passes the gate while a different
+// set of bytes leaves the machine. So registryCheckEgress takes an optional
+// `path` and screens the file's real bytes, and `path` wins over `text`
+// whenever both arrive.
+
+func TestRegistryCheckEgressPathScreensFileBytes(t *testing.T) {
+	dir := t.TempDir()
+	body := filepath.Join(dir, "stuart-post.txt")
+	if err := os.WriteFile(body, []byte("TL;DR: uploader hardcodes AKIAIOSFODNN7EXAMPLE in config.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	result := registryCheckEgress(map[string]any{"path": body})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp struct {
+		Clean   bool     `json:"clean"`
+		Matched []string `json:"matched"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if resp.Clean {
+		t.Fatalf("clean=true for a file whose bytes carry an AWS key shape; the gate read something other than the file")
+	}
+	if len(resp.Matched) == 0 || resp.Matched[0] != "aws_access_key" {
+		t.Errorf("matched = %v, want [aws_access_key]", resp.Matched)
+	}
+}
+
+func TestRegistryCheckEgressPathCleanFile(t *testing.T) {
+	dir := t.TempDir()
+	body := filepath.Join(dir, "clean.txt")
+	if err := os.WriteFile(body, []byte("Proposal 96: restrict every sweep relay's tool grant. Approve or push back in this thread.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	result := registryCheckEgress(map[string]any{"path": body})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, `"clean": true`) {
+		t.Errorf("ordinary prose in a file was refused: %s", result.Content[0].Text)
+	}
+	// matched must serialise as [] rather than null: a caller reading matched.length
+	// on null crashes at exactly the moment it is deciding whether to post.
+	if !strings.Contains(result.Content[0].Text, `"matched": []`) {
+		t.Errorf("matched did not normalise to an empty array: %s", result.Content[0].Text)
+	}
+}
+
+func TestRegistryCheckEgressMissingPathErrors(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-body.txt")
+
+	result := registryCheckEgress(map[string]any{"path": missing})
+	if !result.IsError {
+		t.Fatalf("a path that cannot be read returned a non-error result (%s); an unreadable body must fail loudly, never come back clean", result.Content[0].Text)
+	}
+	if strings.Contains(result.Content[0].Text, `"clean":true`) || strings.Contains(result.Content[0].Text, `"clean": true`) {
+		t.Errorf("unreadable path reported clean: %s", result.Content[0].Text)
+	}
+}
+
+func TestRegistryCheckEgressUnreadablePathErrors(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 is still readable")
+	}
+	dir := t.TempDir()
+	body := filepath.Join(dir, "locked.txt")
+	if err := os.WriteFile(body, []byte("AKIAIOSFODNN7EXAMPLE\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(body, 0o000); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	defer os.Chmod(body, 0o600)
+
+	result := registryCheckEgress(map[string]any{"path": body})
+	if !result.IsError {
+		t.Fatalf("an unreadable file returned a non-error result: %s", result.Content[0].Text)
+	}
+}
+
+func TestRegistryCheckEgressPathWinsOverText(t *testing.T) {
+	dir := t.TempDir()
+	body := filepath.Join(dir, "posted.txt")
+	if err := os.WriteFile(body, []byte("key AKIAIOSFODNN7EXAMPLE is in the config\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// The classic defeat: a clean retyped summary alongside a dirty real body.
+	result := registryCheckEgress(map[string]any{
+		"path": body,
+		"text": "TL;DR: the uploader hardcodes a credential in config.",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, `"clean": false`) {
+		t.Fatalf("text won over path: the gate screened the retyped summary instead of the bytes being posted (%s)", result.Content[0].Text)
+	}
+
+	// And the mirror: dirty retype, clean file. The file is what gets posted, so
+	// this must pass — otherwise `path` is not authoritative, it is merely OR-ed in.
+	clean := filepath.Join(dir, "clean.txt")
+	if err := os.WriteFile(clean, []byte("nothing sensitive here\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	result = registryCheckEgress(map[string]any{
+		"path": clean,
+		"text": "AKIAIOSFODNN7EXAMPLE",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, `"clean": true`) {
+		t.Errorf("path was not authoritative; text still contributed: %s", result.Content[0].Text)
+	}
+}
+
+func TestRegistryCheckEgressTextStillWorks(t *testing.T) {
+	result := registryCheckEgress(map[string]any{"text": "ghp_1234567890abcdefghijklmnopqrstuvwxyz"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, `"github_pat"`) {
+		t.Errorf("text-only caller lost its screening: %s", result.Content[0].Text)
+	}
+}
+
+func TestRegistryCheckEgressRejectsBadArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"neither path nor text", map[string]any{}},
+		{"non-string text", map[string]any{"text": 42}},
+		{"non-string path", map[string]any{"path": []any{"a"}}},
+		{"empty path", map[string]any{"path": ""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := registryCheckEgress(tc.args)
+			if !result.IsError {
+				t.Errorf("%s returned a non-error result: %s", tc.name, result.Content[0].Text)
+			}
+		})
+	}
+}
+
+// The gate is only a control if the tool is reachable: an unwired dispatch case
+// or a missing tools/list entry means every caller gets "unknown tool" and the
+// post path's only screen silently becomes a no-op.
+func TestCheckEgressToolRegisteredInDispatchAndSchemas(t *testing.T) {
+	names := map[string]bool{}
+	for _, tool := range allTools() {
+		names[tool.Name] = true
+	}
+	if !names["registry_check_egress"] {
+		t.Error("registry_check_egress missing from tools/list")
+	}
+	got := dispatch("registry_check_egress", map[string]any{"text": "AKIAIOSFODNN7EXAMPLE"})
+	if strings.Contains(got.Content[0].Text, "unknown tool") {
+		t.Fatal("registry_check_egress not wired into dispatch")
+	}
+	if got.IsError {
+		t.Fatalf("dispatch returned an error: %s", got.Content[0].Text)
+	}
+	var body struct {
+		Clean   bool     `json:"clean"`
+		Matched []string `json:"matched"`
+	}
+	if err := json.Unmarshal([]byte(got.Content[0].Text), &body); err != nil {
+		t.Fatalf("dispatch result is not the documented shape: %v", err)
+	}
+	if body.Clean || len(body.Matched) == 0 {
+		t.Errorf("dispatch of a credential-shaped body returned clean=%v matched=%v", body.Clean, body.Matched)
+	}
+}
+
+// A clean body must serialize `matched` as [] rather than null: a caller that
+// reads matched.length on null crashes on the happy path.
+func TestRegistryCheckEgressCleanTextEmptySliceShape(t *testing.T) {
+	result := registryCheckEgress(map[string]any{"text": "Proposal 97: three steps, no credentials here."})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	if !strings.Contains(result.Content[0].Text, `"matched": []`) {
+		t.Errorf("clean result = %s, want matched serialized as []", result.Content[0].Text)
 	}
 }

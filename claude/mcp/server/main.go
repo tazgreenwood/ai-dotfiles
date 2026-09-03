@@ -170,6 +170,8 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryInferAuditType(args)
 	case "registry_is_fake_ticket":
 		return registryIsFakeTicket(args)
+	case "registry_check_egress":
+		return registryCheckEgress(args)
 	case "registry_union_files":
 		return registryUnionFiles(args)
 	case "registry_write_proposal":

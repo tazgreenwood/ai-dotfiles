@@ -804,7 +804,22 @@ async function discoverRepos(roots, registeredNames) {
   const res = await agent(discoverPrompt(discoverCommand(safeRoots)), {
     phase: 'Discover',
     label: `discover:${safeRoots.length}-roots`,
-    agentType: 'general-purpose',
+    // Bash-only relay, not the default full grant — see
+    // claude/agents/stuart-repo-scanner.md.
+    // DOTFILES-41 tried to make this shell-free by matching a sentinel file
+    // inside .git (`.git/HEAD`) instead of the .git directory, and measured the
+    // result against the declared roots. It came up SHORT, for a reason no
+    // pattern can fix: 3 of 59 repositories under these roots have a .git that
+    // is a FILE holding a `gitdir:` pointer (mapi's submodules), so no
+    // `.git/HEAD` path exists on disk to match; a 4th is lost because HEAD sits
+    // one segment deeper than the .git it proves, past this same -maxdepth. The
+    // sentinel scan returns 55 of 59, and two it drops (mapi-server, mapi-js)
+    // are live projects — a silently short list becomes a permanent wrong
+    // registration, since there is no registry_delete_project. So this stays a
+    // shell, narrowed to ONE agent whose whole grant is Bash. The full recorded
+    // commands and their literal output are in that agent file, under "Why this
+    // agent still holds Bash".
+    agentType: 'stuart-repo-scanner',
     schema: DISCOVER_SCHEMA,
     effort: 'low',
   })
@@ -939,6 +954,10 @@ if (ctx.mode === 'answers') {
   const res = await agent(answersPrompt(ctx, thread), {
     label: `read-answers:${thread}`,
     phase: 'Decisions',
+    // Read-only relay: slack_read_thread and nothing else. This site
+    // previously named no agentType, which meant the default full grant.
+    // See claude/agents/stuart-slack-reader.md.
+    agentType: 'stuart-slack-reader',
     effort: 'low',
     schema: ANSWERS_SCHEMA,
   })
@@ -976,7 +995,9 @@ if (runPoll) {
   const fetched = await agent(fetchPrompt(ctx), {
     phase: 'Poll',
     label: 'fetch-channel',
-    agentType: 'general-purpose',
+    // Read-only Slack transcription relay: slack_read_channel and nothing
+    // else. See claude/agents/stuart-slack-reader.md.
+    agentType: 'stuart-slack-reader',
     schema: FETCH_SCHEMA,
     effort: 'low',
   })
@@ -997,7 +1018,9 @@ if (runPoll) {
     const claimed = await agent(claimPrompt(ctx, candidates), {
       phase: 'Claim',
       label: `claim:${candidates.length}`,
-      agentType: 'general-purpose',
+      // Capture-only relay: registry_write_inbox and nothing else.
+      // See claude/agents/stuart-inbox-writer.md.
+      agentType: 'stuart-inbox-writer',
       schema: CLAIM_SCHEMA,
       effort: 'low',
     })
@@ -1049,7 +1072,9 @@ if (runDecisions) {
   const threads = await agent(threadPrompt(ctx), {
     phase: 'Decisions',
     label: 'read-pending-threads',
-    agentType: 'general-purpose',
+    // Same read-only relay as fetch-channel: registry_get_proposals plus
+    // slack_read_thread. See claude/agents/stuart-slack-reader.md.
+    agentType: 'stuart-slack-reader',
     schema: THREAD_SCHEMA,
     effort: 'low',
   })
@@ -1104,7 +1129,9 @@ if (runDecisions) {
       const recorded = await agent(recordPrompt(ctx, terminal), {
         phase: 'Record',
         label: `record:${terminal.length}`,
-        agentType: 'general-purpose',
+        // Decision-recording relay: registry_update_proposal and nothing
+        // else. See claude/agents/stuart-decision-recorder.md.
+        agentType: 'stuart-decision-recorder',
         schema: RECORD_SCHEMA,
         effort: 'low',
       })
