@@ -2161,3 +2161,49 @@ func TestCreateSchemaBackfillIsIdempotent(t *testing.T) {
 		t.Errorf("want exactly 1 backfilled row after 3 schema runs, got %d — backfill is not idempotent", len(items))
 	}
 }
+
+// TestUpdateInboxRefusesTriagedWithoutClass is the co-requirement the tool
+// description always claimed and nothing enforced. A class-less `triaged` row
+// is unresumable: the sweep's resume loop performs "the action for the class it
+// already carries", and there is no class, so the row is revisited forever.
+func TestUpdateInboxRefusesTriagedWithoutClass(t *testing.T) {
+	s := newTestStore(t)
+
+	id, err := s.CreateInbox(sampleInbox("1756700000.000300"))
+	if err != nil {
+		t.Fatalf("CreateInbox: %v", err)
+	}
+
+	if err := s.UpdateInbox(id, "triaged", "", "private-dotfiles", "", nil); err == nil {
+		t.Error("want refusal for status=triaged with no triage class, got nil")
+	} else if !strings.Contains(err.Error(), "requires a triage class") {
+		t.Errorf("want a co-requirement error naming the cause, got: %v", err)
+	}
+
+	// The row must be untouched by the refused write.
+	it, err := s.GetInbox(id)
+	if err != nil {
+		t.Fatalf("GetInbox: %v", err)
+	}
+	if it.Status != "new" || it.Triage != "" || it.Project != nil {
+		t.Errorf("refused update still mutated the row: status=%q triage=%q project=%v", it.Status, it.Triage, it.Project)
+	}
+
+	// With a class it succeeds.
+	if err := s.UpdateInbox(id, "triaged", "investigate", "private-dotfiles", "", nil); err != nil {
+		t.Fatalf("UpdateInbox with a class: %v", err)
+	}
+
+	// And a later status-only advance is still allowed, because the stored
+	// class satisfies the co-requirement.
+	if err := s.UpdateInbox(id, "triaged", "", "", "still triaged", nil); err != nil {
+		t.Errorf("status-only re-advance on an already-classified row should succeed, got: %v", err)
+	}
+
+	// A genuinely missing row must still say "not found", not the new error.
+	if err := s.UpdateInbox(999999, "triaged", "", "", "", nil); err == nil {
+		t.Error("want error for a missing row")
+	} else if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("want 'not found' for a missing row, got: %v", err)
+	}
+}

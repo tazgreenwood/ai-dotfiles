@@ -1387,6 +1387,19 @@ func (s *store) UpdateInbox(id int64, status, triage, project, note string, prop
 	if triage != "" && !inboxTriages[triage] {
 		return fmt.Errorf("invalid inbox triage %q (want investigate|plan|answer|ask|drop)", triage)
 	}
+	// A `triaged` row MUST carry a class. The tool description said so and
+	// nothing enforced it, so `status="triaged"` with no triage persisted a
+	// class-less row — and the resume loop ("perform the action for the class it
+	// already carries") then has no class to act on, so the row is revisited on
+	// every sweep forever. That is the same "a schema is a hint, not
+	// enforcement" defect fixed in CreateInbox one function above, left on the
+	// one path triage actually uses.
+	//
+	// The guard rides in the WHERE clause so the happy path stays a SINGLE
+	// statement — the reason UpdateInbox is not a read-modify-write is that a
+	// concurrent sweep reads this row. It reads as: if this update would leave
+	// status='triaged', the resulting triage must be non-NULL, whether it comes
+	// from this call or was already stored.
 	res, err := s.db.Exec(
 		`UPDATE inbox
 		    SET status      = COALESCE(?, status),
@@ -1395,10 +1408,12 @@ func (s *store) UpdateInbox(id int64, status, triage, project, note string, prop
 		        note        = COALESCE(?, note),
 		        proposal_id = COALESCE(?, proposal_id),
 		        updated_at  = ?
-		  WHERE id = ?`,
+		  WHERE id = ?
+		    AND (COALESCE(?, status) != 'triaged' OR COALESCE(?, triage) IS NOT NULL)`,
 		nullIfEmpty(status), nullIfEmpty(triage), nullIfEmpty(project),
 		nullIfEmpty(note), nullIfEmptyID(proposalID),
 		time.Now().UTC().Format(time.RFC3339), id,
+		nullIfEmpty(status), nullIfEmpty(triage),
 	)
 	if err != nil {
 		return err
@@ -1408,7 +1423,19 @@ func (s *store) UpdateInbox(id int64, status, triage, project, note string, prop
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("inbox item %d not found", id)
+		// Zero rows means either "no such row" or "the guard rejected it".
+		// Disambiguate with a read HERE and only here: this is the error path,
+		// not the path a concurrent sweep races on, so the extra query costs
+		// nothing that matters and a caller told "not found" about a row that
+		// exists would go looking in the wrong place.
+		var exists int
+		if err := s.db.QueryRow(`SELECT COUNT(1) FROM inbox WHERE id = ?`, id).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return fmt.Errorf("inbox item %d not found", id)
+		}
+		return fmt.Errorf("inbox item %d: status \"triaged\" requires a triage class (want investigate|plan|answer|ask|drop) — a triaged row with no class cannot be resumed", id)
 	}
 	return nil
 }
