@@ -180,7 +180,7 @@ Applies to **both PR mode and local mode**. No inline Bitbucket comments are pos
 ### Assemble the report data
 
 Gather everything produced by earlier steps:
-- **Bottom line** — one sentence: the verdict, plus the single most important thing to tell a coworker about this change. Written last, after the findings are grouped, so it actually reflects what's in them.
+- **Bottom line** — one sentence: the verdict, plus the single most important thing to tell a coworker about this change. Reuse the summary built in STEP 7 verbatim — it was already written after findings existed (STEP 5) and after the verdict was computed, so it already reflects what's in them. Do not re-derive a second version here; a second version risks diverging from the one just persisted to the registry.
 - **Verdict** — APPROVED / APPROVED WITH WARNINGS / REJECTED, from STEP 5 (graph mode: computed in code by the workflow; single-pass mode: returned by `@reviewer`)
 - **Why** — PR title + description (PR mode) or branch name + recent commit messages (local mode), from STEP 2
 - **Diff overview** — files changed, additions/deletions, from STEP 3
