@@ -81,7 +81,7 @@ Isolated-context multi-agent fan-out: 4 dimension reviewers in parallel, then on
 
 Call the `Workflow` tool with:
 - `scriptPath`: `~/.claude/workflows/code-review-workflow.js` (absolute — resolves regardless of invoking cwd, unlike a repo-relative path)
-- `args`: `{ diff, acceptance_spec, claude_md, project_name }` — `diff` from STEP 3, `acceptance_spec` is the PR title/description (PR mode) or branch name + recent commit messages (local mode), `claude_md` from STEP 4 (omit if unavailable), `project_name` detected the same way as STEP 7a (parse from `git remote get-url origin`; omit if it can't be determined)
+- `args`: `{ diff, acceptance_spec, claude_md, project_name }` — `diff` from STEP 3, `acceptance_spec` is the PR title/description (PR mode) or branch name + recent commit messages (local mode), `claude_md` from STEP 4 (omit if unavailable), `project_name` detected the same way as STEP 7 (parse from `git remote get-url origin`; omit if it can't be determined)
 
 `project_name` drives the workflow's own learnings loop: before reviewing, it fetches past `review_learning` events for the project (via `registry_get_events`) and feeds them to the dimension/synthesis agents as extra context; after synthesis, it asks an agent to decide whether this run surfaced a new generalizable pattern worth persisting, and if so writes it back via `registry_write_event(project_name, "review_learning", {pattern, signal, action})`. Both steps are skipped silently if `project_name` is omitted or the registry is unavailable.
 
@@ -147,9 +147,35 @@ Attach the captured output (real or mock) to the corresponding finding(s) from S
 
 ---
 
-## STEP 7: PRINT REPORT
+## STEP 7: SAVE TO REGISTRY
 
-Applies to **both PR mode and local mode** — this is the final action of the skill. No inline Bitbucket comments are posted by this skill (that behavior belongs to `pr-respond.md`, not `code-review.md`).
+Always attempt this call immediately after STEP 6 — before the report is printed. Do not defer it and do not treat it as optional busywork after the "real" output; the registry entry **is** part of the skill's output, not a courtesy afterthought.
+
+Build a one-paragraph summary here (verdict + the single most important thing to tell a coworker about this change) — the same content STEP 8's Bottom line will use, generated now since this step runs before the report is assembled.
+
+Call `registry_write_event(project_name, "pr_review", data)` with:
+```
+data: {
+  summary: [one-paragraph overview built above],
+  verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED],
+  why: [PR title+description or branch+commits, from STEP 2],
+  diff_overview: [files changed, additions/deletions, from STEP 3],
+  execution_mode: [real / mock, from STEP 6],
+  execution_log: [captured stdout/stderr or mock invocation output, from STEP 6],
+  suggestions: [structured findings array from STEP 5 — pass the objects as-is, one per finding: { severity, title, file, line, whats_wrong, why_it_matters, evidence, suggested_fix, confidence, demoted_from } — not a prose summary]
+}
+```
+`project_name` is detected the same way as `/plan` (parse from `git remote get-url origin`).
+
+Only skip this call if `registry_write_event` itself errors (e.g. registry MCP unavailable) — never skip it silently. When it is skipped, record why (the error message or "registry unavailable") so STEP 9's CONFIRM output can state it plainly instead of pretending the save never happened.
+
+This makes the review viewable later at `/projects/{name}/reviews` in registry-ui, with a click-through detail page per review at `/projects/{name}/reviews/{id}`.
+
+---
+
+## STEP 8: PRINT REPORT
+
+Applies to **both PR mode and local mode**. No inline Bitbucket comments are posted by this skill (that behavior belongs to `pr-respond.md`, not `code-review.md`).
 
 ### Assemble the report data
 
@@ -195,27 +221,7 @@ If `open` is unavailable (non-macOS), print the file path to the user instead.
 
 ---
 
-## STEP 7a: SAVE TO REGISTRY
-
-Call `registry_write_event(project_name, "pr_review", data)` with:
-```
-data: {
-  summary: [one-paragraph overview from STEP 7],
-  verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED],
-  why: [PR title+description or branch+commits, from STEP 2],
-  diff_overview: [files changed, additions/deletions, from STEP 3],
-  execution_mode: [real / mock, from STEP 6],
-  execution_log: [captured stdout/stderr or mock invocation output, from STEP 6],
-  suggestions: [structured findings array from STEP 5 — pass the objects as-is, one per finding: { severity, title, file, line, whats_wrong, why_it_matters, evidence, suggested_fix, confidence, demoted_from } — not a prose summary]
-}
-```
-`project_name` is detected the same way as `/plan` (parse from `git remote get-url origin`). If registry MCP is unavailable, skip this step silently — do not block the report on it.
-
-This makes the review viewable later at `/projects/{name}/reviews` in registry-ui, with a click-through detail page per review at `/projects/{name}/reviews/{id}`.
-
----
-
-## STEP 8: CONFIRM
+## STEP 9: CONFIRM
 
 **PR mode:**
 ```
@@ -224,6 +230,7 @@ PR: [pr_url]
 Author: [author]
 Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
 Findings: [N] blocker, [N] major, [N] minor, [N] nit, [N] question
+Saved to registry: [yes / no — reason, from STEP 7]
 Report: [path to HTML file] (opened in browser)
 ```
 
@@ -234,6 +241,7 @@ Branch: [branch_name] → [base_branch]
 Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
 Findings: [N] blocker, [N] major, [N] minor, [N] nit, [N] question
 Execution: [real test run / synthesized mock — see report]
+Saved to registry: [yes / no — reason, from STEP 7]
 Report: [path to HTML file] (opened in browser)
 ```
 
