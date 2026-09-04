@@ -191,6 +191,136 @@ func TestRegistryUpdateStep_UpdatesStatus(t *testing.T) {
 	}
 }
 
+func TestRegistryUpdateStep_AcceptsInReview(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	plan := map[string]any{
+		"ticket":  "TEST-2",
+		"summary": "test plan",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "in_progress"},
+			map[string]any{"title": "step two", "status": "pending"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-2", "data": plan})
+
+	result := registryUpdateStep(map[string]any{
+		"name":       "myproject",
+		"ticket":     "TEST-2",
+		"step_index": float64(0),
+		"status":     "in_review",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	got := registryGetPlan(map[string]any{"name": "myproject", "ticket": "TEST-2"})
+	var data map[string]any
+	json.Unmarshal([]byte(got.Content[0].Text), &data)
+	steps := data["plan_steps"].([]any)
+	s0 := steps[0].(map[string]any)
+	s1 := steps[1].(map[string]any)
+	if s0["status"] != "in_review" {
+		t.Errorf("want step 0 status=in_review, got %v", s0["status"])
+	}
+	if s1["status"] != "pending" {
+		t.Errorf("want step 1 status=pending, got %v", s1["status"])
+	}
+}
+
+// planIsShipped (via registry_index's active_plan selection) must not consider
+// a plan shipped just because every step finished — it is only actually
+// shipped once /ship has written a matching audit entry. Otherwise a plan
+// vanishes from the index (and from routing) the instant build finishes,
+// before /ship has even run.
+func TestRegistryIndex_AllStepsDoneButNoAuditEntry_StillActive(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	registryInitProject(map[string]any{"name": "myproject"})
+	plan := map[string]any{
+		"ticket":  "TEST-4",
+		"summary": "finished build, not shipped yet",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "done"},
+			map[string]any{"title": "step two", "status": "done"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-4", "data": plan})
+
+	result := registryIndex(map[string]any{})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp struct {
+		Projects []projectIndexEntry `json:"projects"`
+	}
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+
+	var found *projectIndexEntry
+	for i := range resp.Projects {
+		if resp.Projects[i].Name == "myproject" {
+			found = &resp.Projects[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("myproject not present in index")
+	}
+	if found.ActivePlan == nil {
+		t.Fatal("want active_plan non-nil: all steps done but no audit entry exists yet, so the plan is not shipped")
+	}
+	if found.ActivePlan.Ticket != "TEST-4" {
+		t.Errorf("active_plan.ticket: want TEST-4, got %q", found.ActivePlan.Ticket)
+	}
+}
+
+func TestRegistryIndex_AllStepsDoneWithMatchingAuditEntry_Shipped(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	registryInitProject(map[string]any{"name": "myproject"})
+	plan := map[string]any{
+		"ticket":  "TEST-5",
+		"summary": "finished and shipped",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "done"},
+			map[string]any{"title": "step two", "status": "done"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-5", "data": plan})
+	registryWriteAudit(map[string]any{
+		"name": "myproject",
+		"entry": map[string]any{
+			"ticket":  "TEST-5",
+			"type":    "feature",
+			"summary": "shipped it",
+		},
+	})
+
+	result := registryIndex(map[string]any{})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp struct {
+		Projects []projectIndexEntry `json:"projects"`
+	}
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+
+	var found *projectIndexEntry
+	for i := range resp.Projects {
+		if resp.Projects[i].Name == "myproject" {
+			found = &resp.Projects[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("myproject not present in index")
+	}
+	if found.ActivePlan != nil {
+		t.Errorf("want active_plan nil: matching audit entry exists so the plan is shipped, got %+v", found.ActivePlan)
+	}
+}
+
 func TestRegistryWritePlan_InvalidAsyncGrouping_RejectedAndNotPersisted(t *testing.T) {
 	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
