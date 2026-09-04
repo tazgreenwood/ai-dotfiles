@@ -228,6 +228,43 @@ registry_write_deploy_check(app, {app, env, cluster, profile, status, summary, d
 
 If this call fails, warn but do not block — print a warning line and continue to the final report, do not stop the skill.
 
+### STEP 4c: Auto-flip pr_ready → done on a passing check
+
+Only run this when the mapped `status` from STEP 4b is `pass` (✅ ALL CLEAR or 🔧 pre-existing errors cleared). **Never** run it for `fail` (❌ ISSUES FOUND) or `pending` (⏳ DEPLOYING).
+
+1. Call `registry_list_plans(APP)`.
+2. For each plan with `status == "active"`:
+   - Call `registry_get_plan(APP, ticket)`.
+   - Check whether every entry in `plan_steps[]` has `status == "done"`. If not, skip this plan.
+   - Call `registry_get_audit(APP)` and check whether any entry's `ticket` matches this plan's ticket. If a match exists, skip this plan (already shipped/audited).
+   - A plan with all steps done and no matching audit entry is a **pr_ready candidate**.
+3. Based on the candidate count:
+   - **0 candidates**: skip silently — say nothing about this step in the report.
+   - **1 candidate**: auto-write the audit entry that flips it to done:
+     ```
+     registry_write_audit(APP, {
+       ticket: plan.ticket,
+       type: registry_infer_audit_type(plan.branch).type,   // plan.branch may be null — defaults to "chore"
+       summary: plan.summary,
+       impact: "<the STEP 4 one-line result summary>",
+       branch: plan.branch,                                  // nullable — pass through as-is
+       pr_url: plan.pr_url,                                  // nullable — never assume a PR exists
+       files_changed: registry_union_files(plan.plan_steps[].files).files,
+       story_points: null,
+       labels: ["deploy-check-verified"],
+       ac_coverage: "{done_count}/{total_count}",             // e.g. "5/5" — all steps done
+       date: "<today, ISO 8601 YYYY-MM-DD>"
+     })
+     ```
+     Report the flip in the STEP 4 output, e.g.:
+     ```
+     🔀  {ticket} flipped pr_ready → done (deploy-check verified)
+     ```
+   - **>1 candidates**: do not guess. List them all in the STEP 4 report (ticket + summary) and ask the user which one to flip, e.g.:
+     > "Multiple pr_ready plans found for {APP}: {ticket1} ({summary1}), {ticket2} ({summary2}). Which one should I mark done?"
+
+If `registry_list_plans`, `registry_get_plan`, or `registry_get_audit` fails for this step, warn but do not block — print a warning line and continue, do not stop the skill.
+
 ## SELF-IMPROVEMENT
 
 End of run: save any new resource/command via `registry_set(project_name, "resources.{category}.{key}", value)` (categories: grafana/slack/aws/bitbucket/confluence/jira/scripts), fix wrong project metadata the same way (e.g. `registry_set(project_name, "deploy.cluster", correct_value)`), and make a targeted edit to `claude/skills/deploy-check.md` if a better approach was found. Skip if nothing new was learned.
