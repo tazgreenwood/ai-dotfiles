@@ -232,16 +232,13 @@ If this call fails, warn but do not block — print a warning line and continue 
 
 Only run this when the mapped `status` from STEP 4b is `pass` (✅ ALL CLEAR or 🔧 pre-existing errors cleared). **Never** run it for `fail` (❌ ISSUES FOUND) or `pending` (⏳ DEPLOYING).
 
-**Correlation scope — narrow to the project's newest active plan.** To avoid flipping a stale, unrelated `pr_ready` ticket that just happens to sit in the same project, the candidate pool is **not** every active plan for APP — it is only the single plan `registry_index()` reports as APP's `active_plan` (documented as "the newest non-shipped plan"), matching the existing one-active-plan-per-project convention in CLAUDE.md.
+**Candidate pool: every active plan for APP, not just the newest.** `registry_index()`'s `active_plan` is "the newest non-shipped plan," which is not the same thing as "the pr_ready plan" — a project can have more than one plan with `status == "active"` at once (this repo's own registry has DOTFILES-43 and DOTFILES-45 active simultaneously), so narrowing to the single newest one can silently and permanently miss an older plan that's genuinely pr_ready. Scan all of them.
 
-1. Call `registry_index()` and find the entry where `name == APP`. Read its `active_plan` field (`{ticket, summary}` or `null`).
-   - If `registry_index()` itself fails or is unavailable, **fall back** to the old behavior: call `registry_list_plans(APP)` and scan every plan with `status == "active"` as candidates (step 2 below applies to each). Explicitly note in the STEP 4 report: `registry_index unavailable, scanned all active plans - verify the flipped ticket is correct`.
-   - If `active_plan` is `null`, there is no candidate — skip silently, say nothing about this step in the report.
-   - Otherwise the candidate pool is that one ticket only (unless the fallback above is in effect).
+1. Call `registry_list_plans(APP)`. The candidate pool is every plan with `status == "active"`.
 2. Call `registry_get_audit(APP)` **once**, before evaluating any candidate, and reuse the returned `entries` for every candidate's ticket-match check below (do not re-call it per plan).
 3. For each candidate ticket in the pool:
    - Call `registry_get_plan(APP, ticket)`. If this call fails, skip only this plan, note `{ticket}: skipped due to registry error - not evaluated` in the STEP 4 report, and continue to the next candidate (do not abort STEP 4c).
-   - Check whether every entry in `plan_steps[]` has `status == "done"`. If not, skip this plan (not pr_ready).
+   - Check that `plan_steps[]` is non-empty AND every entry has `status == "done"`. An empty `plan_steps[]` does **not** count as done — skip this plan (not pr_ready).
    - Check whether any entry in the `registry_get_audit(APP)` results from step 2 has a matching `ticket`. If a match exists, skip this plan (already shipped/audited). If the step-2 `registry_get_audit` call itself failed, skip only this plan, note `{ticket}: skipped due to registry error - not evaluated`, and continue.
    - A plan with all steps done and no matching audit entry is a **pr_ready candidate**.
 4. Based on the candidate count:
@@ -262,15 +259,15 @@ Only run this when the mapped `status` from STEP 4b is `pass` (✅ ALL CLEAR or 
        date: "<today, ISO 8601 YYYY-MM-DD>"
      })
      ```
-     Report the flip prominently in the STEP 4 output so a wrong flip is immediately visible, e.g.:
+     **Only report a flip if this call actually returns `{ok: true}`.** If `registry_write_audit` fails or returns `ok: false`, do not print the `🔀` success line — print a distinct warning instead (e.g. `⚠️  {ticket} looked pr_ready but the audit write failed - not flipped, retry next check`) so a failed write is never mistaken for a real one. On success, report the flip prominently in the STEP 4 output so a wrong flip is immediately visible:
      ```
      🔀  {ticket} flipped pr_ready → done (deploy-check verified)
      ```
-   - **>1 candidates** (only possible via the `registry_index()`-unavailable fallback, since the normal path yields at most one): do not guess. List them all in the STEP 4 report (ticket + summary) and ask the user which one to flip, e.g.:
+   - **>1 candidates**: do not guess. List them all in the STEP 4 report (ticket + summary) and ask the user which one to flip, e.g.:
      > "Multiple pr_ready plans found for {APP}: {ticket1} ({summary1}), {ticket2} ({summary2}). Which one should I mark done?"
-     This is a question only — it does **not** itself write anything. Once Taz answers with a ticket key (in a later turn of the same conversation), call `registry_get_plan(APP, ticket)` for the chosen ticket and then `registry_write_audit(APP, entry)` using the exact same field-construction as the 1-candidate path above (type/summary/impact/branch/pr_url/files_changed/story_points/labels/ac_coverage/date), then report the flip the same way (`🔀  {ticket} flipped pr_ready → done (deploy-check verified)`). Do not consider STEP 4c complete for the >1-candidate path until this follow-up write has happened.
+     This is a question only — it does **not** itself write anything. Once Taz answers with a ticket key (in a later turn of the same conversation): re-run the checks from step 3 for that ticket only (`registry_get_plan` + a fresh `registry_get_audit(APP)` match check) to confirm it's still all-done and still unaudited — something else may have shipped it in the interim — then call `registry_write_audit(APP, entry)` using the exact same field-construction as the 1-candidate path above, guarded by the same write-success check, and report the same way. Do not consider STEP 4c complete for the >1-candidate path until this follow-up write has happened (or been correctly skipped because the re-check found it no longer qualifies).
 
-If the very first call (`registry_index()`, or `registry_list_plans(APP)` in the fallback path) fails outright, warn but do not block — print a warning line and continue to the final report, do not stop the skill. A failure on a later, per-plan call (`registry_get_plan` or `registry_get_audit`) skips only that plan per step 3 above, not the whole of STEP 4c.
+If the very first call (`registry_list_plans(APP)`) fails outright, warn but do not block — print a warning line and continue to the final report, do not stop the skill. A failure on a later, per-plan call (`registry_get_plan` or `registry_get_audit`) skips only that plan per step 3 above, not the whole of STEP 4c.
 
 > **Why `plan.branch`/`plan.pr_url`/`plan.summary`/`plan_steps[].files` are safe to read here:** these are guaranteed fields on every plan object, written by `plan.md`'s own mission-state schema per CLAUDE.md's `registry_write_plan` section — not a new assumption introduced by this step.
 
