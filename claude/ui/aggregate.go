@@ -157,18 +157,20 @@ func AggregatePlanKanban(doneCutoff time.Time) (cards []PlanCard, hiddenOlder in
 		if err != nil {
 			continue
 		}
+		// One audit read per project, reused across every plan below —
+		// not one read per plan (see AuditTicketSet). An audit-lookup error
+		// is treated as "no audit entries" (fails toward pr_ready, never
+		// toward done, for every plan in this project) rather than dropping
+		// the project's cards or surfacing the error — this is a read-only
+		// dashboard, not the registry_index() routing path store.go's
+		// planIsShipped guards.
+		auditTickets, _ := AuditTicketSet(p.Name)
 		for _, m := range metas {
 			plan, err := ReadPlan(p.Name, m.Ticket)
 			if err != nil {
 				continue
 			}
-			// An audit-lookup error is treated as "no audit entry" (fails
-			// toward pr_ready, never toward done) rather than dropping the
-			// card or surfacing the error — this is a read-only dashboard,
-			// not the registry_index() routing path store.go's
-			// planIsShipped guards.
-			hasAudit, _ := HasAuditEntry(p.Name, m.Ticket)
-			status := derivePlanStatus(plan.PlanSteps, hasAudit)
+			status := derivePlanStatus(plan.PlanSteps, auditTickets[m.Ticket])
 			doneSteps := 0
 			var latestDoneAt string
 			var latestDoneAtParsed time.Time

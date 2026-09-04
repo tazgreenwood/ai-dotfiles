@@ -925,55 +925,95 @@ type projectIndexEntry struct {
 	ActivePlan *activePlanRef `json:"active_plan"`
 }
 
-// planIsShipped reports whether every step of a plan is done AND an audit
-// entry exists for the plan's ticket. A plan with no steps is not shipped —
-// an empty plan is unfinished, not complete. All-steps-done alone used to be
-// sufficient, which meant a plan dropped out of registry_index()'s
-// active_plan the instant /build finished, before /ship had even run —
-// there's a real gap between build-complete and actually-shipped (audit
-// write) that the derived pr_ready status now names. Errors from the audit
-// lookup are surfaced rather than swallowed into "not shipped", since a
-// swallowed store error would silently keep resurrecting a plan that really
-// did ship.
-func planIsShipped(s *store, project, ticket string, data map[string]any) (bool, error) {
+// planIsShipped reports whether every step of a plan is done AND hasAudit is
+// true (an audit entry exists for the plan's ticket). A plan with no steps is
+// not shipped — an empty plan is unfinished, not complete. All-steps-done
+// alone used to be sufficient, which meant a plan dropped out of
+// registry_index()'s active_plan the instant /build finished, before /ship
+// had even run — there's a real gap between build-complete and
+// actually-shipped (audit write) that the derived pr_ready status now names.
+//
+// Takes hasAudit as a plain bool rather than looking it up itself: the
+// lookup is a per-project (or per-index-call) audit scan, and doing it once
+// per candidate plan here previously turned registry_index() and
+// registry_list_plans into an audit-log scan per plan row (see
+// auditTicketsByProject / auditTicketSet, which callers use to batch this
+// once instead).
+func planIsShipped(hasAudit bool, data map[string]any) bool {
 	steps, ok := data["plan_steps"].([]any)
 	if !ok || len(steps) == 0 {
-		return false, nil
+		return false
 	}
 	for _, raw := range steps {
 		step, ok := raw.(map[string]any)
 		if !ok || step["status"] != "done" {
-			return false, nil
+			return false
 		}
 	}
-	return s.hasAuditEntry(project, ticket)
+	return hasAudit
 }
 
-// hasAuditEntry reports whether an audit entry exists for the given ticket
-// within the project's audit log. Reuses GetAudit (the same query backing
-// registry_get_audit) rather than a bespoke SQL query — the audit log's
-// ticket field lives inside the JSON blob, not a column, so filtering
-// happens in Go after the fetch.
-func (s *store) hasAuditEntry(project, ticket string) (bool, error) {
-	if ticket == "" {
-		return false, nil
+// auditTicketsByProject returns, for every project, the set of tickets that
+// have at least one audit entry — one query total across all projects,
+// rather than one query per plan. Backs ListIndex, which checks
+// shipped-status for a variable, potentially large number of plan rows in a
+// single call.
+func (s *store) auditTicketsByProject() (map[string]map[string]bool, error) {
+	rows, err := s.db.Query(`SELECT project, data FROM audit`)
+	if err != nil {
+		return nil, err
 	}
+	defer rows.Close()
+
+	result := map[string]map[string]bool{}
+	for rows.Next() {
+		var project, raw string
+		if err := rows.Scan(&project, &raw); err != nil {
+			return nil, err
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			return nil, err
+		}
+		ticket, _ := entry["ticket"].(string)
+		if ticket == "" {
+			continue
+		}
+		if result[project] == nil {
+			result[project] = map[string]bool{}
+		}
+		result[project][ticket] = true
+	}
+	return result, rows.Err()
+}
+
+// auditTicketSet returns the set of tickets with an audit entry for a single
+// project — one query for the whole call, reused across every plan checked
+// in that call, rather than one query per plan. Backs registry_list_plans.
+func (s *store) auditTicketSet(project string) (map[string]bool, error) {
 	entries, _, err := s.GetAudit(project, "", "")
 	if err != nil {
-		return false, err
+		return nil, err
 	}
+	set := map[string]bool{}
 	for _, entry := range entries {
-		if t, _ := entry["ticket"].(string); t == ticket {
-			return true, nil
+		if t, _ := entry["ticket"].(string); t != "" {
+			set[t] = true
 		}
 	}
-	return false, nil
+	return set, nil
 }
 
 // ListIndex returns one row per project, newest-non-shipped plan included.
-// Two queries total regardless of project count — deliberately not N+1, since
-// this runs on every routed request.
+// Three queries total regardless of project or plan count — one for
+// projects, one for all plans, one for all audit tickets (auditTicketsByProject)
+// — deliberately not N+1, since this runs on every routed request.
 func (s *store) ListIndex() ([]projectIndexEntry, error) {
+	auditTickets, err := s.auditTicketsByProject()
+	if err != nil {
+		return nil, fmt.Errorf("audit tickets: %w", err)
+	}
+
 	projRows, err := s.db.Query(`SELECT name, data FROM projects ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -1035,11 +1075,7 @@ func (s *store) ListIndex() ([]projectIndexEntry, error) {
 		if t, _ := data["ticket"].(string); t != "" {
 			ticket = t
 		}
-		shipped, err := planIsShipped(s, project, ticket, data)
-		if err != nil {
-			return nil, fmt.Errorf("plan %s/%s shipped check: %w", project, ticket, err)
-		}
-		if shipped {
+		if planIsShipped(auditTickets[project][ticket], data) {
 			continue
 		}
 		summary, _ := data["summary"].(string)

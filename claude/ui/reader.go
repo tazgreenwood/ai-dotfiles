@@ -495,24 +495,22 @@ func ReadAudit(name, since, until string) ([]AuditEntry, error) {
 	return entries, nil
 }
 
-// HasAuditEntry reports whether an audit entry exists for ticket within
-// project's audit log. Mirrors claude/mcp/server/store.go's hasAuditEntry —
-// same "reuse the existing read, filter in Go" approach, since the audit
-// log's ticket field lives inside the JSON blob, not a column — but this
-// copy lives here because registry-ui is a separate Go module with its own
-// reader, not a shared package.
-func HasAuditEntry(name, ticket string) (bool, error) {
-	if ticket == "" {
-		return false, nil
-	}
+// AuditTicketSet returns the set of tickets with an audit entry for a
+// project — one read for the whole call, reused across every plan checked
+// in that call, rather than one read per plan. A plan-per-card audit lookup
+// inside a per-project loop over N plans previously meant N audit-log reads
+// per project (one per plan), which for a project with a long shipped-plan
+// history meant one full audit scan per plan on every dashboard load.
+func AuditTicketSet(name string) (map[string]bool, error) {
 	entries, err := ReadAudit(name, "", "")
 	if err != nil {
-		return false, err
+		return nil, err
 	}
+	set := map[string]bool{}
 	for _, e := range entries {
-		if e.Ticket == ticket {
-			return true, nil
+		if e.Ticket != "" {
+			set[e.Ticket] = true
 		}
 	}
-	return false, nil
+	return set, nil
 }

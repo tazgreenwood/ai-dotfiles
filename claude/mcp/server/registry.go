@@ -430,15 +430,15 @@ func registryListPlans(args map[string]any) ToolResult {
 	if err != nil {
 		return toolOK(map[string]any{"plans": []any{}})
 	}
+	auditTickets, err := s.auditTicketSet(name)
+	if err != nil {
+		return toolErr(err.Error())
+	}
 	var plans []map[string]any
 	for _, data := range rows {
 		ticket, _ := data["ticket"].(string)
 		status := "active"
-		shipped, err := planIsShipped(s, name, ticket, data)
-		if err != nil {
-			return toolErr(err.Error())
-		}
-		if shipped {
+		if planIsShipped(auditTickets[ticket], data) {
 			status = "shipped"
 		}
 		plans = append(plans, map[string]any{
