@@ -925,20 +925,49 @@ type projectIndexEntry struct {
 	ActivePlan *activePlanRef `json:"active_plan"`
 }
 
-// planIsShipped reports whether every step of a plan is done. A plan with no
-// steps is not shipped — an empty plan is unfinished, not complete.
-func planIsShipped(data map[string]any) bool {
+// planIsShipped reports whether every step of a plan is done AND an audit
+// entry exists for the plan's ticket. A plan with no steps is not shipped —
+// an empty plan is unfinished, not complete. All-steps-done alone used to be
+// sufficient, which meant a plan dropped out of registry_index()'s
+// active_plan the instant /build finished, before /ship had even run —
+// there's a real gap between build-complete and actually-shipped (audit
+// write) that the derived pr_ready status now names. Errors from the audit
+// lookup are surfaced rather than swallowed into "not shipped", since a
+// swallowed store error would silently keep resurrecting a plan that really
+// did ship.
+func planIsShipped(s *store, project, ticket string, data map[string]any) (bool, error) {
 	steps, ok := data["plan_steps"].([]any)
 	if !ok || len(steps) == 0 {
-		return false
+		return false, nil
 	}
 	for _, raw := range steps {
 		step, ok := raw.(map[string]any)
 		if !ok || step["status"] != "done" {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return s.hasAuditEntry(project, ticket)
+}
+
+// hasAuditEntry reports whether an audit entry exists for the given ticket
+// within the project's audit log. Reuses GetAudit (the same query backing
+// registry_get_audit) rather than a bespoke SQL query — the audit log's
+// ticket field lives inside the JSON blob, not a column, so filtering
+// happens in Go after the fetch.
+func (s *store) hasAuditEntry(project, ticket string) (bool, error) {
+	if ticket == "" {
+		return false, nil
+	}
+	entries, _, err := s.GetAudit(project, "", "")
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if t, _ := entry["ticket"].(string); t == ticket {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ListIndex returns one row per project, newest-non-shipped plan included.
@@ -1003,11 +1032,15 @@ func (s *store) ListIndex() ([]projectIndexEntry, error) {
 		if err := json.Unmarshal([]byte(raw), &data); err != nil {
 			return nil, fmt.Errorf("plan %s/%s data: %w", project, ticket, err)
 		}
-		if planIsShipped(data) {
-			continue
-		}
 		if t, _ := data["ticket"].(string); t != "" {
 			ticket = t
+		}
+		shipped, err := planIsShipped(s, project, ticket, data)
+		if err != nil {
+			return nil, fmt.Errorf("plan %s/%s shipped check: %w", project, ticket, err)
+		}
+		if shipped {
+			continue
 		}
 		summary, _ := data["summary"].(string)
 		entries[idx].ActivePlan = &activePlanRef{Ticket: ticket, Summary: summary}
