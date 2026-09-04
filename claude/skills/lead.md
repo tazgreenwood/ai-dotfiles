@@ -78,6 +78,20 @@ If yes, hand off to `ticket.md`, pre-filled from what you just wrote.
 
 Run `ticket.md` directly. Nothing else.
 
+### Deploy check — Taz asks to check/verify a deploy without naming `/deploy-check`
+
+Phrases like "check the deploy for X", "did the X deploy go ok", "verify X deployed cleanly" — without Taz naming `/deploy-check` explicitly. Dispatch straight into `deploy-check.md`'s flow (STEP 1 onward) for the project routed in STEP 1 above — not through `plan.md`/`build.md`/`ship.md`, and not gated on a ticket key existing. Pass the routed project's name as the app; no other args are required.
+
+Let `deploy-check.md` run its full flow, including its own STEP 4c auto-flip logic (pr_ready → done on a passing check). Map its STEP 4 overall result to what you report back to Taz:
+
+| deploy-check STEP 4 result | Report to Taz |
+|---|---|
+| ✅ ALL CLEAR / 🔧 pre-existing errors cleared | **GO** |
+| ❌ ISSUES FOUND | **NO-GO** |
+| ⏳ DEPLOYING (pending) | **PENDING** — tell Taz to recheck shortly |
+
+Report in this chat: the GO/NO-GO/PENDING verdict, the deploy-check summary, and whether a plan got flipped pr_ready → done (from STEP 4c) — including the multiple-candidates case, where you relay `deploy-check.md`'s question to Taz verbatim instead of guessing. Slack-ping per the usual report-back rule above.
+
 ---
 
 ## SELF-IMPROVEMENT
