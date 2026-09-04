@@ -260,6 +260,11 @@ func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
 			{"step": 2, "title": "b", "status": "in_progress"},
 		},
 	})
+	// DOTFILES-3's audit entry is what distinguishes it from a merely
+	// all-done plan (which would be pr_ready, not done — DOTFILES-44).
+	seedAudit(t, dir, "alpha", []map[string]any{
+		{"ticket": "DOTFILES-3", "date": "2026-08-01"},
+	})
 
 	cards, _ := AggregatePlanKanban(time.Now().AddDate(0, 0, -14))
 
@@ -321,6 +326,13 @@ func TestAggregatePlanKanban_DoneCutoff_ExcludesFullyDonePlan(t *testing.T) {
 			{"step": 1, "title": "a", "status": "done", "done_at": oldDoneAt},
 			{"step": 2, "title": "b", "status": "done", "done_at": recentDoneAt},
 		},
+	})
+	// Both plans need audit entries to be "done" (rather than pr_ready)
+	// so the cutoff logic under test — which only ever applies to "done"
+	// plans — actually exercises them (DOTFILES-44).
+	seedAudit(t, dir, "alpha", []map[string]any{
+		{"ticket": "DOTFILES-OLD", "date": "2026-01-01"},
+		{"ticket": "DOTFILES-NEW", "date": "2026-08-01"},
 	})
 
 	cutoff := now.AddDate(0, 0, -14)

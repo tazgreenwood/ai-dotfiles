@@ -562,6 +562,14 @@ func TestListIndex_NoPlansAndAllShippedReportNoActivePlan(t *testing.T) {
 		planWith("SHIP-1", "done work", "done"),
 		planWith("SHIP-2", "also done", "done", "done"),
 	})
+	// All steps done is necessary but not sufficient: a plan is only actually
+	// shipped once /ship has written a matching audit entry.
+	if _, err := s.WriteAudit("allshipped", map[string]any{"ticket": "SHIP-1", "type": "feature"}); err != nil {
+		t.Fatalf("WriteAudit SHIP-1: %v", err)
+	}
+	if _, err := s.WriteAudit("allshipped", map[string]any{"ticket": "SHIP-2", "type": "feature"}); err != nil {
+		t.Fatalf("WriteAudit SHIP-2: %v", err)
+	}
 
 	rows, err := s.ListIndex()
 	if err != nil {
