@@ -230,7 +230,7 @@ PR: [pr_url]
 Author: [author]
 Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
 Findings: [N] blocker, [N] major, [N] minor, [N] nit, [N] question
-Saved to registry: [yes / no — reason, from STEP 7]
+Saved to registry: yes (or: no — <reason from STEP 7>)
 Report: [path to HTML file] (opened in browser)
 ```
 
@@ -241,7 +241,7 @@ Branch: [branch_name] → [base_branch]
 Verdict: [APPROVED / APPROVED WITH WARNINGS / REJECTED]
 Findings: [N] blocker, [N] major, [N] minor, [N] nit, [N] question
 Execution: [real test run / synthesized mock — see report]
-Saved to registry: [yes / no — reason, from STEP 7]
+Saved to registry: yes (or: no — <reason from STEP 7>)
 Report: [path to HTML file] (opened in browser)
 ```
 
