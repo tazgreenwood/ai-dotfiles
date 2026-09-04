@@ -40,7 +40,7 @@ Call the `Workflow` tool with:
 
 Where `plan_data` is the full mission state object (same shape `/plan` wrote), `claude_md` is the CLAUDE.md contents read in STEP 1, and the rest are pulled from the same mission state for convenience.
 
-The script partitions pending steps into sync/async runs, spawns `developer`/`qa` subagents per step with up to 3 retries each, commits per step, and for async runs creates isolated git worktrees, runs them concurrently, then merges back into the feature branch sequentially in step-index order. All registry step-status updates (`in_progress` / `done` / `blocked`) happen inside the spawned subagents, not in this skill.
+The script partitions pending steps into sync/async runs, spawns `developer`/`qa` subagents per step with up to 3 retries each, commits per step, and for async runs creates isolated git worktrees, runs them concurrently, then merges back into the feature branch sequentially in step-index order. All registry step-status updates (`in_progress` / `in_review` / `done` / `blocked`) happen inside the spawned subagents, not in this skill — the workflow marks a step `in_review` once the dev agent reports done and before the QA agent runs, so the registry reflects "waiting on QA" rather than showing the step as still `in_progress`; a QA no-go moves it back to `in_progress` for the next retry attempt.
 
 Report to the user that the build is running in the background; they can watch live progress via `/workflows` or wait for the completion notification.
 
@@ -75,7 +75,7 @@ BUILD BLOCKED at step [blocked step's index]: [step title]
 Reason: [reason from the result]
 Fix the issue, then run /build ONE-XXXX to resume.
 ```
-(Steps already marked `"done"` before the block stay done — resuming re-partitions only the remaining `"pending"` steps.)
+(Steps already marked `"done"` before the block stay done — resuming re-partitions only the remaining `"pending"` / `"blocked"` / `"awaiting_human"` / `"in_review"` steps.)
 
 **If `status: 'awaiting_human'`:**
 ```

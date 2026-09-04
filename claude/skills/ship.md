@@ -121,6 +121,8 @@ registry_write_audit(project_name, {
 Detect `project_name` the same way as `/plan`: parse from `git remote get-url origin`.
 If registry MCP is unavailable, do not write a local file as a substitute. Report clearly: "WARNING: Registry MCP is unavailable — audit trail was NOT recorded. Fix the MCP connection and re-run to capture this entry." This does not block the ship; the PR has already been created.
 
+This audit write is also what flips a plan from `pr_ready` to actually shipped: `planIsShipped` (store.go) now requires both all steps `"done"` **and** a matching audit entry for the ticket, not steps-done alone — a plan whose build finished but hasn't gone through this step still shows up as active (`pr_ready`) in `registry_index()` and the dashboard Kanban, and only drops off / moves to Done once this call succeeds.
+
 ---
 
 ## STEP 6: TRANSITION JIRA

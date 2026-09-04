@@ -39,6 +39,12 @@ const BLOCK_SCHEMA = {
   required: ['status'],
 }
 
+const IN_REVIEW_SCHEMA = {
+  type: 'object',
+  properties: { status: { type: 'string', enum: ['recorded'] } },
+  required: ['status'],
+}
+
 const WORKTREE_SETUP_SCHEMA = {
   type: 'object',
   properties: {
@@ -142,6 +148,12 @@ Then call registry_update_step("${ctx.project_name}", "${ctx.ticket}", ${index},
 Report status "done" when finished.`
 }
 
+function inReviewPrompt(ctx, index) {
+  return `Call registry_update_step("${ctx.project_name}", "${ctx.ticket}", ${index}, "in_review").
+
+Report status "recorded" when done.`
+}
+
 function blockPrompt(ctx, index, reason) {
   return `Call registry_update_step("${ctx.project_name}", "${ctx.ticket}", ${index}, "blocked").
 
@@ -191,6 +203,11 @@ async function runStep(ctx, step, index, cwd) {
       failureReason = dev ? dev.summary : 'developer agent failed'
       continue
     }
+    // Mark the step in_review while QA runs — dev is done, QA hasn't spoken yet.
+    // A no_go retry below moves it back to in_progress via the next dev-agent call's
+    // own registry_update_step("in_progress"); "in_review" is present in
+    // RESUMABLE_STATUSES so an interrupted QA re-enters this step on resume.
+    await agent(inReviewPrompt(ctx, index), { phase: 'Execute', label: `in-review:${index} attempt ${attempt}`, schema: IN_REVIEW_SCHEMA })
     const qa = await agent(qaPrompt(ctx, step, index, cwd), { phase: 'Execute', label: `qa:${index} attempt ${attempt}`, schema: QA_SCHEMA, ...modelOpt })
     if (!qa || qa.status === 'no_go') {
       failureReason = qa ? qa.summary : 'qa agent failed'
@@ -216,8 +233,10 @@ async function runStep(ctx, step, index, cwd) {
 // Steps eligible for (re)execution on this run. 'blocked' and 'awaiting_human' are
 // included so that resuming a paused build actually retries the step that stopped it —
 // filtering on 'pending' alone made a blocked step permanently unresumable and silently
-// started the next run one step past the unmet gate.
-const RESUMABLE_STATUSES = new Set(['pending', 'blocked', 'awaiting_human'])
+// started the next run one step past the unmet gate. 'in_review' is included so a build
+// interrupted between the dev-done/in_review marker and QA's verdict re-enters this step
+// (dev + QA rerun) on resume instead of being skipped as already-handled.
+const RESUMABLE_STATUSES = new Set(['pending', 'blocked', 'awaiting_human', 'in_review'])
 
 function partitionRuns(steps) {
   const pending = steps
