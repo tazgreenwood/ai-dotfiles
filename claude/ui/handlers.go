@@ -211,6 +211,8 @@ func handleDashboardKanban(w http.ResponseWriter, r *http.Request) {
 	columns := []kanbanColumn{
 		{Header: "Pending", Status: "pending"},
 		{Header: "In Progress", Status: "in_progress"},
+		{Header: "In Review/QA", Status: "in_review"},
+		{Header: "PR Ready", Status: "pr_ready"},
 		{Header: "Done (14d)", Status: "done"},
 		{Header: "Blocked", Status: "blocked"},
 	}
@@ -472,9 +474,11 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 	columns := []planColumn{
 		{Header: "Pending", Status: "pending"},
 		{Header: "In Progress", Status: "in_progress"},
+		{Header: "In Review/QA", Status: "in_review"},
 		{Header: "Done", Status: "done"},
 		{Header: "Blocked", Status: "blocked"},
 	}
+	pendingCol := 0
 	for _, s := range plan.PlanSteps {
 		matched := false
 		for i := range columns {
@@ -485,7 +489,10 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !matched {
-			columns[0].Steps = append(columns[0].Steps, s)
+			// An unrecognized step status (including "pr_ready", which is a
+			// plan-level derived status, never a step status) falls back to
+			// Pending rather than being silently dropped from the board.
+			columns[pendingCol].Steps = append(columns[pendingCol].Steps, s)
 		}
 	}
 
