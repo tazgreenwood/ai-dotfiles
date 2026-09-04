@@ -494,3 +494,23 @@ func ReadAudit(name, since, until string) ([]AuditEntry, error) {
 	}
 	return entries, nil
 }
+
+// AuditTicketSet returns the set of tickets with an audit entry for a
+// project — one read for the whole call, reused across every plan checked
+// in that call, rather than one read per plan. A plan-per-card audit lookup
+// inside a per-project loop over N plans previously meant N audit-log reads
+// per project (one per plan), which for a project with a long shipped-plan
+// history meant one full audit scan per plan on every dashboard load.
+func AuditTicketSet(name string) (map[string]bool, error) {
+	entries, err := ReadAudit(name, "", "")
+	if err != nil {
+		return nil, err
+	}
+	set := map[string]bool{}
+	for _, e := range entries {
+		if e.Ticket != "" {
+			set[e.Ticket] = true
+		}
+	}
+	return set, nil
+}

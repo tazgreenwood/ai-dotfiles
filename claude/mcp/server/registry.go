@@ -430,11 +430,15 @@ func registryListPlans(args map[string]any) ToolResult {
 	if err != nil {
 		return toolOK(map[string]any{"plans": []any{}})
 	}
+	auditTickets, err := s.auditTicketSet(name)
+	if err != nil {
+		return toolErr(err.Error())
+	}
 	var plans []map[string]any
 	for _, data := range rows {
 		ticket, _ := data["ticket"].(string)
 		status := "active"
-		if planIsShipped(data) {
+		if planIsShipped(auditTickets[ticket], data) {
 			status = "shipped"
 		}
 		plans = append(plans, map[string]any{
@@ -1147,7 +1151,7 @@ func registryTools() []Tool {
 					"name":       map[string]any{"type": "string"},
 					"ticket":     map[string]any{"type": "string", "description": "e.g. ONE-24416"},
 					"step_index": map[string]any{"type": "integer", "description": "Zero-based index into plan_steps"},
-					"status":     map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "done", "blocked"}},
+					"status":     map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "in_review", "done", "blocked"}},
 				},
 				"required": []string{"name", "ticket", "step_index", "status"},
 			},

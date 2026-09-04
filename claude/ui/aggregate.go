@@ -85,12 +85,23 @@ type PlanCard struct {
 	LatestDoneAt string `json:"latest_done_at,omitempty"`
 }
 
-// derivePlanStatus buckets a plan's overall Kanban column from its steps:
-// blocked (any step blocked) beats in_progress (any step in_progress, or the
-// plan is partially done) beats done (every step done) beats pending
-// (the default — no step is done, blocked, or in_progress).
-func derivePlanStatus(steps []PlanStep) string {
+// derivePlanStatus buckets a plan's overall Kanban column from its steps and
+// whether an audit entry already exists for its ticket (hasAuditEntry).
+// Precedence: blocked (any step blocked) beats in_review (any step
+// in_review) beats in_progress (any step in_progress, or the plan is
+// partially done) beats pr_ready/done (every step done — pr_ready until an
+// audit entry exists for the ticket, done once it does) beats pending (the
+// default — no step is done, blocked, in_review, or in_progress).
+//
+// pr_ready is the derived state between "/build finished every step" and
+// "/ship actually shipped it" (an audit entry written): a plan sitting there
+// is done-by-steps but not yet shipped, so it must not collapse into "done"
+// just because hasAuditEntry couldn't be determined — callers that can't
+// look up the audit log (or hit an error doing so) should pass false, never
+// guess true.
+func derivePlanStatus(steps []PlanStep, hasAuditEntry bool) string {
 	anyBlocked := false
+	anyInReview := false
 	anyInProgress := false
 	anyDone := false
 	allDone := len(steps) > 0
@@ -98,6 +109,8 @@ func derivePlanStatus(steps []PlanStep) string {
 		switch s.Status {
 		case "blocked":
 			anyBlocked = true
+		case "in_review":
+			anyInReview = true
 		case "in_progress":
 			anyInProgress = true
 		case "done":
@@ -110,10 +123,15 @@ func derivePlanStatus(steps []PlanStep) string {
 	switch {
 	case anyBlocked:
 		return "blocked"
+	case anyInReview:
+		return "in_review"
 	case anyInProgress || (anyDone && !allDone):
 		return "in_progress"
 	case allDone:
-		return "done"
+		if hasAuditEntry {
+			return "done"
+		}
+		return "pr_ready"
 	default:
 		return "pending"
 	}
@@ -139,12 +157,20 @@ func AggregatePlanKanban(doneCutoff time.Time) (cards []PlanCard, hiddenOlder in
 		if err != nil {
 			continue
 		}
+		// One audit read per project, reused across every plan below —
+		// not one read per plan (see AuditTicketSet). An audit-lookup error
+		// is treated as "no audit entries" (fails toward pr_ready, never
+		// toward done, for every plan in this project) rather than dropping
+		// the project's cards or surfacing the error — this is a read-only
+		// dashboard, not the registry_index() routing path store.go's
+		// planIsShipped guards.
+		auditTickets, _ := AuditTicketSet(p.Name)
 		for _, m := range metas {
 			plan, err := ReadPlan(p.Name, m.Ticket)
 			if err != nil {
 				continue
 			}
-			status := derivePlanStatus(plan.PlanSteps)
+			status := derivePlanStatus(plan.PlanSteps, auditTickets[m.Ticket])
 			doneSteps := 0
 			var latestDoneAt string
 			var latestDoneAtParsed time.Time
