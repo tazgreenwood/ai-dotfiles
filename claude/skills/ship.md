@@ -52,6 +52,20 @@ Best-effort: a failed record must never fail the ship.
 
 ---
 
+## STEP 2c: AUTO-FIX SIMPLE MINOR/NIT FINDINGS
+
+For each MINOR or NIT finding in `reviewer`'s output, judge whether it is small, simple, and low-risk: touches at most 1-2 files, is mechanical (a rename, a dead-code removal, a misleading comment, a swallowed error made visible — nothing requiring a design call or an ambiguous judgment about "the right answer"), and doesn't change behavior, an API contract, or a test's meaning beyond the fix itself.
+
+Fix those directly, one commit per finding, following the commit rules above (e.g. `fix: remove dead branch flagged in review` or `chore: rename misleading variable`). After each fix, re-run the project's test command for the module(s) touched. If a test fails, revert that specific fix (`git revert` or discard the change) and fall back to recording it as a note instead — a broken auto-fix is worse than an unfixed NIT.
+
+Leave everything else exactly as before (a recorded note only, never fixed here): every QUESTION finding, anything spanning 3+ files, anything requiring a design judgment or where you're not confident a fix is unambiguously correct. Never guess at an ambiguous fix just to clear a finding.
+
+This step only ever touches MINOR/NIT — BLOCKER/MAJOR still stop at STEP 2's REJECTED handling, and QUESTION is never auto-actioned since by definition it needs author input.
+
+In the `### Reviewer Notes` PR section (STEP 4), list every MINOR/NIT finding: mark auto-fixed ones "✅ fixed in `<commit-sha>`" and leave the rest as the finding text, same as before this step existed.
+
+---
+
 ## STEP 3: INVOKE @documenter
 
 Pass the completed plan steps and changed files. @documenter syncs:
