@@ -97,6 +97,120 @@ func TestAggregateKanban_NoDoneAt_NotExcluded(t *testing.T) {
 	}
 }
 
+// ── derivePlanStatus precedence (DOTFILES-44) ───────────────────────────────
+//
+// New precedence: blocked > in_review > in_progress > pr_ready > done > pending.
+// pr_ready/done is audit-entry-gated: a plan whose steps are all "done" is
+// "pr_ready" until an audit entry exists for its ticket, at which point it
+// becomes "done". hasAuditEntry stands in for that check here; the real
+// audit lookup is wired up in a later step.
+func TestDerivePlanStatus_Precedence(t *testing.T) {
+	tests := []struct {
+		name          string
+		steps         []PlanStep
+		hasAuditEntry bool
+		want          string
+	}{
+		{
+			name:  "no steps",
+			steps: nil,
+			want:  "pending",
+		},
+		{
+			name: "all pending",
+			steps: []PlanStep{
+				{Status: "pending"},
+				{Status: "pending"},
+			},
+			want: "pending",
+		},
+		{
+			name: "any in_progress",
+			steps: []PlanStep{
+				{Status: "pending"},
+				{Status: "in_progress"},
+			},
+			want: "in_progress",
+		},
+		{
+			name: "any blocked beats in_progress",
+			steps: []PlanStep{
+				{Status: "in_progress"},
+				{Status: "blocked"},
+			},
+			want: "blocked",
+		},
+		{
+			name: "any blocked beats in_review",
+			steps: []PlanStep{
+				{Status: "in_review"},
+				{Status: "blocked"},
+			},
+			want: "blocked",
+		},
+		{
+			name: "any in_review beats in_progress",
+			steps: []PlanStep{
+				{Status: "in_progress"},
+				{Status: "in_review"},
+			},
+			want: "in_review",
+		},
+		{
+			name: "any in_review beats done",
+			steps: []PlanStep{
+				{Status: "done"},
+				{Status: "in_review"},
+			},
+			want: "in_review",
+		},
+		{
+			name: "all done, no audit entry => pr_ready",
+			steps: []PlanStep{
+				{Status: "done"},
+				{Status: "done"},
+			},
+			hasAuditEntry: false,
+			want:          "pr_ready",
+		},
+		{
+			name: "all done, with audit entry => done",
+			steps: []PlanStep{
+				{Status: "done"},
+				{Status: "done"},
+			},
+			hasAuditEntry: true,
+			want:          "done",
+		},
+		{
+			name: "partial done (not all) with no in_progress/in_review/blocked => in_progress",
+			steps: []PlanStep{
+				{Status: "done"},
+				{Status: "pending"},
+			},
+			want: "in_progress",
+		},
+		{
+			name: "pr_ready beats pending even with audit entry true but not all done (should not happen but pin behavior)",
+			steps: []PlanStep{
+				{Status: "done"},
+				{Status: "pending"},
+			},
+			hasAuditEntry: true,
+			want:          "in_progress",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := derivePlanStatus(tt.steps, tt.hasAuditEntry)
+			if got != tt.want {
+				t.Errorf("derivePlanStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // ── AggregatePlanKanban ──────────────────────────────────────────────────────
 
 func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
