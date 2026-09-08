@@ -940,6 +940,10 @@ type projectIndexEntry struct {
 // auditTicketsByProject / auditTicketSet, which callers use to batch this
 // once instead).
 func planIsShipped(hasAudit bool, data map[string]any) bool {
+	if ov, _ := data["phase_override"].(string); ov != "" {
+		return ov == "done"
+	}
+
 	steps, ok := data["plan_steps"].([]any)
 	if !ok || len(steps) == 0 {
 		return false
