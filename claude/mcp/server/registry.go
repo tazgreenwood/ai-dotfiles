@@ -489,6 +489,39 @@ func registryWritePlan(args map[string]any) ToolResult {
 	return toolOK(map[string]any{"ok": true, "file": filepath.Join(dataDir(), "registry.db")})
 }
 
+var validPlanPhases = map[string]bool{
+	"pending":     true,
+	"in_progress": true,
+	"in_review":   true,
+	"pr_ready":    true,
+	"blocked":     true,
+	"done":        true,
+}
+
+func registrySetPlanPhase(args map[string]any) ToolResult {
+	name := str(args, "name")
+	ticket := str(args, "ticket")
+	phase := str(args, "phase")
+	if name == "" || ticket == "" {
+		return toolErr("name and ticket required")
+	}
+	if phase != "" && !validPlanPhases[phase] {
+		return toolErr(fmt.Sprintf("invalid phase '%s': must be '' or one of pending, in_progress, in_review, pr_ready, blocked, done", phase))
+	}
+	s, err := getStore()
+	if err != nil {
+		return toolErr(err.Error())
+	}
+	// SetPlanPhase writes the phase_override mutation and its
+	// plan_phase_override_set event in one transaction, so a failure to
+	// record the event fails the whole request rather than leaving a
+	// shipped-status change with no trace.
+	if err := s.SetPlanPhase(name, ticket, phase); err != nil {
+		return toolErr(err.Error())
+	}
+	return toolOK(map[string]any{"ok": true, "ticket": ticket, "phase_override": phase})
+}
+
 func registryWriteAudit(args map[string]any) ToolResult {
 	name := str(args, "name")
 	entry, ok := args["entry"].(map[string]any)
@@ -1167,6 +1200,19 @@ func registryTools() []Tool {
 					"data":   map[string]any{"type": "object"},
 				},
 				"required": []string{"name", "ticket", "data"},
+			},
+		},
+		{
+			Name:        "registry_set_plan_phase",
+			Description: "Set or clear a plan's phase_override, which wins outright over the computed status derivation. Read-merge-write internally — never a full-object clobber. Pass phase '' to clear.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":   map[string]any{"type": "string"},
+					"ticket": map[string]any{"type": "string", "description": "e.g. ONE-24416"},
+					"phase":  map[string]any{"type": "string", "enum": []string{"", "pending", "in_progress", "in_review", "pr_ready", "blocked", "done"}, "description": "Empty string clears the override"},
+				},
+				"required": []string{"name", "ticket", "phase"},
 			},
 		},
 		{

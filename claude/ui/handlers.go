@@ -2,8 +2,11 @@ package main
 
 import (
 	"embed"
+	"encoding/json"
 	"html/template"
+	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -274,9 +277,44 @@ type planSummary struct {
 }
 
 type planData struct {
-	Breadcrumbs []breadcrumb
-	Plan        Plan
-	Columns     []planColumn
+	Breadcrumbs     []breadcrumb
+	Project         string
+	Plan            Plan
+	Columns         []planColumn
+	EffectiveStatus string
+	PhaseOptions    []phaseOption
+}
+
+// phaseOption is one entry in the plan-detail phase_override <select>.
+type phaseOption struct {
+	Value    string
+	Label    string
+	Selected bool
+}
+
+// planPhases are the 6 valid phase_override values, in the order they're
+// offered in the plan-detail override <select> — must match validPlanPhases
+// in claude/mcp/server/registry.go.
+var planPhases = []struct{ Value, Label string }{
+	{"pending", "Pending"},
+	{"in_progress", "In Progress"},
+	{"in_review", "In Review/QA"},
+	{"pr_ready", "PR Ready"},
+	{"done", "Done"},
+	{"blocked", "Blocked"},
+}
+
+// buildPhaseOptions returns the "No override — automatic" option plus the 6
+// phase options, with whichever matches selected (the plan's current
+// effective status — its override if set, else the computed status) marked
+// Selected.
+func buildPhaseOptions(selected string) []phaseOption {
+	opts := make([]phaseOption, 0, len(planPhases)+1)
+	opts = append(opts, phaseOption{Value: "", Label: "No override — automatic", Selected: selected == ""})
+	for _, p := range planPhases {
+		opts = append(opts, phaseOption{Value: p.Value, Label: p.Label, Selected: selected == p.Value})
+	}
+	return opts
 }
 
 type planColumn struct {
@@ -496,16 +534,176 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	auditTickets, _ := AuditTicketSet(name)
+	effectiveStatus := derivePlanStatus(plan.PlanSteps, auditTickets[ticket], plan.PhaseOverride)
+
 	data := planData{
 		Breadcrumbs: []breadcrumb{
 			{Label: "Registry", URL: "/"},
 			{Label: name, URL: "/projects/" + name},
 			{Label: ticket},
 		},
-		Plan:    plan,
-		Columns: columns,
+		Project:         name,
+		Plan:            plan,
+		Columns:         columns,
+		EffectiveStatus: effectiveStatus,
+		PhaseOptions:    buildPhaseOptions(effectiveStatus),
 	}
 	render(w, r, "plan.html", data)
+}
+
+// validPlanPhases mirrors claude/mcp/server/registry.go's allowlist of the
+// same name — must stay in sync (the plan-detail <select> only ever offers
+// these 6 values, but this handler is reachable by a direct POST too, so it
+// enforces the same allowlist rather than trusting the form).
+var validPlanPhases = func() map[string]bool {
+	m := make(map[string]bool, len(planPhases))
+	for _, p := range planPhases {
+		m[p.Value] = true
+	}
+	return m
+}()
+
+// isLoopbackRequest reports whether r arrived from the local machine. This is
+// registry-ui's first state-mutating route — every other route is a GET, and
+// the server otherwise binds all interfaces with no session/auth layer at
+// all. Rather than bolt auth onto a single-operator personal tool, this
+// route is scoped to loopback: a remote host (or a cross-site form submitted
+// by a browser that happens to be able to reach this port) can't reach it,
+// which is the actual threat a route that can silently mark a plan "shipped"
+// needs closed.
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// isSameOriginRequest guards against the exact gap isLoopbackRequest alone
+// leaves open: a page loaded from any remote site in a browser running on
+// this machine can auto-submit a form to a loopback-bound port, and the TCP
+// connection genuinely originates from 127.0.0.1 (the browser is the
+// loopback client), so a loopback check alone does not distinguish that from
+// the operator's own dashboard. Browsers attach Origin (or, failing that,
+// Referer) to cross-origin POSTs; a request whose Origin/Referer host
+// doesn't match r.Host is rejected. Neither header present at all (a plain
+// curl/script call, e.g. from the CLAUDE.md-documented direct-API scripts)
+// is allowed through — only a browser-attached cross-origin marker is
+// treated as the attack signal, since the loopback check already covers
+// non-browser callers.
+func isSameOriginRequest(r *http.Request) bool {
+	check := func(raw string) (present, ok bool) {
+		if raw == "" {
+			return false, false
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return true, false
+		}
+		return true, u.Host == r.Host
+	}
+	if present, ok := check(r.Header.Get("Origin")); present {
+		return ok
+	}
+	if present, ok := check(r.Header.Get("Referer")); present {
+		return ok
+	}
+	return true
+}
+
+// handleSetPlanPhase sets or clears a plan's phase_override via a single
+// atomic json_set/json_remove UPDATE (never a read-modify-write — that would
+// reintroduce the exact lost-update race SetPlanPhase's server-side
+// counterpart in claude/mcp/server/store.go was written to avoid: a
+// concurrent registry_update_step call landing between a read and a write
+// here would have its step-status change silently reverted), and the
+// plan_phase_override_set event write in the SAME transaction — phase_override
+// silently overrides planIsShipped's shipped/done determination, so the only
+// record of who/when/why must not be droppable by a fire-and-forget insert;
+// if the event can't be recorded, the phase change itself rolls back rather
+// than committing untraceably. An empty "phase" form value clears the
+// override; any other value must be one of the 6 valid phases or the
+// request is rejected.
+func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r) {
+		http.Error(w, "forbidden: this route only accepts local requests", http.StatusForbidden)
+		return
+	}
+	if !isSameOriginRequest(r) {
+		http.Error(w, "forbidden: cross-origin request rejected", http.StatusForbidden)
+		return
+	}
+	name := r.PathValue("name")
+	ticket := r.PathValue("ticket")
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	phase := r.FormValue("phase")
+	if phase != "" && !validPlanPhases[phase] {
+		http.Error(w, "invalid phase: must be empty or one of pending, in_progress, in_review, pr_ready, blocked, done", http.StatusBadRequest)
+		return
+	}
+
+	db, err := openDB()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
+	var exists int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM plans WHERE project = ? AND ticket = ?`, name, ticket,
+	).Scan(&exists); err != nil || exists == 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	if phase == "" {
+		_, err = tx.Exec(
+			`UPDATE plans SET data = json_remove(data, '$.phase_override') WHERE project = ? AND ticket = ?`,
+			name, ticket,
+		)
+	} else {
+		_, err = tx.Exec(
+			`UPDATE plans SET data = json_set(data, '$.phase_override', ?) WHERE project = ? AND ticket = ?`,
+			phase, name, ticket,
+		)
+	}
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	eventData, err := json.Marshal(map[string]any{"ticket": ticket, "phase": phase})
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO events (project, type, occurred_at, data, tags) VALUES (?, ?, ?, ?, ?)`,
+		name, "plan_phase_override_set", time.Now().UTC().Format(time.RFC3339), string(eventData), "phase-override",
+	); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/projects/"+name+"/plans/"+ticket, http.StatusSeeOther)
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {

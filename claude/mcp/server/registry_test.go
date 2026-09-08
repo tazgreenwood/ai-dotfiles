@@ -2658,3 +2658,168 @@ func TestRegistryCheckEgressCleanTextEmptySliceShape(t *testing.T) {
 		t.Errorf("clean result = %s, want matched serialized as []", result.Content[0].Text)
 	}
 }
+
+// TestSetPlanPhase codifies the contract for the not-yet-implemented
+// registry_set_plan_phase tool (DOTFILES-47): read-merge-write onto the
+// plan blob (plan_steps must survive untouched — a full-object clobber is
+// the exact bug class fixed in ship.md this session), a valid-phase enum,
+// and empty string clearing a previously-set override.
+func TestSetPlanPhase(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	seedPlan := func(t *testing.T, ticket string) {
+		t.Helper()
+		plan := map[string]any{
+			"ticket":  ticket,
+			"summary": "test plan",
+			"plan_steps": []any{
+				map[string]any{"title": "step one", "status": "done"},
+				map[string]any{"title": "step two", "status": "in_progress"},
+			},
+		}
+		wrote := registryWritePlan(map[string]any{"name": "myproject", "ticket": ticket, "data": plan})
+		if wrote.IsError {
+			t.Fatalf("seed WritePlan: %s", wrote.Content[0].Text)
+		}
+	}
+
+	t.Run("sets phase_override via read-merge-write, plan_steps untouched", func(t *testing.T) {
+		seedPlan(t, "TEST-PHASE-1")
+
+		result := registrySetPlanPhase(map[string]any{
+			"name":   "myproject",
+			"ticket": "TEST-PHASE-1",
+			"phase":  "pr_ready",
+		})
+		if result.IsError {
+			t.Fatalf("unexpected error: %s", result.Content[0].Text)
+		}
+
+		got := registryGetPlan(map[string]any{"name": "myproject", "ticket": "TEST-PHASE-1"})
+		if got.IsError {
+			t.Fatalf("GetPlan: %s", got.Content[0].Text)
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(got.Content[0].Text), &data); err != nil {
+			t.Fatalf("unmarshal plan: %v", err)
+		}
+		if data["phase_override"] != "pr_ready" {
+			t.Errorf("phase_override = %v, want pr_ready", data["phase_override"])
+		}
+		steps, ok := data["plan_steps"].([]any)
+		if !ok || len(steps) != 2 {
+			t.Fatalf("plan_steps clobbered: %v", data["plan_steps"])
+		}
+		s0 := steps[0].(map[string]any)
+		s1 := steps[1].(map[string]any)
+		if s0["status"] != "done" {
+			t.Errorf("step 0 status = %v, want done (clobbered by phase set)", s0["status"])
+		}
+		if s1["status"] != "in_progress" {
+			t.Errorf("step 1 status = %v, want in_progress (clobbered by phase set)", s1["status"])
+		}
+		if s0["title"] != "step one" || s1["title"] != "step two" {
+			t.Errorf("step titles clobbered: %v / %v", s0["title"], s1["title"])
+		}
+	})
+
+	t.Run("empty string clears a previously-set override", func(t *testing.T) {
+		seedPlan(t, "TEST-PHASE-2")
+
+		set := registrySetPlanPhase(map[string]any{
+			"name":   "myproject",
+			"ticket": "TEST-PHASE-2",
+			"phase":  "done",
+		})
+		if set.IsError {
+			t.Fatalf("unexpected error setting override: %s", set.Content[0].Text)
+		}
+
+		cleared := registrySetPlanPhase(map[string]any{
+			"name":   "myproject",
+			"ticket": "TEST-PHASE-2",
+			"phase":  "",
+		})
+		if cleared.IsError {
+			t.Fatalf("unexpected error clearing override: %s", cleared.Content[0].Text)
+		}
+
+		got := registryGetPlan(map[string]any{"name": "myproject", "ticket": "TEST-PHASE-2"})
+		if got.IsError {
+			t.Fatalf("GetPlan: %s", got.Content[0].Text)
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(got.Content[0].Text), &data); err != nil {
+			t.Fatalf("unmarshal plan: %v", err)
+		}
+		if ov, present := data["phase_override"]; present && ov != "" {
+			t.Errorf("phase_override = %v (present=%v), want absent or empty after clearing", ov, present)
+		}
+	})
+
+	t.Run("invalid phase string is rejected", func(t *testing.T) {
+		seedPlan(t, "TEST-PHASE-3")
+
+		result := registrySetPlanPhase(map[string]any{
+			"name":   "myproject",
+			"ticket": "TEST-PHASE-3",
+			"phase":  "not_a_real_phase",
+		})
+		if !result.IsError {
+			t.Fatalf("want toolErr for invalid phase, got success: %v", result.Content[0].Text)
+		}
+
+		got := registryGetPlan(map[string]any{"name": "myproject", "ticket": "TEST-PHASE-3"})
+		var data map[string]any
+		json.Unmarshal([]byte(got.Content[0].Text), &data)
+		if ov, present := data["phase_override"]; present && ov != "" {
+			t.Errorf("invalid phase must not be persisted, got phase_override=%v", ov)
+		}
+	})
+
+	t.Run("unknown ticket returns an error, never a silent no-op success", func(t *testing.T) {
+		result := registrySetPlanPhase(map[string]any{
+			"name":   "myproject",
+			"ticket": "NO-SUCH-TICKET",
+			"phase":  "pr_ready",
+		})
+		if !result.IsError {
+			t.Fatalf("want toolErr for unknown ticket, got success: %v", result.Content[0].Text)
+		}
+	})
+
+	t.Run("does not leak internal id/created_at fields into the persisted plan doc", func(t *testing.T) {
+		seedPlan(t, "TEST-PHASE-4")
+
+		result := registrySetPlanPhase(map[string]any{
+			"name":   "myproject",
+			"ticket": "TEST-PHASE-4",
+			"phase":  "blocked",
+		})
+		if result.IsError {
+			t.Fatalf("unexpected error: %s", result.Content[0].Text)
+		}
+
+		s, err := getStore()
+		if err != nil {
+			t.Fatalf("getStore: %v", err)
+		}
+		var raw string
+		if err := s.db.QueryRow(
+			`SELECT data FROM plans WHERE project = ? AND ticket = ?`, "myproject", "TEST-PHASE-4",
+		).Scan(&raw); err != nil {
+			t.Fatalf("query raw data column: %v", err)
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			t.Fatalf("unmarshal raw data: %v", err)
+		}
+		if _, present := data["id"]; present {
+			t.Errorf("raw data column must not gain an 'id' field, got: %v", data)
+		}
+		if _, present := data["created_at"]; present {
+			t.Errorf("raw data column must not gain a 'created_at' field, got: %v", data)
+		}
+	})
+}

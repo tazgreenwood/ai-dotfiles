@@ -403,6 +403,70 @@ func (s *store) UpdateStep(project, ticket string, stepIndex int, status string)
 	return err
 }
 
+// SetPlanPhase sets or clears a plan's phase_override via a single atomic
+// json_set/json_remove UPDATE — same reasoning as UpdateStep just above: a
+// read-modify-write here would reintroduce the exact lost-update race that
+// motivated UpdateStep's rewrite (and the plan_steps-clobbering incident
+// documented in CLAUDE.md), since a concurrent UpdateStep call landing
+// between this function's read and write would have its step-status change
+// silently reverted when this write commits the stale blob it read earlier.
+// Also never round-trips GetPlan's decorated map (which injects "id" and
+// "created_at" for API-response convenience), so it can't leak those into
+// the persisted document the way a GetPlan-then-WritePlan call would.
+//
+// The phase_override mutation and its plan_phase_override_set event are
+// written in the SAME transaction: phase_override silently overrides
+// planIsShipped's shipped/done determination, so the event is the only
+// record of who/when/why, and a fire-and-forget event write that can fail
+// independently of the mutation would let a plan flip to "shipped" with zero
+// trace. If the event can't be recorded, the phase change rolls back too.
+func (s *store) SetPlanPhase(project, ticket, phase string) error {
+	var exists int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM plans WHERE project = ? AND ticket = ?`,
+		project, ticket,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		return fmt.Errorf("plan '%s' not found for project '%s'", ticket, project)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if phase == "" {
+		_, err = tx.Exec(
+			`UPDATE plans SET data = json_remove(data, '$.phase_override') WHERE project = ? AND ticket = ?`,
+			project, ticket,
+		)
+	} else {
+		_, err = tx.Exec(
+			`UPDATE plans SET data = json_set(data, '$.phase_override', ?) WHERE project = ? AND ticket = ?`,
+			phase, project, ticket,
+		)
+	}
+	if err != nil {
+		return err
+	}
+
+	eventData, err := json.Marshal(map[string]any{"ticket": ticket, "phase": phase})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO events (project, type, occurred_at, data, tags) VALUES (?, ?, ?, ?, ?)`,
+		project, "plan_phase_override_set", time.Now().UTC().Format(time.RFC3339), string(eventData), "phase-override",
+	); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
 // ── audit ────────────────────────────────────────────────────────────────────
 
 func (s *store) WriteAudit(project string, entry map[string]any) (int, error) {
@@ -940,6 +1004,10 @@ type projectIndexEntry struct {
 // auditTicketsByProject / auditTicketSet, which callers use to batch this
 // once instead).
 func planIsShipped(hasAudit bool, data map[string]any) bool {
+	if ov, _ := data["phase_override"].(string); ov != "" {
+		return ov == "done"
+	}
+
 	steps, ok := data["plan_steps"].([]any)
 	if !ok || len(steps) == 0 {
 		return false

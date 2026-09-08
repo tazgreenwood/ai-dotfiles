@@ -2215,3 +2215,101 @@ func TestUpdateInboxRefusesTriagedWithoutClass(t *testing.T) {
 		t.Errorf("want 'not found' for a missing row, got: %v", err)
 	}
 }
+
+// TestPlanIsShipped_PhaseOverridePrecedence codifies planIsShipped's new
+// precedence rule (DOTFILES-47): when phase_override is set, it must
+// short-circuit the steps/hasAudit derivation entirely — 'done' always
+// means shipped, any other non-empty value always means not shipped,
+// regardless of what the steps or audit log say. An absent or empty
+// override must leave today's steps+audit behavior untouched.
+func TestPlanIsShipped_PhaseOverridePrecedence(t *testing.T) {
+	doneStep := map[string]any{"status": "done"}
+	pendingStep := map[string]any{"status": "pending"}
+
+	tests := []struct {
+		name     string
+		hasAudit bool
+		data     map[string]any
+		wantShip bool
+	}{
+		{
+			name:     "override done wins even with no steps and no audit",
+			hasAudit: false,
+			data: map[string]any{
+				"phase_override": "done",
+				"plan_steps":     []any{},
+			},
+			wantShip: true,
+		},
+		{
+			name:     "override done wins even with pending steps and no audit",
+			hasAudit: false,
+			data: map[string]any{
+				"phase_override": "done",
+				"plan_steps":     []any{pendingStep},
+			},
+			wantShip: true,
+		},
+		{
+			name:     "override pr_ready wins even with all steps done and audit present",
+			hasAudit: true,
+			data: map[string]any{
+				"phase_override": "pr_ready",
+				"plan_steps":     []any{doneStep, doneStep},
+			},
+			wantShip: false,
+		},
+		{
+			name:     "override pending wins over done steps and audit",
+			hasAudit: true,
+			data: map[string]any{
+				"phase_override": "pending",
+				"plan_steps":     []any{doneStep},
+			},
+			wantShip: false,
+		},
+		{
+			name:     "empty override falls back to steps+audit logic (all done, audit present -> shipped)",
+			hasAudit: true,
+			data: map[string]any{
+				"phase_override": "",
+				"plan_steps":     []any{doneStep, doneStep},
+			},
+			wantShip: true,
+		},
+		{
+			name:     "empty override falls back to steps+audit logic (pending step -> not shipped)",
+			hasAudit: true,
+			data: map[string]any{
+				"phase_override": "",
+				"plan_steps":     []any{doneStep, pendingStep},
+			},
+			wantShip: false,
+		},
+		{
+			name:     "absent override falls back to steps+audit logic (all done, no audit -> not shipped)",
+			hasAudit: false,
+			data: map[string]any{
+				"plan_steps": []any{doneStep, doneStep},
+			},
+			wantShip: false,
+		},
+		{
+			name:     "absent override falls back to steps+audit logic (all done, audit present -> shipped)",
+			hasAudit: true,
+			data: map[string]any{
+				"plan_steps": []any{doneStep, doneStep},
+			},
+			wantShip: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := planIsShipped(tt.hasAudit, tt.data)
+			if got != tt.wantShip {
+				t.Errorf("planIsShipped(hasAudit=%v, data=%+v) = %v, want %v", tt.hasAudit, tt.data, got, tt.wantShip)
+			}
+		})
+	}
+}
