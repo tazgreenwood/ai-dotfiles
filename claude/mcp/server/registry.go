@@ -437,14 +437,20 @@ func registryListPlans(args map[string]any) ToolResult {
 	var plans []map[string]any
 	for _, data := range rows {
 		ticket, _ := data["ticket"].(string)
-		status := "active"
-		if planIsShipped(auditTickets[ticket], data) {
-			status = "shipped"
+		// Prefer the persisted status field (written at the 3 mutation points —
+		// UpdateStep, WriteAudit, SetPlanPhase). Fall back to computing it for
+		// plan rows written before those mutation points existed or otherwise
+		// missing the field (e.g. a direct registry_write_plan call in tests) —
+		// callers need the real 6-value status either way, not an empty string.
+		status, _ := data["status"].(string)
+		if status == "" {
+			status = ComputePlanStatus(data, auditTickets[ticket])
 		}
 		plans = append(plans, map[string]any{
-			"ticket":  ticket,
-			"summary": data["summary"],
-			"status":  status,
+			"ticket":     ticket,
+			"summary":    data["summary"],
+			"status":     status,
+			"is_shipped": status == "done",
 		})
 	}
 	return toolOK(map[string]any{"plans": plans})

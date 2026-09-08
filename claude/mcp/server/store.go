@@ -1120,8 +1120,10 @@ func (s *store) SupersedeProposal(oldID, newID int64, note string) error {
 // context.
 
 type activePlanRef struct {
-	Ticket  string `json:"ticket"`
-	Summary string `json:"summary"`
+	Ticket    string `json:"ticket"`
+	Summary   string `json:"summary"`
+	Status    string `json:"status"`
+	IsShipped bool   `json:"is_shipped"`
 }
 
 type projectIndexEntry struct {
@@ -1351,11 +1353,19 @@ func (s *store) ListIndex() ([]projectIndexEntry, error) {
 		if t, _ := data["ticket"].(string); t != "" {
 			ticket = t
 		}
-		if planIsShipped(auditTickets[project][ticket], data) {
+		// Prefer the persisted status field (written at UpdateStep, WriteAudit,
+		// SetPlanPhase). Fall back to computing it for plan rows written before
+		// those mutation points landed or otherwise missing the field, so
+		// is_shipped is never wrong just because a row predates the field.
+		status, _ := data["status"].(string)
+		if status == "" {
+			status = ComputePlanStatus(data, auditTickets[project][ticket])
+		}
+		if status == "done" {
 			continue
 		}
 		summary, _ := data["summary"].(string)
-		entries[idx].ActivePlan = &activePlanRef{Ticket: ticket, Summary: summary}
+		entries[idx].ActivePlan = &activePlanRef{Ticket: ticket, Summary: summary, Status: status, IsShipped: false}
 	}
 	return entries, planRows.Err()
 }
