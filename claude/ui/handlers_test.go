@@ -828,3 +828,44 @@ func TestSetPlanPhase_EmptyValueClearsOverride(t *testing.T) {
 		t.Errorf("expected 'Automatic' state text after clearing, got:\n%s", body)
 	}
 }
+
+// TestSetPlanPhase_InvalidPhase_RejectedNotSilentlyStored guards the
+// BLOCKER a code review caught: a phase_override value outside the 6 valid
+// phases isn't recognized by any Kanban column and makes the plan's card
+// vanish from the board with no error. A direct POST (bypassing the
+// <select>, which only ever offers valid values) must be rejected, not
+// silently persisted.
+func TestSetPlanPhase_InvalidPhase_RejectedNotSilentlyStored(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":     "TICKET-1",
+		"summary":    "Test plan",
+		"plan_steps": []map[string]any{{"step": 1, "status": "pending"}},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.PostForm(ts.URL+"/projects/existing/plans/TICKET-1/phase", url.Values{
+		"phase": {"not_a_real_phase"},
+	})
+	if err != nil {
+		t.Fatalf("POST phase: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400 for invalid phase, got %d", resp.StatusCode)
+	}
+
+	plan, err := ReadPlan("existing", "TICKET-1")
+	if err != nil {
+		t.Fatalf("ReadPlan: %v", err)
+	}
+	if plan.PhaseOverride != "" {
+		t.Errorf("invalid phase must not be persisted, got phase_override=%q", plan.PhaseOverride)
+	}
+}

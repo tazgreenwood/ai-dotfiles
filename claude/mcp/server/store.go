@@ -403,6 +403,43 @@ func (s *store) UpdateStep(project, ticket string, stepIndex int, status string)
 	return err
 }
 
+// SetPlanPhase sets or clears a plan's phase_override via a single atomic
+// json_set/json_remove UPDATE — same reasoning as UpdateStep just above: a
+// read-modify-write here would reintroduce the exact lost-update race that
+// motivated UpdateStep's rewrite (and the plan_steps-clobbering incident
+// documented in CLAUDE.md), since a concurrent UpdateStep call landing
+// between this function's read and write would have its step-status change
+// silently reverted when this write commits the stale blob it read earlier.
+// Also never round-trips GetPlan's decorated map (which injects "id" and
+// "created_at" for API-response convenience), so it can't leak those into
+// the persisted document the way a GetPlan-then-WritePlan call would.
+func (s *store) SetPlanPhase(project, ticket, phase string) error {
+	var exists int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM plans WHERE project = ? AND ticket = ?`,
+		project, ticket,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		return fmt.Errorf("plan '%s' not found for project '%s'", ticket, project)
+	}
+
+	var err error
+	if phase == "" {
+		_, err = s.db.Exec(
+			`UPDATE plans SET data = json_remove(data, '$.phase_override') WHERE project = ? AND ticket = ?`,
+			project, ticket,
+		)
+	} else {
+		_, err = s.db.Exec(
+			`UPDATE plans SET data = json_set(data, '$.phase_override', ?) WHERE project = ? AND ticket = ?`,
+			phase, project, ticket,
+		)
+	}
+	return err
+}
+
 // ── audit ────────────────────────────────────────────────────────────────────
 
 func (s *store) WriteAudit(project string, entry map[string]any) (int, error) {

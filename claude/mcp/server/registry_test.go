@@ -2777,4 +2777,49 @@ func TestSetPlanPhase(t *testing.T) {
 			t.Errorf("invalid phase must not be persisted, got phase_override=%v", ov)
 		}
 	})
+
+	t.Run("unknown ticket returns an error, never a silent no-op success", func(t *testing.T) {
+		result := registrySetPlanPhase(map[string]any{
+			"name":   "myproject",
+			"ticket": "NO-SUCH-TICKET",
+			"phase":  "pr_ready",
+		})
+		if !result.IsError {
+			t.Fatalf("want toolErr for unknown ticket, got success: %v", result.Content[0].Text)
+		}
+	})
+
+	t.Run("does not leak internal id/created_at fields into the persisted plan doc", func(t *testing.T) {
+		seedPlan(t, "TEST-PHASE-4")
+
+		result := registrySetPlanPhase(map[string]any{
+			"name":   "myproject",
+			"ticket": "TEST-PHASE-4",
+			"phase":  "blocked",
+		})
+		if result.IsError {
+			t.Fatalf("unexpected error: %s", result.Content[0].Text)
+		}
+
+		s, err := getStore()
+		if err != nil {
+			t.Fatalf("getStore: %v", err)
+		}
+		var raw string
+		if err := s.db.QueryRow(
+			`SELECT data FROM plans WHERE project = ? AND ticket = ?`, "myproject", "TEST-PHASE-4",
+		).Scan(&raw); err != nil {
+			t.Fatalf("query raw data column: %v", err)
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			t.Fatalf("unmarshal raw data: %v", err)
+		}
+		if _, present := data["id"]; present {
+			t.Errorf("raw data column must not gain an 'id' field, got: %v", data)
+		}
+		if _, present := data["created_at"]; present {
+			t.Errorf("raw data column must not gain a 'created_at' field, got: %v", data)
+		}
+	})
 }

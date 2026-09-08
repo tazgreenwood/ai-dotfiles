@@ -548,15 +548,29 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 	render(w, r, "plan.html", data)
 }
 
-// handleSetPlanPhase sets or clears a plan's phase_override via a
-// read-merge-write against the plans row's JSON data column — the UI daemon
-// shares registry.db with the MCP server, so it can do this directly rather
-// than round-tripping through registry_set_plan_phase. An empty "phase" form
-// value clears the override; any other value is stored verbatim (the
-// <select> only ever offers the 6 valid phases, so no separate validation
-// here mirrors the MCP tool's — a stray direct POST with a bogus value just
-// stores a phase_override the Kanban/derive logic won't recognize as
-// special-cased, which is a no-op for now and can be tightened later).
+// validPlanPhases mirrors claude/mcp/server/registry.go's allowlist of the
+// same name — must stay in sync (the plan-detail <select> only ever offers
+// these 6 values, but this handler is reachable by a direct POST too, so it
+// enforces the same allowlist rather than trusting the form).
+var validPlanPhases = func() map[string]bool {
+	m := make(map[string]bool, len(planPhases))
+	for _, p := range planPhases {
+		m[p.Value] = true
+	}
+	return m
+}()
+
+// handleSetPlanPhase sets or clears a plan's phase_override via a single
+// atomic json_set/json_remove UPDATE (never a read-modify-write — that would
+// reintroduce the exact lost-update race SetPlanPhase's server-side
+// counterpart in claude/mcp/server/store.go was written to avoid: a
+// concurrent registry_update_step call landing between a read and a write
+// here would have its step-status change silently reverted). An empty
+// "phase" form value clears the override; any other value must be one of
+// the 6 valid phases or the request is rejected — phase_override silently
+// overrides planIsShipped's shipped/done determination with no other trace,
+// so a bad value must never be allowed to persist, and every successful set
+// is recorded as an event for that reason too.
 func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	ticket := r.PathValue("ticket")
@@ -565,6 +579,10 @@ func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	phase := r.FormValue("phase")
+	if phase != "" && !validPlanPhases[phase] {
+		http.Error(w, "invalid phase: must be empty or one of pending, in_progress, in_review, pr_ready, blocked, done", http.StatusBadRequest)
+		return
+	}
 
 	db, err := openDB()
 	if err != nil {
@@ -573,34 +591,37 @@ func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
-	var raw string
+	var exists int
 	if err := db.QueryRow(
-		`SELECT data FROM plans WHERE project = ? AND ticket = ?`, name, ticket,
-	).Scan(&raw); err != nil {
+		`SELECT COUNT(*) FROM plans WHERE project = ? AND ticket = ?`, name, ticket,
+	).Scan(&exists); err != nil || exists == 0 {
 		http.NotFound(w, r)
 		return
 	}
 
-	var data map[string]any
-	if err := json.Unmarshal([]byte(raw), &data); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
 	if phase == "" {
-		delete(data, "phase_override")
+		_, err = db.Exec(
+			`UPDATE plans SET data = json_remove(data, '$.phase_override') WHERE project = ? AND ticket = ?`,
+			name, ticket,
+		)
 	} else {
-		data["phase_override"] = phase
+		_, err = db.Exec(
+			`UPDATE plans SET data = json_set(data, '$.phase_override', ?) WHERE project = ? AND ticket = ?`,
+			phase, name, ticket,
+		)
 	}
-	updated, err := json.Marshal(data)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if _, err := db.Exec(
-		`UPDATE plans SET data = ? WHERE project = ? AND ticket = ?`, string(updated), name, ticket,
-	); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+
+	// Best-effort: a failed event write must never fail the phase set, which
+	// already committed.
+	if eventData, err := json.Marshal(map[string]any{"ticket": ticket, "phase": phase}); err == nil {
+		_, _ = db.Exec(
+			`INSERT INTO events (project, type, occurred_at, data, tags) VALUES (?, ?, ?, ?, ?)`,
+			name, "plan_phase_override_set", time.Now().UTC().Format(time.RFC3339), string(eventData), "phase-override",
+		)
 	}
 
 	http.Redirect(w, r, "/projects/"+name+"/plans/"+ticket, http.StatusSeeOther)
