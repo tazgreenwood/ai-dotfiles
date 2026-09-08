@@ -348,15 +348,39 @@ func (s *store) ListPlans(project string) ([]map[string]any, error) {
 //
 // A Go mutex would not have worked either: several registry server processes
 // (one per Claude session) open this same file.
+//
+// DOTFILES-48: the step-status UPDATE and the plan-level status recompute it
+// drives (via ComputePlanStatus) are wrapped in one transaction so a step
+// write can never persist without the plan-level status it implies — same
+// reasoning as SetPlanPhase's transactional phase_override+event write below.
 func (s *store) UpdateStep(project, ticket string, stepIndex int, status string) error {
 	if stepIndex < 0 {
 		return fmt.Errorf("step index %d out of range", stepIndex)
 	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// BEGIN IMMEDIATE upgrades this transaction to hold the write lock from
+	// its first statement, rather than the default deferred (read-then-
+	// upgrade) transaction, which is exactly the lost-update window this
+	// function's original atomic-single-UPDATE design (see the block comment
+	// above) exists to avoid: two concurrent callers both holding a read lock
+	// on the SELECT below and then racing to upgrade to a write lock end in
+	// SQLITE_BUSY (or a stale-read clobber) even with a DSN busy_timeout,
+	// because neither can preempt the other's read lock. Best-effort: the
+	// checks below still run inside the transaction either way.
+	if _, err := tx.Exec(`BEGIN IMMEDIATE`); err != nil {
+		_ = err
+	}
+
 	// Validate the index against the current plan. A concurrent write between
 	// this check and the UPDATE is harmless: the UPDATE addresses the step by
 	// path, so it either applies to that step or matches nothing.
 	var raw string
-	if err := s.db.QueryRow(
+	if err := tx.QueryRow(
 		`SELECT data FROM plans WHERE project = ? AND ticket = ?`,
 		project, ticket,
 	).Scan(&raw); err != nil {
@@ -370,20 +394,20 @@ func (s *store) UpdateStep(project, ticket string, stepIndex int, status string)
 	if !ok || stepIndex >= len(steps) {
 		return fmt.Errorf("step index %d out of range", stepIndex)
 	}
-	if _, ok := steps[stepIndex].(map[string]any); !ok {
+	stepMap, ok := steps[stepIndex].(map[string]any)
+	if !ok {
 		return fmt.Errorf("step %d is not an object", stepIndex)
 	}
 
 	statusPath := fmt.Sprintf("$.plan_steps[%d].status", stepIndex)
 	doneAtPath := fmt.Sprintf("$.plan_steps[%d].done_at", stepIndex)
 
-	// `status` is deliberately NOT written to the plans.status column. It used
-	// to receive the STEP's status, so marking step 3 in_progress set the whole
-	// PLAN's status — a persisted lie, invisible only because nothing reads it
-	// (plan status is derived from step statuses by planIsShipped).
-	var err error
+	// `status` is deliberately NOT written to the plans.status column via this
+	// path. It used to receive the STEP's status, so marking step 3
+	// in_progress set the whole PLAN's status — a persisted lie. The
+	// plan-level status field written below is the real, computed value.
 	if status == "done" {
-		_, err = s.db.Exec(
+		_, err = tx.Exec(
 			`UPDATE plans
 			    SET data = json_set(json_set(data, ?, ?), ?, ?)
 			  WHERE project = ? AND ticket = ?`,
@@ -392,7 +416,7 @@ func (s *store) UpdateStep(project, ticket string, stepIndex int, status string)
 			project, ticket,
 		)
 	} else {
-		_, err = s.db.Exec(
+		_, err = tx.Exec(
 			`UPDATE plans
 			    SET data = json_remove(json_set(data, ?, ?), ?)
 			  WHERE project = ? AND ticket = ?`,
@@ -400,7 +424,59 @@ func (s *store) UpdateStep(project, ticket string, stepIndex int, status string)
 			project, ticket,
 		)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Reflect this step's change into the local copy (steps[stepIndex] is the
+	// same map this local `steps` slice already holds) so ComputePlanStatus
+	// below sees the update this transaction is committing, not the stale
+	// status read at the top.
+	stepMap["status"] = status
+	plan["plan_steps"] = steps
+
+	hasAudit, err := hasAuditEntryTx(tx, project, ticket)
+	if err != nil {
+		return err
+	}
+	newStatus := ComputePlanStatus(plan, hasAudit)
+	if _, err := tx.Exec(
+		`UPDATE plans SET data = json_set(data, '$.status', ?) WHERE project = ? AND ticket = ?`,
+		newStatus, project, ticket,
+	); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// hasAuditEntryTx reports whether project has at least one audit entry whose
+// "ticket" field matches ticket, read within tx so the plan-level status
+// mutations above (UpdateStep, SetPlanPhase) see a consistent snapshot
+// alongside the plan write they commit with. Mirrors auditTicketSet's
+// per-entry ticket extraction but scoped to one ticket and one transaction
+// instead of building the whole project's set.
+func hasAuditEntryTx(tx *sql.Tx, project, ticket string) (bool, error) {
+	rows, err := tx.Query(`SELECT data FROM audit WHERE project = ?`, project)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			return false, err
+		}
+		if t, _ := entry["ticket"].(string); t == ticket {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // SetPlanPhase sets or clears a plan's phase_override via a single atomic
@@ -421,22 +497,26 @@ func (s *store) UpdateStep(project, ticket string, stepIndex int, status string)
 // independently of the mutation would let a plan flip to "shipped" with zero
 // trace. If the event can't be recorded, the phase change rolls back too.
 func (s *store) SetPlanPhase(project, ticket, phase string) error {
-	var exists int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM plans WHERE project = ? AND ticket = ?`,
-		project, ticket,
-	).Scan(&exists); err != nil {
-		return err
-	}
-	if exists == 0 {
-		return fmt.Errorf("plan '%s' not found for project '%s'", ticket, project)
-	}
-
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	var raw string
+	if err := tx.QueryRow(
+		`SELECT data FROM plans WHERE project = ? AND ticket = ?`,
+		project, ticket,
+	).Scan(&raw); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("plan '%s' not found for project '%s'", ticket, project)
+		}
+		return err
+	}
+	var plan map[string]any
+	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
+		return err
+	}
 
 	if phase == "" {
 		_, err = tx.Exec(
@@ -450,6 +530,26 @@ func (s *store) SetPlanPhase(project, ticket, phase string) error {
 		)
 	}
 	if err != nil {
+		return err
+	}
+
+	// Recompute the plan-level status now that phase_override has changed —
+	// an override wins outright in ComputePlanStatus's precedence, so update
+	// plan's local copy to match what was just written before computing.
+	if phase == "" {
+		delete(plan, "phase_override")
+	} else {
+		plan["phase_override"] = phase
+	}
+	hasAudit, err := hasAuditEntryTx(tx, project, ticket)
+	if err != nil {
+		return err
+	}
+	newStatus := ComputePlanStatus(plan, hasAudit)
+	if _, err := tx.Exec(
+		`UPDATE plans SET data = json_set(data, '$.status', ?) WHERE project = ? AND ticket = ?`,
+		newStatus, project, ticket,
+	); err != nil {
 		return err
 	}
 
@@ -469,20 +569,63 @@ func (s *store) SetPlanPhase(project, ticket, phase string) error {
 
 // ── audit ────────────────────────────────────────────────────────────────────
 
+// WriteAudit inserts the audit entry and, if it names a ticket with a plan
+// on record, recomputes and persists that plan's status field in the SAME
+// transaction (DOTFILES-48) — an audit entry is exactly the event that can
+// flip a plan from pr_ready to done, so the two writes must commit together
+// or not at all.
 func (s *store) WriteAudit(project string, entry map[string]any) (int, error) {
 	date, _ := entry["date"].(string)
+	ticket, _ := entry["ticket"].(string)
 	b, err := json.Marshal(entry)
 	if err != nil {
 		return 0, err
 	}
-	if _, err := s.db.Exec(
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
 		`INSERT INTO audit (project, date, data) VALUES (?, ?, ?)`,
 		project, date, string(b),
 	); err != nil {
 		return 0, err
 	}
 	var total int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM audit WHERE project = ?`, project).Scan(&total); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM audit WHERE project = ?`, project).Scan(&total); err != nil {
+		return 0, err
+	}
+
+	if ticket != "" {
+		var raw string
+		err := tx.QueryRow(
+			`SELECT data FROM plans WHERE project = ? AND ticket = ?`,
+			project, ticket,
+		).Scan(&raw)
+		if err != nil && err != sql.ErrNoRows {
+			return 0, err
+		}
+		if err == nil {
+			var plan map[string]any
+			if err := json.Unmarshal([]byte(raw), &plan); err != nil {
+				return 0, err
+			}
+			// This entry itself is the audit entry for ticket, so hasAudit is
+			// unconditionally true here regardless of any that preceded it.
+			newStatus := ComputePlanStatus(plan, true)
+			if _, err := tx.Exec(
+				`UPDATE plans SET data = json_set(data, '$.status', ?) WHERE project = ? AND ticket = ?`,
+				newStatus, project, ticket,
+			); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return total, nil
@@ -1003,6 +1146,71 @@ type projectIndexEntry struct {
 // registry_list_plans into an audit-log scan per plan row (see
 // auditTicketsByProject / auditTicketSet, which callers use to batch this
 // once instead).
+// ComputePlanStatus computes a plan's single persisted Kanban status field
+// (pending/in_progress/in_review/pr_ready/blocked/done) from its raw plan
+// data (as decoded from the plans table's JSON blob — must carry
+// "plan_steps" and, optionally, "phase_override") and whether an audit entry
+// already exists for its ticket. This is the one authoritative port of the
+// precedence logic that used to be duplicated between planIsShipped's bool
+// (below) and the UI's derivePlanStatus (claude/ui/aggregate.go) — DOTFILES-48
+// consolidates both into this single function, called at write-time (inside
+// UpdateStep, WriteAudit, SetPlanPhase) rather than re-derived on every read.
+//
+// Precedence: phase_override wins outright over everything else; then
+// blocked (any step blocked) beats in_review (any step in_review) beats
+// in_progress (any step in_progress, or the plan is partially done) beats
+// pr_ready/done (every step done — pr_ready until an audit entry exists for
+// the ticket, done once it does) beats pending (the default — no step is
+// done, blocked, in_review, or in_progress).
+func ComputePlanStatus(data map[string]any, hasAudit bool) string {
+	if ov, _ := data["phase_override"].(string); ov != "" {
+		return ov
+	}
+
+	steps, _ := data["plan_steps"].([]any)
+	anyBlocked := false
+	anyInReview := false
+	anyInProgress := false
+	anyDone := false
+	allDone := len(steps) > 0
+	for _, raw := range steps {
+		step, ok := raw.(map[string]any)
+		if !ok {
+			allDone = false
+			continue
+		}
+		status, _ := step["status"].(string)
+		switch status {
+		case "blocked":
+			anyBlocked = true
+		case "in_review":
+			anyInReview = true
+		case "in_progress":
+			anyInProgress = true
+		case "done":
+			anyDone = true
+		}
+		if status != "done" {
+			allDone = false
+		}
+	}
+	switch {
+	case anyBlocked:
+		return "blocked"
+	case anyInReview:
+		return "in_review"
+	case anyInProgress || (anyDone && !allDone):
+		return "in_progress"
+	case allDone:
+		if hasAudit {
+			return "done"
+		}
+		return "pr_ready"
+	default:
+		return "pending"
+	}
+}
+
 func planIsShipped(hasAudit bool, data map[string]any) bool {
 	if ov, _ := data["phase_override"].(string); ov != "" {
 		return ov == "done"
