@@ -73,6 +73,11 @@ type Plan struct {
 	AcceptanceCriteria []string   `json:"acceptance_criteria,omitempty"`
 	PlanSteps          []PlanStep `json:"plan_steps,omitempty"`
 	PhaseOverride      string     `json:"phase_override,omitempty"`
+	// Status is the plan-level Kanban status persisted by the registry MCP
+	// server's ComputePlanStatus (claude/mcp/server/store.go), written at
+	// each of the 3 mutation points (UpdateStep, WriteAudit, SetPlanPhase)
+	// rather than re-derived here on every read (DOTFILES-48).
+	Status string `json:"status,omitempty"`
 }
 
 type AuditEntry struct {

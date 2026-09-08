@@ -97,150 +97,17 @@ func TestAggregateKanban_NoDoneAt_NotExcluded(t *testing.T) {
 	}
 }
 
-// ── derivePlanStatus precedence (DOTFILES-44) ───────────────────────────────
-//
-// New precedence: blocked > in_review > in_progress > pr_ready > done > pending.
-// pr_ready/done is audit-entry-gated: a plan whose steps are all "done" is
-// "pr_ready" until an audit entry exists for its ticket, at which point it
-// becomes "done". hasAuditEntry stands in for that check here; the real
-// audit lookup is wired up in a later step.
-func TestDerivePlanStatus_Precedence(t *testing.T) {
-	tests := []struct {
-		name          string
-		steps         []PlanStep
-		hasAuditEntry bool
-		phaseOverride string
-		want          string
-	}{
-		{
-			name:  "no steps",
-			steps: nil,
-			want:  "pending",
-		},
-		{
-			name: "all pending",
-			steps: []PlanStep{
-				{Status: "pending"},
-				{Status: "pending"},
-			},
-			want: "pending",
-		},
-		{
-			name: "any in_progress",
-			steps: []PlanStep{
-				{Status: "pending"},
-				{Status: "in_progress"},
-			},
-			want: "in_progress",
-		},
-		{
-			name: "any blocked beats in_progress",
-			steps: []PlanStep{
-				{Status: "in_progress"},
-				{Status: "blocked"},
-			},
-			want: "blocked",
-		},
-		{
-			name: "any blocked beats in_review",
-			steps: []PlanStep{
-				{Status: "in_review"},
-				{Status: "blocked"},
-			},
-			want: "blocked",
-		},
-		{
-			name: "any in_review beats in_progress",
-			steps: []PlanStep{
-				{Status: "in_progress"},
-				{Status: "in_review"},
-			},
-			want: "in_review",
-		},
-		{
-			name: "any in_review beats done",
-			steps: []PlanStep{
-				{Status: "done"},
-				{Status: "in_review"},
-			},
-			want: "in_review",
-		},
-		{
-			name: "all done, no audit entry => pr_ready",
-			steps: []PlanStep{
-				{Status: "done"},
-				{Status: "done"},
-			},
-			hasAuditEntry: false,
-			want:          "pr_ready",
-		},
-		{
-			name: "all done, with audit entry => done",
-			steps: []PlanStep{
-				{Status: "done"},
-				{Status: "done"},
-			},
-			hasAuditEntry: true,
-			want:          "done",
-		},
-		{
-			name: "partial done (not all) with no in_progress/in_review/blocked => in_progress",
-			steps: []PlanStep{
-				{Status: "done"},
-				{Status: "pending"},
-			},
-			want: "in_progress",
-		},
-		{
-			name: "pr_ready beats pending even with audit entry true but not all done (should not happen but pin behavior)",
-			steps: []PlanStep{
-				{Status: "done"},
-				{Status: "pending"},
-			},
-			hasAuditEntry: true,
-			want:          "in_progress",
-		},
-		{
-			name: "phase_override 'pr_ready' wins over all-done+audit (would otherwise be done)",
-			steps: []PlanStep{
-				{Status: "done"},
-				{Status: "done"},
-			},
-			hasAuditEntry: true,
-			phaseOverride: "pr_ready",
-			want:          "pr_ready",
-		},
-		{
-			name: "phase_override 'blocked' wins over all-pending (no step actually blocked)",
-			steps: []PlanStep{
-				{Status: "pending"},
-				{Status: "pending"},
-			},
-			hasAuditEntry: false,
-			phaseOverride: "blocked",
-			want:          "blocked",
-		},
-		{
-			name:          "phase_override 'pr_ready' wins even with no steps at all",
-			steps:         nil,
-			hasAuditEntry: false,
-			phaseOverride: "pr_ready",
-			want:          "pr_ready",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := derivePlanStatus(tt.steps, tt.hasAuditEntry, tt.phaseOverride)
-			if got != tt.want {
-				t.Errorf("derivePlanStatus() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 // ── AggregatePlanKanban ──────────────────────────────────────────────────────
 
+// TestAggregatePlanKanban_StatusDerivation now pins that AggregatePlanKanban
+// reads each plan's persisted top-level "status" field directly rather than
+// re-deriving it from steps+audit (DOTFILES-48 deleted derivePlanStatus, the
+// old home of that precedence logic). The registry MCP server's
+// ComputePlanStatus (claude/mcp/server/store.go) is the one place that logic
+// still lives, computed at write time — these fixtures seed the status a
+// correct write path would have persisted, mirroring what ComputePlanStatus
+// would compute for each shape (still exercised directly by that package's
+// own tests).
 func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
@@ -250,6 +117,7 @@ func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
 	seedPlan(t, dir, "alpha", "DOTFILES-1", map[string]any{
 		"ticket":  "DOTFILES-1",
 		"summary": "all pending",
+		"status":  "pending",
 		"plan_steps": []map[string]any{
 			{"step": 1, "title": "a", "status": "pending"},
 			{"step": 2, "title": "b", "status": "pending"},
@@ -258,6 +126,7 @@ func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
 	seedPlan(t, dir, "alpha", "DOTFILES-2", map[string]any{
 		"ticket":  "DOTFILES-2",
 		"summary": "partial",
+		"status":  "in_progress",
 		"plan_steps": []map[string]any{
 			{"step": 1, "title": "a", "status": "done", "done_at": time.Now().UTC().Format(time.RFC3339)},
 			{"step": 2, "title": "b", "status": "pending"},
@@ -266,6 +135,7 @@ func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
 	seedPlan(t, dir, "alpha", "DOTFILES-3", map[string]any{
 		"ticket":  "DOTFILES-3",
 		"summary": "all done",
+		"status":  "done",
 		"plan_steps": []map[string]any{
 			{"step": 1, "title": "a", "status": "done", "done_at": time.Now().UTC().Format(time.RFC3339)},
 			{"step": 2, "title": "b", "status": "done", "done_at": time.Now().UTC().Format(time.RFC3339)},
@@ -274,6 +144,7 @@ func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
 	seedPlan(t, dir, "alpha", "DOTFILES-4", map[string]any{
 		"ticket":  "DOTFILES-4",
 		"summary": "has blocked",
+		"status":  "blocked",
 		"plan_steps": []map[string]any{
 			{"step": 1, "title": "a", "status": "done", "done_at": time.Now().UTC().Format(time.RFC3339)},
 			{"step": 2, "title": "b", "status": "blocked"},
@@ -283,13 +154,16 @@ func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
 	seedPlan(t, dir, "alpha", "DOTFILES-5", map[string]any{
 		"ticket":  "DOTFILES-5",
 		"summary": "has in_progress",
+		"status":  "in_progress",
 		"plan_steps": []map[string]any{
 			{"step": 1, "title": "a", "status": "pending"},
 			{"step": 2, "title": "b", "status": "in_progress"},
 		},
 	})
-	// DOTFILES-3's audit entry is what distinguishes it from a merely
-	// all-done plan (which would be pr_ready, not done — DOTFILES-44).
+	// DOTFILES-3 also carries an audit entry, matching what the real write
+	// path (WriteAudit) would have produced alongside persisting status
+	// "done" — kept so this fixture stays a faithful snapshot of a real row,
+	// even though AggregatePlanKanban itself no longer reads the audit log.
 	seedAudit(t, dir, "alpha", []map[string]any{
 		{"ticket": "DOTFILES-3", "date": "2026-08-01"},
 	})
@@ -330,6 +204,96 @@ func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
 	}
 }
 
+// TestAggregatePlanKanban_MissingStatus_RecomputesNotHardcodedPending guards
+// the round-2 REJECTED finding: a plan with no persisted "status" field (the
+// registry MCP server's backfillPlanStatuses hasn't run against this DB yet —
+// a separate process from this dashboard, so the ordering isn't guaranteed)
+// must have its status recomputed from steps+audit, not silently mislabeled
+// "pending" regardless of its real state. Also guards round-3's finding: the
+// audit lookup this recompute needs must come from one batched per-project
+// AuditTicketSet call, not a query per plan — this seeds TWO un-backfilled
+// plans in the same project, one with an audit entry and one without, to
+// prove the batched set still resolves each plan's own audit status
+// correctly rather than all plans sharing one (wrong) answer.
+func TestAggregatePlanKanban_MissingStatus_RecomputesNotHardcodedPending(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
+	// No "status" key at all — the pre-backfill shape.
+	seedPlan(t, dir, "alpha", "DOTFILES-NOSTATUS", map[string]any{
+		"ticket":  "DOTFILES-NOSTATUS",
+		"summary": "predates the status field",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "done"},
+			{"step": 2, "title": "b", "status": "blocked"},
+		},
+	})
+	seedPlan(t, dir, "alpha", "DOTFILES-NOSTATUS-SHIPPED", map[string]any{
+		"ticket":  "DOTFILES-NOSTATUS-SHIPPED",
+		"summary": "predates the status field, but already has an audit entry",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "done"},
+		},
+	})
+	seedAudit(t, dir, "alpha", []map[string]any{
+		{"ticket": "DOTFILES-NOSTATUS-SHIPPED", "date": "2026-08-01"},
+	})
+
+	cards, _ := AggregatePlanKanban(time.Now().AddDate(0, 0, -14))
+
+	byTicket := map[string]PlanCard{}
+	for _, c := range cards {
+		byTicket[c.Ticket] = c
+	}
+	if c, ok := byTicket["DOTFILES-NOSTATUS"]; !ok {
+		t.Fatalf("missing card for DOTFILES-NOSTATUS")
+	} else if c.Status != "blocked" {
+		t.Errorf("want recomputed status=blocked (one step is blocked), got %q — a missing $.status must not default to pending", c.Status)
+	}
+	if c, ok := byTicket["DOTFILES-NOSTATUS-SHIPPED"]; !ok {
+		t.Fatalf("missing card for DOTFILES-NOSTATUS-SHIPPED")
+	} else if c.Status != "done" {
+		t.Errorf("want recomputed status=done (all steps done, audit entry exists), got %q — batched audit lookup must resolve per-ticket, not share one answer across plans", c.Status)
+	}
+}
+
+// TestAggregatePlanKanban_MissingStatus_PhaseOverrideStillWins guards a
+// narrow but real gap: a legacy plan whose $.status is empty but whose
+// $.phase_override is already set (e.g. a hand-written row, or one from
+// before DOTFILES-48 wired ComputePlanStatus into SetPlanPhase) must still
+// have the override win, matching ComputePlanStatus's precedence — the
+// steps+audit recompute must not override the override.
+func TestAggregatePlanKanban_MissingStatus_PhaseOverrideStillWins(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
+	seedPlan(t, dir, "alpha", "DOTFILES-LEGACY-OVERRIDE", map[string]any{
+		"ticket":         "DOTFILES-LEGACY-OVERRIDE",
+		"summary":        "legacy override, no persisted status",
+		"phase_override": "blocked",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "pending"},
+		},
+	})
+
+	cards, _ := AggregatePlanKanban(time.Now().AddDate(0, 0, -14))
+
+	var found *PlanCard
+	for i := range cards {
+		if cards[i].Ticket == "DOTFILES-LEGACY-OVERRIDE" {
+			found = &cards[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("missing card for DOTFILES-LEGACY-OVERRIDE")
+	}
+	if found.Status != "blocked" {
+		t.Errorf("want phase_override to win (blocked), got %q — recompute must not ignore a legacy override", found.Status)
+	}
+}
+
 func TestAggregatePlanKanban_DoneCutoff_ExcludesFullyDonePlan(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
@@ -342,6 +306,7 @@ func TestAggregatePlanKanban_DoneCutoff_ExcludesFullyDonePlan(t *testing.T) {
 	seedPlan(t, dir, "alpha", "DOTFILES-OLD", map[string]any{
 		"ticket":  "DOTFILES-OLD",
 		"summary": "old fully done plan",
+		"status":  "done",
 		"plan_steps": []map[string]any{
 			{"step": 1, "title": "a", "status": "done", "done_at": oldDoneAt},
 			{"step": 2, "title": "b", "status": "done", "done_at": oldDoneAt},
@@ -350,14 +315,15 @@ func TestAggregatePlanKanban_DoneCutoff_ExcludesFullyDonePlan(t *testing.T) {
 	seedPlan(t, dir, "alpha", "DOTFILES-NEW", map[string]any{
 		"ticket":  "DOTFILES-NEW",
 		"summary": "recent fully done plan",
+		"status":  "done",
 		"plan_steps": []map[string]any{
 			{"step": 1, "title": "a", "status": "done", "done_at": oldDoneAt},
 			{"step": 2, "title": "b", "status": "done", "done_at": recentDoneAt},
 		},
 	})
-	// Both plans need audit entries to be "done" (rather than pr_ready)
-	// so the cutoff logic under test — which only ever applies to "done"
-	// plans — actually exercises them (DOTFILES-44).
+	// Both plans carry a persisted "done" status — the cutoff logic under
+	// test only ever applies to "done" plans — and audit entries matching
+	// what a real WriteAudit call would have produced alongside it.
 	seedAudit(t, dir, "alpha", []map[string]any{
 		{"ticket": "DOTFILES-OLD", "date": "2026-01-01"},
 		{"ticket": "DOTFILES-NEW", "date": "2026-08-01"},

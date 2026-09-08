@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -234,6 +235,157 @@ func TestRegistryUpdateStep_AcceptsInReview(t *testing.T) {
 // shipped once /ship has written a matching audit entry. Otherwise a plan
 // vanishes from the index (and from routing) the instant build finishes,
 // before /ship has even run.
+// TestRegistryListPlans_ExposesPersistedStatus pins DOTFILES-48 step 2:
+// registry_list_plans must return the real 6-value persisted status field
+// (not the old derived "active"/"shipped" bool) plus is_shipped for existing
+// routing consumers.
+func TestRegistryListPlans_ExposesPersistedStatus(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	registryInitProject(map[string]any{"name": "myproject"})
+	plan := map[string]any{
+		"ticket":  "TEST-10",
+		"summary": "in progress work",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "pending"},
+			map[string]any{"title": "step two", "status": "pending"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-10", "data": plan})
+	// Drive step 0 to in_progress so UpdateStep persists the plan-level status.
+	registryUpdateStep(map[string]any{
+		"name":       "myproject",
+		"ticket":     "TEST-10",
+		"step_index": 0,
+		"status":     "in_progress",
+	})
+
+	result := registryListPlans(map[string]any{"name": "myproject"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp struct {
+		Plans []map[string]any `json:"plans"`
+	}
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+
+	var found map[string]any
+	for _, p := range resp.Plans {
+		if p["ticket"] == "TEST-10" {
+			found = p
+		}
+	}
+	if found == nil {
+		t.Fatalf("TEST-10 not present in plans")
+	}
+	if found["status"] != "in_progress" {
+		t.Errorf("want status=in_progress, got %v", found["status"])
+	}
+	if found["is_shipped"] != false {
+		t.Errorf("want is_shipped=false, got %v", found["is_shipped"])
+	}
+}
+
+// TestRegistryListPlans_DoneStatusIsShipped confirms is_shipped tracks the
+// persisted status == "done" rather than any separate recomputation.
+func TestRegistryListPlans_DoneStatusIsShipped(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	registryInitProject(map[string]any{"name": "myproject"})
+	plan := map[string]any{
+		"ticket":  "TEST-11",
+		"summary": "finished and shipped",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "done"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-11", "data": plan})
+	registryWriteAudit(map[string]any{
+		"name": "myproject",
+		"entry": map[string]any{
+			"ticket":  "TEST-11",
+			"type":    "feature",
+			"summary": "shipped it",
+		},
+	})
+
+	result := registryListPlans(map[string]any{"name": "myproject"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp struct {
+		Plans []map[string]any `json:"plans"`
+	}
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+
+	var found map[string]any
+	for _, p := range resp.Plans {
+		if p["ticket"] == "TEST-11" {
+			found = p
+		}
+	}
+	if found == nil {
+		t.Fatalf("TEST-11 not present in plans")
+	}
+	if found["status"] != "done" {
+		t.Errorf("want status=done, got %v", found["status"])
+	}
+	if found["is_shipped"] != true {
+		t.Errorf("want is_shipped=true, got %v", found["is_shipped"])
+	}
+}
+
+// TestRegistryIndex_ActivePlanExposesPersistedStatus pins that registry_index's
+// active_plan carries the real 6-value status + is_shipped, not just a
+// presence/absence signal.
+func TestRegistryIndex_ActivePlanExposesPersistedStatus(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	registryInitProject(map[string]any{"name": "myproject"})
+	plan := map[string]any{
+		"ticket":  "TEST-12",
+		"summary": "blocked work",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "blocked"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-12", "data": plan})
+	registryUpdateStep(map[string]any{
+		"name":       "myproject",
+		"ticket":     "TEST-12",
+		"step_index": 0,
+		"status":     "blocked",
+	})
+
+	result := registryIndex(map[string]any{})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp struct {
+		Projects []projectIndexEntry `json:"projects"`
+	}
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+
+	var found *projectIndexEntry
+	for i := range resp.Projects {
+		if resp.Projects[i].Name == "myproject" {
+			found = &resp.Projects[i]
+		}
+	}
+	if found == nil || found.ActivePlan == nil {
+		t.Fatalf("want active_plan present for myproject, got %+v", found)
+	}
+	if found.ActivePlan.Status != "blocked" {
+		t.Errorf("want active_plan.status=blocked, got %q", found.ActivePlan.Status)
+	}
+	if found.ActivePlan.IsShipped {
+		t.Errorf("want active_plan.is_shipped=false, got true")
+	}
+}
+
 func TestRegistryIndex_AllStepsDoneButNoAuditEntry_StillActive(t *testing.T) {
 	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
@@ -318,6 +470,175 @@ func TestRegistryIndex_AllStepsDoneWithMatchingAuditEntry_Shipped(t *testing.T) 
 	}
 	if found.ActivePlan != nil {
 		t.Errorf("want active_plan nil: matching audit entry exists so the plan is shipped, got %+v", found.ActivePlan)
+	}
+}
+
+// TestComputePlanStatus_Outcomes pins the precedence contract for the single
+// authoritative status function that DOTFILES-48 introduces to replace the
+// duplicated derivation logic (backend planIsShipped bool + UI
+// derivePlanStatus 6-value switch). Precedence, highest first: phase_override
+// (if set, wins outright) > blocked (any step blocked) > in_review (any step
+// in_review) > in_progress (any step in_progress, or partially done) >
+// pr_ready/done (every step done — done once a matching audit entry exists,
+// pr_ready until then) > pending (default).
+func TestComputePlanStatus_Outcomes(t *testing.T) {
+	tests := []struct {
+		name     string
+		steps    []any
+		hasAudit bool
+		override string
+		want     string
+	}{
+		{
+			name: "pending: no step started",
+			steps: []any{
+				map[string]any{"status": "pending"},
+				map[string]any{"status": "pending"},
+			},
+			want: "pending",
+		},
+		{
+			name: "in_progress: a step is in_progress",
+			steps: []any{
+				map[string]any{"status": "in_progress"},
+				map[string]any{"status": "pending"},
+			},
+			want: "in_progress",
+		},
+		{
+			name: "in_progress: partially done beats pending",
+			steps: []any{
+				map[string]any{"status": "done"},
+				map[string]any{"status": "pending"},
+			},
+			want: "in_progress",
+		},
+		{
+			name: "in_review: a step is in_review",
+			steps: []any{
+				map[string]any{"status": "done"},
+				map[string]any{"status": "in_review"},
+			},
+			want: "in_review",
+		},
+		{
+			name: "blocked: any blocked step beats in_review",
+			steps: []any{
+				map[string]any{"status": "blocked"},
+				map[string]any{"status": "in_review"},
+			},
+			want: "blocked",
+		},
+		{
+			name: "pr_ready: all steps done, no audit entry yet",
+			steps: []any{
+				map[string]any{"status": "done"},
+				map[string]any{"status": "done"},
+			},
+			hasAudit: false,
+			want:     "pr_ready",
+		},
+		{
+			name: "done: all steps done, matching audit entry exists",
+			steps: []any{
+				map[string]any{"status": "done"},
+				map[string]any{"status": "done"},
+			},
+			hasAudit: true,
+			want:     "done",
+		},
+		{
+			name: "override wins outright over step-derived status",
+			steps: []any{
+				map[string]any{"status": "pending"},
+			},
+			hasAudit: false,
+			override: "blocked",
+			want:     "blocked",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := map[string]any{"plan_steps": tt.steps}
+			if tt.override != "" {
+				data["phase_override"] = tt.override
+			}
+			got := ComputePlanStatus(data, tt.hasAudit)
+			if got != tt.want {
+				t.Errorf("ComputePlanStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPlanStatus_PersistedAfterMutations pins the persistence half of
+// DOTFILES-48: the plan's status field must be recomputed and written into
+// the plan's stored JSON at each of the 3 mutation points (UpdateStep,
+// WriteAudit, SetPlanPhase) rather than re-derived on every read. Today none
+// of the three writes a "status" field into the plan blob, so each assertion
+// below fails against current behavior.
+func TestPlanStatus_PersistedAfterMutations(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	registryInitProject(map[string]any{"name": "myproject"})
+	plan := map[string]any{
+		"ticket":  "TEST-STATUS-1",
+		"summary": "pins persisted status field",
+		"plan_steps": []any{
+			map[string]any{"title": "only step", "status": "pending"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-STATUS-1", "data": plan})
+
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+
+	// 1. UpdateStep marks the only step done -> all steps done, no audit yet
+	// -> persisted status should become pr_ready.
+	if err := s.UpdateStep("myproject", "TEST-STATUS-1", 0, "done"); err != nil {
+		t.Fatalf("UpdateStep: %v", err)
+	}
+	data, err := s.GetPlan("myproject", "TEST-STATUS-1")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got, _ := data["status"].(string); got != "pr_ready" {
+		t.Errorf("after UpdateStep(done): want persisted status=pr_ready, got %q", got)
+	}
+
+	// 2. WriteAudit records a matching audit entry -> persisted status should
+	// flip from pr_ready to done.
+	registryWriteAudit(map[string]any{
+		"name": "myproject",
+		"entry": map[string]any{
+			"ticket":  "TEST-STATUS-1",
+			"type":    "feature",
+			"summary": "shipped it",
+		},
+	})
+	data, err = s.GetPlan("myproject", "TEST-STATUS-1")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got, _ := data["status"].(string); got != "done" {
+		t.Errorf("after WriteAudit: want persisted status=done, got %q", got)
+	}
+
+	// 3. SetPlanPhase overrides the plan to blocked -> persisted status must
+	// reflect the override, not the step/audit-derived done.
+	if err := s.SetPlanPhase("myproject", "TEST-STATUS-1", "blocked"); err != nil {
+		t.Fatalf("SetPlanPhase: %v", err)
+	}
+	data, err = s.GetPlan("myproject", "TEST-STATUS-1")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got, _ := data["status"].(string); got != "blocked" {
+		t.Errorf("after SetPlanPhase(blocked): want persisted status=blocked, got %q", got)
 	}
 }
 
@@ -1725,504 +2046,6 @@ func TestRegistryIndex_EmptyRegistryReturnsEmptyListNotNull(t *testing.T) {
 	}
 }
 
-// ── agent runs (DOTFILES-38) ─────────────────────────────────────────────────
-
-func decodeRuns(t *testing.T, result ToolResult) []map[string]any {
-	t.Helper()
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-	var body struct {
-		Runs []map[string]any `json:"runs"`
-	}
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &body); err != nil {
-		t.Fatalf("unmarshal runs: %v (body: %s)", err, result.Content[0].Text)
-	}
-	return body.Runs
-}
-
-func writeTestRun(t *testing.T, args map[string]any) int64 {
-	t.Helper()
-	result := registryWriteRun(args)
-	if result.IsError {
-		t.Fatalf("registryWriteRun: %s", result.Content[0].Text)
-	}
-	var body struct {
-		ID int64 `json:"id"`
-	}
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &body); err != nil {
-		t.Fatalf("unmarshal id: %v", err)
-	}
-	return body.ID
-}
-
-func TestRegistryRun_WriteGetUpdateCycle(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	id := writeTestRun(t, map[string]any{
-		"name":        "private-dotfiles",
-		"proposal_id": float64(12),
-		"ticket":      "DOTFILES-99",
-		"cursor":      map[string]any{"branch": "feat/x", "last_step": float64(0)},
-	})
-
-	runs := decodeRuns(t, registryGetRuns(map[string]any{"name": "private-dotfiles", "id": float64(id)}))
-	if len(runs) != 1 {
-		t.Fatalf("want 1 run by id, got %d", len(runs))
-	}
-	if runs[0]["phase"] != "planning" || runs[0]["status"] != "running" {
-		t.Errorf("defaults: got phase=%v status=%v", runs[0]["phase"], runs[0]["status"])
-	}
-
-	upd := registryUpdateRun(map[string]any{
-		"name": "private-dotfiles", "id": float64(id),
-		"phase": "building", "status": "running",
-		"cursor": map[string]any{"branch": "feat/x", "last_step": float64(2)},
-		"note":   "step 2 done",
-	})
-	if upd.IsError {
-		t.Fatalf("registryUpdateRun: %s", upd.Content[0].Text)
-	}
-
-	runs = decodeRuns(t, registryGetRuns(map[string]any{"name": "private-dotfiles", "id": float64(id)}))
-	cursor, _ := runs[0]["cursor"].(map[string]any)
-	if runs[0]["phase"] != "building" || cursor["last_step"] != float64(2) {
-		t.Errorf("advance did not persist: %v", runs[0])
-	}
-}
-
-// Omitting cursor must not erase where the chain got to — a phase-only advance
-// that wiped the cursor would make resume re-run completed steps.
-func TestRegistryUpdateRun_OmittedCursorIsPreserved(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	id := writeTestRun(t, map[string]any{
-		"name":   "private-dotfiles",
-		"cursor": map[string]any{"last_step": float64(4)},
-	})
-	if r := registryUpdateRun(map[string]any{
-		"name": "private-dotfiles", "id": float64(id),
-		"phase": "shipping", "status": "running",
-	}); r.IsError {
-		t.Fatalf("update: %s", r.Content[0].Text)
-	}
-
-	runs := decodeRuns(t, registryGetRuns(map[string]any{"name": "private-dotfiles", "id": float64(id)}))
-	cursor, _ := runs[0]["cursor"].(map[string]any)
-	if cursor["last_step"] != float64(4) {
-		t.Errorf("cursor must survive a phase-only advance, got %v", runs[0]["cursor"])
-	}
-}
-
-func TestRegistryRun_ScopedToProjectAndValidated(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	id := writeTestRun(t, map[string]any{"name": "private-dotfiles"})
-
-	// A caller scoped to another project must not see or advance this run.
-	if r := registryGetRuns(map[string]any{"name": "emily", "id": float64(id)}); !r.IsError {
-		t.Error("want error reading another project's run by id")
-	}
-	if r := registryUpdateRun(map[string]any{
-		"name": "emily", "id": float64(id), "phase": "building", "status": "running",
-	}); !r.IsError {
-		t.Error("want error advancing another project's run")
-	}
-
-	if r := registryUpdateRun(map[string]any{
-		"name": "private-dotfiles", "id": float64(id), "phase": "hammering", "status": "running",
-	}); !r.IsError {
-		t.Error("want error for invalid phase")
-	}
-	if r := registryGetRuns(map[string]any{"name": "private-dotfiles", "status": "bogus"}); !r.IsError {
-		t.Error("want error for invalid status filter")
-	}
-}
-
-func TestRegistryGetRuns_EmptyReturnsEmptyListNotNull(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	runs := decodeRuns(t, registryGetRuns(map[string]any{"name": "private-dotfiles"}))
-	if runs == nil {
-		t.Fatal("want an empty array, got JSON null — callers iterate this")
-	}
-	if len(runs) != 0 {
-		t.Errorf("want 0 runs, got %d", len(runs))
-	}
-}
-
-// ── inbox tests (DOTFILES-40) ──────────────────────────────────────────────
-
-func sampleInboxArgs(sourceRef, rawText string) map[string]any {
-	return map[string]any{
-		"inbox": map[string]any{
-			"source":           "slack",
-			"source_channel":   "C0STUART",
-			"source_permalink": "https://example.slack.com/archives/C0STUART/p" + sourceRef,
-			"source_ref":       sourceRef,
-			"raw_text":         rawText,
-		},
-	}
-}
-
-func writeTestInbox(t *testing.T, sourceRef, rawText string) int64 {
-	t.Helper()
-	result := registryWriteInbox(sampleInboxArgs(sourceRef, rawText))
-	if result.IsError {
-		t.Fatalf("registry_write_inbox: %s", result.Content[0].Text)
-	}
-	resp := decodeToolResult(t, result)
-	idf, ok := resp["id"].(float64)
-	if !ok {
-		t.Fatalf("want numeric id, got %T (%v)", resp["id"], resp["id"])
-	}
-	return int64(idf)
-}
-
-func TestRegistryWriteInbox_ReturnsOkAndID(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	result := registryWriteInbox(sampleInboxArgs("1756600100.000100", "inbox ask"))
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-	resp := decodeToolResult(t, result)
-	if resp["ok"] != true {
-		t.Errorf("want ok=true, got %v", resp["ok"])
-	}
-	id, ok := resp["id"].(float64)
-	if !ok || id <= 0 {
-		t.Fatalf("want positive numeric id, got %T (%v)", resp["id"], resp["id"])
-	}
-}
-
-func TestRegistryWriteInbox_StampsCreatedAtServerSide(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	args := sampleInboxArgs("1756600100.000200", "stamped")
-	// A caller-supplied created_at must not win — the server stamps it.
-	args["inbox"].(map[string]any)["created_at"] = "1999-01-01T00:00:00Z"
-
-	id := int64(decodeToolResult(t, registryWriteInbox(args))["id"].(float64))
-
-	s, err := getStore()
-	if err != nil {
-		t.Fatalf("getStore: %v", err)
-	}
-	it, err := s.GetInbox(id)
-	if err != nil {
-		t.Fatalf("GetInbox: %v", err)
-	}
-	if it.CreatedAt == "1999-01-01T00:00:00Z" {
-		t.Error("caller-supplied created_at was persisted; want server stamp")
-	}
-	if _, err := time.Parse(time.RFC3339, it.CreatedAt); err != nil {
-		t.Errorf("created_at %q is not RFC3339: %v", it.CreatedAt, err)
-	}
-}
-
-func TestRegistryWriteInbox_DuplicateSourceRefErrorsNotPanics(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	sourceRef := "1756600100.000300"
-	writeTestInbox(t, sourceRef, "first")
-
-	// The UNIQUE(source, source_ref) index is the dedup key: a re-seen
-	// message must come back as a clear "already exists" error.
-	result := registryWriteInbox(sampleInboxArgs(sourceRef, "second"))
-	if !result.IsError {
-		t.Error("want error on duplicate source_ref, got none")
-	}
-	errMsg := result.Content[0].Text
-	if !strings.Contains(errMsg, "already exists") || !strings.Contains(errMsg, sourceRef) {
-		t.Errorf("want clean 'already exists' error, got: %s", errMsg)
-	}
-}
-
-func TestRegistryWriteInbox_RejectsCallerSuppliedID(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	args := sampleInboxArgs("1756600100.000400", "with id")
-	args["inbox"].(map[string]any)["id"] = 999
-
-	result := registryWriteInbox(args)
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-
-	// Verify that a different id was assigned, not the caller-supplied one.
-	resp := decodeToolResult(t, result)
-	assignedID := int64(resp["id"].(float64))
-	if assignedID == 999 {
-		t.Error("caller-supplied id was persisted; want server-assigned id")
-	}
-}
-
-func TestRegistryGetInbox_ReturnsDocumentedShape(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	_ = writeTestInbox(t, "1756600100.000500", "test inbox")
-
-	result := registryGetInbox(map[string]any{})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-	resp := decodeToolResult(t, result)
-	items, ok := resp["inbox"].([]any)
-	if !ok {
-		t.Fatalf("want array of inbox items, got %T", resp["inbox"])
-	}
-	if len(items) == 0 {
-		t.Fatal("want at least one inbox item")
-	}
-	item := items[0].(map[string]any)
-	if _, ok := item["id"]; !ok {
-		t.Error("want id field")
-	}
-	if _, ok := item["source"]; !ok {
-		t.Error("want source field")
-	}
-	if _, ok := item["raw_text"]; !ok {
-		t.Error("want raw_text field")
-	}
-	if _, ok := item["status"]; !ok {
-		t.Error("want status field")
-	}
-	if _, ok := item["created_at"]; !ok {
-		t.Error("want created_at field")
-	}
-}
-
-func TestRegistryGetInbox_EmptyWhenNone(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	result := registryGetInbox(map[string]any{})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-	resp := decodeToolResult(t, result)
-	items := resp["inbox"]
-	if items == nil {
-		t.Fatal("want an empty array, got JSON null — callers iterate this")
-	}
-	itemsArr, ok := items.([]any)
-	if !ok {
-		t.Fatalf("want array, got %T", items)
-	}
-	if len(itemsArr) != 0 {
-		t.Errorf("want 0 items, got %d", len(itemsArr))
-	}
-}
-
-func TestRegistryGetInbox_FiltersByStatus(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	_ = writeTestInbox(t, "1756600100.000600", "new item")
-	id2 := writeTestInbox(t, "1756600100.000601", "triaged item")
-
-	s, err := getStore()
-	if err != nil {
-		t.Fatalf("getStore: %v", err)
-	}
-	// Mark the second one as triaged.
-	if err := s.UpdateInbox(id2, "triaged", "plan", "private-dotfiles", "", nil); err != nil {
-		t.Fatalf("UpdateInbox: %v", err)
-	}
-
-	// Get only new items.
-	result := registryGetInbox(map[string]any{"status": "new"})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-	resp := decodeToolResult(t, result)
-	items := resp["inbox"].([]any)
-	if len(items) != 1 {
-		t.Errorf("want 1 new item, got %d", len(items))
-	}
-
-	// Get only triaged items.
-	result = registryGetInbox(map[string]any{"status": "triaged"})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-	resp = decodeToolResult(t, result)
-	items = resp["inbox"].([]any)
-	if len(items) != 1 {
-		t.Errorf("want 1 triaged item, got %d", len(items))
-	}
-}
-
-func TestRegistryUpdateInbox_AdvancesStatusSingleStatement(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	id := writeTestInbox(t, "1756600100.000700", "to update")
-
-	result := registryUpdateInbox(map[string]any{
-		"id":      float64(id),
-		"status":  "triaged",
-		"triage":  "plan",
-		"project": "private-dotfiles",
-	})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-	resp := decodeToolResult(t, result)
-	if resp["ok"] != true {
-		t.Errorf("want ok=true, got %v", resp["ok"])
-	}
-
-	s, err := getStore()
-	if err != nil {
-		t.Fatalf("getStore: %v", err)
-	}
-	it, err := s.GetInbox(id)
-	if err != nil {
-		t.Fatalf("GetInbox: %v", err)
-	}
-	if it.Status != "triaged" {
-		t.Errorf("want status 'triaged', got %q", it.Status)
-	}
-	if it.Triage != "plan" {
-		t.Errorf("want triage 'plan', got %q", it.Triage)
-	}
-	if it.Project == nil || *it.Project != "private-dotfiles" {
-		t.Errorf("want project 'private-dotfiles', got %v", it.Project)
-	}
-}
-
-func TestRegistryUpdateInbox_OmittedFieldsLeaveStoredValueUnchanged(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	id := writeTestInbox(t, "1756600100.000800", "with values")
-
-	s, err := getStore()
-	if err != nil {
-		t.Fatalf("getStore: %v", err)
-	}
-	// Set some values first.
-	if err := s.UpdateInbox(id, "triaged", "plan", "private-dotfiles", "initial note", nil); err != nil {
-		t.Fatalf("UpdateInbox: %v", err)
-	}
-
-	// Update only status, leaving triage and note unchanged.
-	result := registryUpdateInbox(map[string]any{
-		"id":     float64(id),
-		"status": "routed",
-	})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-
-	it, err := s.GetInbox(id)
-	if err != nil {
-		t.Fatalf("GetInbox: %v", err)
-	}
-	if it.Status != "routed" {
-		t.Errorf("want status 'routed', got %q", it.Status)
-	}
-	if it.Triage != "plan" {
-		t.Errorf("want triage unchanged as 'plan', got %q", it.Triage)
-	}
-	if it.Note != "initial note" {
-		t.Errorf("want note unchanged as 'initial note', got %q", it.Note)
-	}
-}
-
-func TestInboxToolsRegisteredInDispatchAndSchemas(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	defs := allTools()
-	toolsByName := make(map[string]bool)
-	for _, tool := range defs {
-		toolsByName[tool.Name] = true
-	}
-
-	expectedTools := []string{
-		"registry_write_inbox",
-		"registry_get_inbox",
-		"registry_update_inbox",
-	}
-	for _, name := range expectedTools {
-		if !toolsByName[name] {
-			t.Errorf("tool %q not found in ToolDefinitions", name)
-		}
-	}
-
-	// Check dispatch routes each tool.
-	for _, name := range expectedTools {
-		// Each tool should at least not return "unknown tool" error.
-		// (Actual dispatch testing is done elsewhere.)
-		_ = name
-	}
-}
-
-// TestRegistryWriteInbox_IgnoresCallerSuppliedLinkageFields covers the
-// ship-review WARNING: project, proposal_id, run_id and note are not in the
-// tool's InputSchema, but json.Unmarshal fills them from any extra keys sent, so
-// without an explicit reset a capture-time caller could pre-link a brand-new row
-// to an arbitrary existing proposal or run.
-func TestRegistryWriteInbox_IgnoresCallerSuppliedLinkageFields(t *testing.T) {
-	_, cleanup := setupTestDataDir(t)
-	defer cleanup()
-
-	args := sampleInboxArgs("1756600100.000900", "forged linkage")
-	inbox := args["inbox"].(map[string]any)
-	inbox["project"] = "some-other-project"
-	inbox["proposal_id"] = 4242
-	inbox["run_id"] = 777
-	inbox["note"] = "pre-set by the caller"
-	inbox["status"] = "routed"
-	inbox["triage"] = "drop"
-
-	result := registryWriteInbox(args)
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-	id := int64(decodeToolResult(t, result)["id"].(float64))
-
-	s, err := getStore()
-	if err != nil {
-		t.Fatalf("getStore: %v", err)
-	}
-	it, err := s.GetInbox(id)
-	if err != nil {
-		t.Fatalf("GetInbox: %v", err)
-	}
-
-	if it.Project != nil {
-		t.Errorf("caller-supplied project was persisted (%v); capture happens before routing, so it must be null", *it.Project)
-	}
-	if it.ProposalID != nil {
-		t.Errorf("caller-supplied proposal_id was persisted (%d); a fresh row must not be pre-linked to an existing proposal", *it.ProposalID)
-	}
-	if it.RunID != nil {
-		t.Errorf("caller-supplied run_id was persisted (%d); a fresh row must not be pre-linked to an existing run", *it.RunID)
-	}
-	if it.Note != "" {
-		t.Errorf("caller-supplied note was persisted (%q); note is written by triage, not by capture", it.Note)
-	}
-	if it.Status != "new" {
-		t.Errorf("caller-supplied status won: got %q, want %q", it.Status, "new")
-	}
-	if it.Triage != "" {
-		t.Errorf("caller-supplied triage was persisted (%q); only triage may set a verdict", it.Triage)
-	}
-}
-
 // --- egress secret-pattern check (DOTFILES-41) ---
 //
 // checkEgress is the enforceable half of the findings-egress control: every
@@ -2822,4 +2645,322 @@ func TestSetPlanPhase(t *testing.T) {
 			t.Errorf("raw data column must not gain a 'created_at' field, got: %v", data)
 		}
 	})
+}
+
+// TestBackfillPlanStatuses pins DOTFILES-48 step 3: every plan row written
+// before the persisted status field existed has no "status" key in its data
+// blob, and with the derivation logic gone there's nothing left to fall back
+// on at read time — it would silently read as empty/pending forever. The
+// backfill pass must call ComputePlanStatus over every such row (idempotent:
+// skip rows that already carry a status) and persist the result.
+func TestBackfillPlanStatuses(t *testing.T) {
+	s := openTestStore(t)
+
+	// Seed a done-and-shipped plan and a mid-flight plan the pre-migration
+	// way: write plan data with no "status" key at all (WritePlan doesn't add
+	// one unless the caller's map already has it), simulating a row written
+	// before this field existed.
+	doneShippedPlan := map[string]any{
+		"ticket":  "TEST-BF-1",
+		"summary": "finished and shipped",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "done"},
+		},
+	}
+	if err := s.WritePlan("myproject", "TEST-BF-1", doneShippedPlan); err != nil {
+		t.Fatalf("WritePlan (done+shipped): %v", err)
+	}
+	if _, err := s.WriteAudit("myproject", map[string]any{
+		"ticket":  "TEST-BF-1",
+		"type":    "feature",
+		"summary": "shipped it",
+	}); err != nil {
+		t.Fatalf("WriteAudit: %v", err)
+	}
+	// WriteAudit's own transactional recompute (DOTFILES-48) already
+	// populates status here — strip it back out to simulate a genuinely
+	// pre-migration row (audit entry present, plan data never touched by
+	// any status-writing mutation point).
+	if _, err := s.db.Exec(
+		`UPDATE plans SET data = json_remove(data, '$.status') WHERE project = ? AND ticket = ?`,
+		"myproject", "TEST-BF-1",
+	); err != nil {
+		t.Fatalf("strip status to simulate pre-migration row: %v", err)
+	}
+
+	midFlightPlan := map[string]any{
+		"ticket":  "TEST-BF-2",
+		"summary": "still in flight",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "done"},
+			map[string]any{"title": "step two", "status": "in_progress"},
+		},
+	}
+	if err := s.WritePlan("myproject", "TEST-BF-2", midFlightPlan); err != nil {
+		t.Fatalf("WritePlan (mid-flight): %v", err)
+	}
+
+	// WriteAudit's transactional status recompute (DOTFILES-48) only touches
+	// the ticket it names, so TEST-BF-2's row is untouched — confirm both
+	// rows genuinely have no "status" key before backfilling, i.e. this test
+	// is actually exercising the pre-migration-shaped case it claims to.
+	assertNoStatusKey := func(t *testing.T, ticket string) {
+		t.Helper()
+		var raw string
+		if err := s.db.QueryRow(
+			`SELECT data FROM plans WHERE project = ? AND ticket = ?`, "myproject", ticket,
+		).Scan(&raw); err != nil {
+			t.Fatalf("query raw data for %s: %v", ticket, err)
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			t.Fatalf("unmarshal raw data for %s: %v", ticket, err)
+		}
+		if status, present := data["status"]; present && status != "" {
+			t.Fatalf("precondition failed: %s already has status %v before backfill", ticket, status)
+		}
+	}
+	assertNoStatusKey(t, "TEST-BF-1")
+	assertNoStatusKey(t, "TEST-BF-2")
+
+	if err := s.backfillPlanStatuses(); err != nil {
+		t.Fatalf("backfillPlanStatuses: %v", err)
+	}
+
+	assertStatus := func(t *testing.T, ticket, want string) {
+		t.Helper()
+		var raw string
+		if err := s.db.QueryRow(
+			`SELECT data FROM plans WHERE project = ? AND ticket = ?`, "myproject", ticket,
+		).Scan(&raw); err != nil {
+			t.Fatalf("query raw data for %s: %v", ticket, err)
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			t.Fatalf("unmarshal raw data for %s: %v", ticket, err)
+		}
+		if data["status"] != want {
+			t.Errorf("%s status = %v, want %s", ticket, data["status"], want)
+		}
+	}
+	assertStatus(t, "TEST-BF-1", "done")
+	assertStatus(t, "TEST-BF-2", "in_progress")
+
+	// Idempotent: a row that already carries a status must be left alone by
+	// a second pass, not recomputed and overwritten.
+	if _, err := s.db.Exec(
+		`UPDATE plans SET data = json_set(data, '$.status', 'blocked') WHERE project = ? AND ticket = ?`,
+		"myproject", "TEST-BF-1",
+	); err != nil {
+		t.Fatalf("force-set status for idempotency check: %v", err)
+	}
+	if err := s.backfillPlanStatuses(); err != nil {
+		t.Fatalf("backfillPlanStatuses (second pass): %v", err)
+	}
+	assertStatus(t, "TEST-BF-1", "blocked")
+}
+
+// TestNewStore_BackfillsPlanStatusesOnOpen confirms the backfill runs
+// automatically on store startup (newStore), not only when called directly
+// — a plan row from before this field existed must come back populated the
+// very first time the registry server (re)starts against an existing DB,
+// with no separate migration step to remember to run.
+func TestNewStore_BackfillsPlanStatusesOnOpen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "registry.db")
+
+	s1, err := newStore(dbPath)
+	if err != nil {
+		t.Fatalf("newStore (first open): %v", err)
+	}
+	plan := map[string]any{
+		"ticket":  "TEST-BF-3",
+		"summary": "pre-migration row",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "done"},
+		},
+	}
+	if err := s1.WritePlan("myproject", "TEST-BF-3", plan); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	if _, err := s1.WriteAudit("myproject", map[string]any{
+		"ticket":  "TEST-BF-3",
+		"type":    "feature",
+		"summary": "shipped it",
+	}); err != nil {
+		t.Fatalf("WriteAudit: %v", err)
+	}
+	// Simulate this row predating the persisted status field: strip it back
+	// out after WriteAudit's own transactional write populated it, so
+	// reopening the store is the only thing left that can repopulate it.
+	if _, err := s1.db.Exec(
+		`UPDATE plans SET data = json_remove(data, '$.status') WHERE project = ? AND ticket = ?`,
+		"myproject", "TEST-BF-3",
+	); err != nil {
+		t.Fatalf("strip status to simulate pre-migration row: %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	s2, err := newStore(dbPath)
+	if err != nil {
+		t.Fatalf("newStore (reopen): %v", err)
+	}
+	defer s2.Close()
+
+	var raw string
+	if err := s2.db.QueryRow(
+		`SELECT data FROM plans WHERE project = ? AND ticket = ?`, "myproject", "TEST-BF-3",
+	).Scan(&raw); err != nil {
+		t.Fatalf("query raw data: %v", err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		t.Fatalf("unmarshal raw data: %v", err)
+	}
+	if data["status"] != "done" {
+		t.Errorf("status = %v, want done (backfilled on reopen)", data["status"])
+	}
+}
+
+// ── dead backend surface removal (DOTFILES-48 step 5) ────────────────────────
+//
+// registry_write_run/get_runs/update_run, registry_claim_proposal_for_build and
+// registry_worklist had zero callers in claude/skills/ or claude/agents/; the
+// agent_runs and inbox tables existed only to back them (plus the inbox tools
+// themselves, equally uncalled), and the plans.status SQL column was written
+// but never read. All of it is gone now — this pins that dispatch actually
+// refuses the old names rather than merely omitting them from tools/list, and
+// that dropping the tables/column did not disturb the DB's other data.
+
+func TestDeadTools_RefuseAsUnknownFromDispatch(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	removed := []string{
+		"registry_write_run",
+		"registry_get_runs",
+		"registry_update_run",
+		"registry_claim_proposal_for_build",
+		"registry_worklist",
+		"registry_write_inbox",
+		"registry_get_inbox",
+		"registry_update_inbox",
+	}
+
+	names := map[string]bool{}
+	for _, tool := range allTools() {
+		names[tool.Name] = true
+	}
+	for _, name := range removed {
+		if names[name] {
+			t.Errorf("tool %q still listed in tools/list; want it deregistered", name)
+		}
+		got := dispatch(name, map[string]any{})
+		if !got.IsError || !strings.Contains(got.Content[0].Text, "unknown tool") {
+			t.Errorf("dispatch(%q) = %+v, want an 'unknown tool' error", name, got)
+		}
+	}
+}
+
+// TestDeadSchemaDropped_DBStillOpensAndReadsExistingPlans covers the migration
+// path end to end: a DB written by a pre-DOTFILES-48 binary (agent_runs and
+// inbox tables present, plans.status populated) must open cleanly under the
+// new schema, drop that dead surface, and still serve the plan rows it already
+// held.
+func TestDeadSchemaDropped_DBStillOpensAndReadsExistingPlans(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "registry.db")
+
+	s1, err := newStore(dbPath)
+	if err != nil {
+		t.Fatalf("newStore (initial): %v", err)
+	}
+	if err := s1.WritePlan("myproject", "PRE-EXISTING-1", map[string]any{
+		"ticket": "PRE-EXISTING-1", "summary": "written before the drop",
+		"plan_steps": []any{map[string]any{"id": 1, "status": "done"}},
+		"status":     "done",
+	}); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	// Simulate a DB created by the pre-DOTFILES-48 binary: recreate the
+	// now-removed tables and the plans.status column by hand, exactly as
+	// createSchema used to, so the migration on next open has real work to do.
+	legacyStmts := []string{
+		`ALTER TABLE plans ADD COLUMN status TEXT`,
+		`UPDATE plans SET status = 'done' WHERE ticket = 'PRE-EXISTING-1'`,
+		`CREATE TABLE agent_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL, proposal_id INTEGER, ticket TEXT,
+			phase TEXT NOT NULL, status TEXT NOT NULL, cursor TEXT, note TEXT,
+			created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE inbox (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT, source TEXT NOT NULL, source_ref TEXT NOT NULL,
+			source_channel TEXT, source_permalink TEXT, raw_text TEXT NOT NULL,
+			status TEXT NOT NULL, triage TEXT, proposal_id INTEGER, run_id INTEGER,
+			note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT
+		)`,
+	}
+	for _, stmt := range legacyStmts {
+		if _, err := s1.db.Exec(stmt); err != nil {
+			t.Fatalf("simulate legacy schema (%s): %v", stmt, err)
+		}
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopening runs createSchema (and its dropDeadSchema step) again — this is
+	// the exact path a real upgrade takes.
+	s2, err := newStore(dbPath)
+	if err != nil {
+		t.Fatalf("newStore (reopen after simulated legacy schema): %v", err)
+	}
+	defer s2.Close()
+
+	for _, table := range []string{"agent_runs", "inbox"} {
+		var name string
+		err := s2.db.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table,
+		).Scan(&name)
+		if err != sql.ErrNoRows {
+			t.Errorf("table %q: want dropped (sql.ErrNoRows), got name=%q err=%v", table, name, err)
+		}
+	}
+	hasStatusCol, err := s2.columnExists("plans", "status")
+	if err != nil {
+		t.Fatalf("columnExists: %v", err)
+	}
+	if hasStatusCol {
+		t.Error("plans.status column still present after migration; want dropped")
+	}
+
+	// The whole point: a plan written before the drop still reads correctly.
+	got, err := s2.GetPlan("myproject", "PRE-EXISTING-1")
+	if err != nil {
+		t.Fatalf("GetPlan after migration: %v", err)
+	}
+	if got["summary"] != "written before the drop" {
+		t.Errorf("summary = %v, want the pre-existing value — migration must not lose plan data", got["summary"])
+	}
+	if got["status"] != "done" {
+		t.Errorf("status = %v, want done — the JSON-blob status must survive the column drop", got["status"])
+	}
+}
+
+// TestDropDeadSchema_IsIdempotent — createSchema (and its dropDeadSchema step)
+// runs on every server start, so a DB that has already been migrated must not
+// error the second, third, ... time it opens.
+func TestDropDeadSchema_IsIdempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "registry.db")
+	for i := 0; i < 3; i++ {
+		s, err := newStore(dbPath)
+		if err != nil {
+			t.Fatalf("newStore run %d: %v", i, err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close run %d: %v", i, err)
+		}
+	}
 }

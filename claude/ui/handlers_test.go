@@ -682,8 +682,13 @@ func TestGetPlan_RendersPhaseOverrideControl_DefaultsToComputedStatus(t *testing
 
 	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
 	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
-		"ticket":     "TICKET-1",
-		"summary":    "Test plan",
+		"ticket":  "TICKET-1",
+		"summary": "Test plan",
+		// "status" mirrors what ComputePlanStatus (claude/mcp/server/store.go)
+		// would have persisted at write time for an all-done plan with no
+		// audit entry yet — the plan page now reads this field directly
+		// rather than deriving it from plan_steps on every read (DOTFILES-48).
+		"status":     "pr_ready",
 		"plan_steps": []map[string]any{{"step": 1, "status": "done"}},
 	})
 
@@ -707,14 +712,50 @@ func TestGetPlan_RendersPhaseOverrideControl_DefaultsToComputedStatus(t *testing
 	if !strings.Contains(body, `id="phase-override"`) || !strings.Contains(body, `name="phase"`) {
 		t.Errorf("expected select#phase-override[name=phase], got:\n%s", body)
 	}
-	// No override set — plan has all steps done and no audit entry, so the
-	// computed effective status is pr_ready, and the state text must say so
-	// rather than "Automatic" alone leaving the value ambiguous.
+	// No override set — the persisted status is pr_ready, and the state text
+	// must say so rather than "Automatic" alone leaving the value ambiguous.
 	if !strings.Contains(body, "Automatic") {
 		t.Errorf("expected 'Automatic' state text when no override is set, got:\n%s", body)
 	}
 	if !strings.Contains(body, `value="pr_ready" selected`) {
 		t.Errorf("expected pr_ready option selected as the computed default, got:\n%s", body)
+	}
+}
+
+// TestGetPlan_MissingStatus_RecomputesNotHardcodedPending guards the round-2
+// REJECTED finding: a plan with no persisted "status" field (the registry
+// MCP server's backfillPlanStatuses hasn't run against this DB yet — a
+// separate process from this dashboard) must have its status recomputed
+// from steps+audit, not silently mislabeled "pending" regardless of its
+// real state.
+func TestGetPlan_MissingStatus_RecomputesNotHardcodedPending(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	// No "status" key at all — the pre-backfill shape.
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":  "TICKET-1",
+		"summary": "predates the status field",
+		"plan_steps": []map[string]any{
+			{"step": 1, "status": "done"},
+			{"step": 2, "status": "blocked"},
+		},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing/plans/TICKET-1")
+	if err != nil {
+		t.Fatalf("GET plan: %v", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	body := string(b)
+
+	if !strings.Contains(body, `value="blocked" selected`) {
+		t.Errorf("want recomputed status=blocked (one step is blocked) reflected as the selected option, got:\n%s", body)
 	}
 }
 
@@ -826,6 +867,59 @@ func TestSetPlanPhase_EmptyValueClearsOverride(t *testing.T) {
 	body := string(b)
 	if !strings.Contains(body, "Automatic") {
 		t.Errorf("expected 'Automatic' state text after clearing, got:\n%s", body)
+	}
+}
+
+// TestSetPlanPhase_ClearingOverride_RecomputesPersistedStatus guards the
+// REJECTED-review MAJOR finding: TestSetPlanPhase_EmptyValueClearsOverride's
+// fixture never sets "status" at all, so it can't catch a clear leaving the
+// stale override value sitting in $.status forever (read-time re-derivation
+// is gone — DOTFILES-48 — so nothing else self-corrects it). This fixture
+// mirrors what a real override-set row actually looks like: status mirrors
+// the override, same as handleSetPlanPhase's set-branch persists it.
+func TestSetPlanPhase_ClearingOverride_RecomputesPersistedStatus(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":         "TICKET-1",
+		"summary":        "Test plan",
+		"plan_steps":     []map[string]any{{"step": 1, "status": "pending"}},
+		"phase_override": "blocked",
+		"status":         "blocked",
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.PostForm(ts.URL+"/projects/existing/plans/TICKET-1/phase", url.Values{
+		"phase": {""},
+	})
+	if err != nil {
+		t.Fatalf("POST phase clear: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("want 303, got %d", resp.StatusCode)
+	}
+
+	plan, err := ReadPlan("existing", "TICKET-1")
+	if err != nil {
+		t.Fatalf("ReadPlan: %v", err)
+	}
+	if plan.PhaseOverride != "" {
+		t.Errorf("want phase_override cleared, got %q", plan.PhaseOverride)
+	}
+	// All steps are still pending with no audit entry — the recomputed
+	// status must revert to "pending", not stay "blocked" from the override.
+	if plan.Status != "pending" {
+		t.Errorf("want persisted status recomputed to 'pending' after clearing override, got %q — stale override value left behind", plan.Status)
 	}
 }
 

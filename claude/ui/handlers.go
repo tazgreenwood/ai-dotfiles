@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"html/template"
@@ -534,8 +535,18 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	auditTickets, _ := AuditTicketSet(name)
-	effectiveStatus := derivePlanStatus(plan.PlanSteps, auditTickets[ticket], plan.PhaseOverride)
+	// Status is persisted on the plan row by the registry MCP server's
+	// ComputePlanStatus at each mutation point (UpdateStep, WriteAudit,
+	// SetPlanPhase) — read directly rather than re-derived here (DOTFILES-48),
+	// except for the fallback recompute in planStatusOrRecompute: a plan
+	// that predates this migration (or otherwise has no persisted status)
+	// gets its status computed from steps+audit rather than mislabeled
+	// "pending" regardless of its real state.
+	auditTickets, err := AuditTicketSet(name)
+	if err != nil {
+		auditTickets = map[string]bool{}
+	}
+	effectiveStatus := planStatusOrRecompute(plan, auditTickets)
 
 	data := planData{
 		Breadcrumbs: []breadcrumb{
@@ -670,14 +681,53 @@ func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	if phase == "" {
+		// Clearing an override must also recompute the persisted status from
+		// steps+audit — read-time re-derivation (derivePlanStatus) is gone,
+		// so leaving the stale override value in $.status would show a wrong
+		// Kanban column indefinitely (nothing else corrects it). Read the
+		// plan's current steps and audit-entry existence inside this same
+		// transaction (mirroring store.go's hasAuditEntryTx) so the compute
+		// sees a consistent snapshot alongside the write it commits with.
+		var raw string
+		if err := tx.QueryRow(`SELECT data FROM plans WHERE project = ? AND ticket = ?`, name, ticket).Scan(&raw); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		var planData map[string]any
+		if err := json.Unmarshal([]byte(raw), &planData); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		steps, _ := planData["plan_steps"].([]any)
+		stepStatuses := make([]string, len(steps))
+		for i, raw := range steps {
+			// A malformed entry (not a JSON object) still needs to count
+			// against allDone the same way computeStatusFromStepStatuses
+			// treats any non-"done" status — append "" (never equals
+			// "done") rather than skip it, so a malformed step can't
+			// accidentally make an otherwise-incomplete plan look all-done.
+			if step, ok := raw.(map[string]any); ok {
+				stepStatuses[i], _ = step["status"].(string)
+			}
+		}
+		hasAudit, err := hasAuditEntryInTx(tx, name, ticket)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		newStatus := computeStatusFromStepStatuses(stepStatuses, hasAudit)
 		_, err = tx.Exec(
-			`UPDATE plans SET data = json_remove(data, '$.phase_override') WHERE project = ? AND ticket = ?`,
-			name, ticket,
+			`UPDATE plans SET data = json_set(json_remove(data, '$.phase_override'), '$.status', ?) WHERE project = ? AND ticket = ?`,
+			newStatus, name, ticket,
 		)
 	} else {
+		// Setting a non-empty override is always safe to mirror onto the
+		// persisted status field directly: phase_override wins outright over
+		// every other precedence rule in ComputePlanStatus, so status == the
+		// override value by construction — no steps/audit lookup needed.
 		_, err = tx.Exec(
-			`UPDATE plans SET data = json_set(data, '$.phase_override', ?) WHERE project = ? AND ticket = ?`,
-			phase, name, ticket,
+			`UPDATE plans SET data = json_set(json_set(data, '$.phase_override', ?), '$.status', ?) WHERE project = ? AND ticket = ?`,
+			phase, phase, name, ticket,
 		)
 	}
 	if err != nil {
@@ -704,6 +754,114 @@ func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/projects/"+name+"/plans/"+ticket, http.StatusSeeOther)
+}
+
+// hasAuditEntryInTx reports whether project has at least one audit entry
+// whose "ticket" field matches ticket, read within tx so it sees a
+// consistent snapshot alongside the plan write handleSetPlanPhase commits
+// with. Mirrors claude/mcp/server/store.go's hasAuditEntryTx — kept as a
+// separate copy rather than a shared import because the two are different
+// go.mod modules (DOTFILES-48 follow-up).
+func hasAuditEntryInTx(tx *sql.Tx, project, ticket string) (bool, error) {
+	rows, err := tx.Query(`SELECT data FROM audit WHERE project = ?`, project)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			return false, err
+		}
+		if t, _ := entry["ticket"].(string); t == ticket {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// computeStatusFromStepStatuses mirrors claude/mcp/server/store.go's
+// ComputePlanStatus precedence (blocked > in_review > in_progress/partial >
+// pr_ready/done > pending), for the two places in this package that must
+// recompute status without going through the MCP server: clearing a phase
+// override (handleSetPlanPhase, which has a []any-decoded step list from a
+// raw JSON blob read inside a transaction), and the read-path fallback for a
+// plan whose $.status field is empty because the registry MCP server's
+// backfill hasn't run against this DB yet (planStatusOrRecompute, below —
+// used by AggregatePlanKanban and handlePlan). Takes plain step-status
+// strings rather than the two callers' different step representations so
+// this logic has exactly one copy regardless of which caller's shape.
+func computeStatusFromStepStatuses(stepStatuses []string, hasAudit bool) string {
+	anyBlocked, anyInReview, anyInProgress, anyDone := false, false, false, false
+	allDone := len(stepStatuses) > 0
+	for _, status := range stepStatuses {
+		switch status {
+		case "blocked":
+			anyBlocked = true
+		case "in_review":
+			anyInReview = true
+		case "in_progress":
+			anyInProgress = true
+		case "done":
+			anyDone = true
+		}
+		if status != "done" {
+			allDone = false
+		}
+	}
+	switch {
+	case anyBlocked:
+		return "blocked"
+	case anyInReview:
+		return "in_review"
+	case anyInProgress || (anyDone && !allDone):
+		return "in_progress"
+	case allDone:
+		if hasAudit {
+			return "done"
+		}
+		return "pr_ready"
+	default:
+		return "pending"
+	}
+}
+
+// planStatusOrRecompute returns plan.Status if it's already persisted, or
+// recomputes it from steps+audit+override for a plan predating the
+// DOTFILES-48 migration (or one otherwise missing the field) whose $.status
+// the registry MCP server's backfillPlanStatuses hasn't populated yet — that
+// backfill runs in a separate process (the MCP server, spawned per Claude
+// session), so a plan can reach this dashboard before it ever has.
+// Hardcoding "pending" in that gap (the original DOTFILES-48 UI port did
+// this) would silently mislabel a blocked/in-progress/done plan as
+// not-yet-started; this instead gives the same answer registryListPlans
+// falls back to on the backend.
+//
+// auditTickets is the project's whole audit-ticket set (AuditTicketSet),
+// fetched ONCE by the caller — not looked up per plan here. A per-plan audit
+// query inside AggregatePlanKanban's per-project loop over N plans would
+// reopen a SQLite connection N times per project during the backfill-lag
+// window this function exists for, exactly the per-plan-read anti-pattern
+// AuditTicketSet's own doc comment says it was written to avoid.
+func planStatusOrRecompute(plan Plan, auditTickets map[string]bool) string {
+	if plan.Status != "" {
+		return plan.Status
+	}
+	// Mirrors ComputePlanStatus's precedence (claude/mcp/server/store.go):
+	// phase_override wins outright over anything derived from steps/audit.
+	if plan.PhaseOverride != "" {
+		return plan.PhaseOverride
+	}
+	stepStatuses := make([]string, len(plan.PlanSteps))
+	for i, s := range plan.PlanSteps {
+		stepStatuses[i] = s.Status
+	}
+	return computeStatusFromStepStatuses(stepStatuses, auditTickets[plan.Ticket])
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {
