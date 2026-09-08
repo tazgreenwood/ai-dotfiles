@@ -72,6 +72,7 @@ type Plan struct {
 	PRUrl              string     `json:"pr_url,omitempty"`
 	AcceptanceCriteria []string   `json:"acceptance_criteria,omitempty"`
 	PlanSteps          []PlanStep `json:"plan_steps,omitempty"`
+	PhaseOverride      string     `json:"phase_override,omitempty"`
 }
 
 type AuditEntry struct {

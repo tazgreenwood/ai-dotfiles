@@ -99,7 +99,10 @@ type PlanCard struct {
 // just because hasAuditEntry couldn't be determined — callers that can't
 // look up the audit log (or hit an error doing so) should pass false, never
 // guess true.
-func derivePlanStatus(steps []PlanStep, hasAuditEntry bool) string {
+func derivePlanStatus(steps []PlanStep, hasAuditEntry bool, phaseOverride string) string {
+	if phaseOverride != "" {
+		return phaseOverride
+	}
 	anyBlocked := false
 	anyInReview := false
 	anyInProgress := false
@@ -170,7 +173,7 @@ func AggregatePlanKanban(doneCutoff time.Time) (cards []PlanCard, hiddenOlder in
 			if err != nil {
 				continue
 			}
-			status := derivePlanStatus(plan.PlanSteps, auditTickets[m.Ticket])
+			status := derivePlanStatus(plan.PlanSteps, auditTickets[m.Ticket], plan.PhaseOverride)
 			doneSteps := 0
 			var latestDoneAt string
 			var latestDoneAtParsed time.Time
