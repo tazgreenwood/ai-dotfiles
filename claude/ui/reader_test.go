@@ -84,6 +84,14 @@ func openFixtureDB(t *testing.T, dir string) *sql.DB {
 			recorded_at TEXT NOT NULL,
 			data TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project TEXT NOT NULL,
+			type TEXT NOT NULL,
+			occurred_at TEXT NOT NULL,
+			data TEXT NOT NULL,
+			tags TEXT
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {

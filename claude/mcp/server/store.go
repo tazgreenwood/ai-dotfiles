@@ -413,6 +413,13 @@ func (s *store) UpdateStep(project, ticket string, stepIndex int, status string)
 // Also never round-trips GetPlan's decorated map (which injects "id" and
 // "created_at" for API-response convenience), so it can't leak those into
 // the persisted document the way a GetPlan-then-WritePlan call would.
+//
+// The phase_override mutation and its plan_phase_override_set event are
+// written in the SAME transaction: phase_override silently overrides
+// planIsShipped's shipped/done determination, so the event is the only
+// record of who/when/why, and a fire-and-forget event write that can fail
+// independently of the mutation would let a plan flip to "shipped" with zero
+// trace. If the event can't be recorded, the phase change rolls back too.
 func (s *store) SetPlanPhase(project, ticket, phase string) error {
 	var exists int
 	if err := s.db.QueryRow(
@@ -425,19 +432,39 @@ func (s *store) SetPlanPhase(project, ticket, phase string) error {
 		return fmt.Errorf("plan '%s' not found for project '%s'", ticket, project)
 	}
 
-	var err error
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	if phase == "" {
-		_, err = s.db.Exec(
+		_, err = tx.Exec(
 			`UPDATE plans SET data = json_remove(data, '$.phase_override') WHERE project = ? AND ticket = ?`,
 			project, ticket,
 		)
 	} else {
-		_, err = s.db.Exec(
+		_, err = tx.Exec(
 			`UPDATE plans SET data = json_set(data, '$.phase_override', ?) WHERE project = ? AND ticket = ?`,
 			phase, project, ticket,
 		)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	eventData, err := json.Marshal(map[string]any{"ticket": ticket, "phase": phase})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO events (project, type, occurred_at, data, tags) VALUES (?, ?, ?, ?, ?)`,
+		project, "plan_phase_override_set", time.Now().UTC().Format(time.RFC3339), string(eventData), "phase-override",
+	); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // ── audit ────────────────────────────────────────────────────────────────────

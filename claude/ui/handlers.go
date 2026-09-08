@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"html/template"
+	"net"
 	"net/http"
 	"slices"
 	"sort"
@@ -560,18 +561,41 @@ var validPlanPhases = func() map[string]bool {
 	return m
 }()
 
+// isLoopbackRequest reports whether r arrived from the local machine. This is
+// registry-ui's first state-mutating route — every other route is a GET, and
+// the server otherwise binds all interfaces with no session/auth layer at
+// all. Rather than bolt auth onto a single-operator personal tool, this
+// route is scoped to loopback: a remote host (or a cross-site form submitted
+// by a browser that happens to be able to reach this port) can't reach it,
+// which is the actual threat a route that can silently mark a plan "shipped"
+// needs closed.
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // handleSetPlanPhase sets or clears a plan's phase_override via a single
 // atomic json_set/json_remove UPDATE (never a read-modify-write — that would
 // reintroduce the exact lost-update race SetPlanPhase's server-side
 // counterpart in claude/mcp/server/store.go was written to avoid: a
 // concurrent registry_update_step call landing between a read and a write
-// here would have its step-status change silently reverted). An empty
-// "phase" form value clears the override; any other value must be one of
-// the 6 valid phases or the request is rejected — phase_override silently
-// overrides planIsShipped's shipped/done determination with no other trace,
-// so a bad value must never be allowed to persist, and every successful set
-// is recorded as an event for that reason too.
+// here would have its step-status change silently reverted), and the
+// plan_phase_override_set event write in the SAME transaction — phase_override
+// silently overrides planIsShipped's shipped/done determination, so the only
+// record of who/when/why must not be droppable by a fire-and-forget insert;
+// if the event can't be recorded, the phase change itself rolls back rather
+// than committing untraceably. An empty "phase" form value clears the
+// override; any other value must be one of the 6 valid phases or the
+// request is rejected.
 func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r) {
+		http.Error(w, "forbidden: this route only accepts local requests", http.StatusForbidden)
+		return
+	}
 	name := r.PathValue("name")
 	ticket := r.PathValue("ticket")
 	if err := r.ParseForm(); err != nil {
@@ -599,13 +623,20 @@ func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := db.Begin()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
 	if phase == "" {
-		_, err = db.Exec(
+		_, err = tx.Exec(
 			`UPDATE plans SET data = json_remove(data, '$.phase_override') WHERE project = ? AND ticket = ?`,
 			name, ticket,
 		)
 	} else {
-		_, err = db.Exec(
+		_, err = tx.Exec(
 			`UPDATE plans SET data = json_set(data, '$.phase_override', ?) WHERE project = ? AND ticket = ?`,
 			phase, name, ticket,
 		)
@@ -615,13 +646,22 @@ func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Best-effort: a failed event write must never fail the phase set, which
-	// already committed.
-	if eventData, err := json.Marshal(map[string]any{"ticket": ticket, "phase": phase}); err == nil {
-		_, _ = db.Exec(
-			`INSERT INTO events (project, type, occurred_at, data, tags) VALUES (?, ?, ?, ?, ?)`,
-			name, "plan_phase_override_set", time.Now().UTC().Format(time.RFC3339), string(eventData), "phase-override",
-		)
+	eventData, err := json.Marshal(map[string]any{"ticket": ticket, "phase": phase})
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO events (project, type, occurred_at, data, tags) VALUES (?, ?, ?, ?, ?)`,
+		name, "plan_phase_override_set", time.Now().UTC().Format(time.RFC3339), string(eventData), "phase-override",
+	); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
 
 	http.Redirect(w, r, "/projects/"+name+"/plans/"+ticket, http.StatusSeeOther)

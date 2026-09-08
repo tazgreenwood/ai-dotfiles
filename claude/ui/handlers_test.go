@@ -869,3 +869,44 @@ func TestSetPlanPhase_InvalidPhase_RejectedNotSilentlyStored(t *testing.T) {
 		t.Errorf("invalid phase must not be persisted, got phase_override=%q", plan.PhaseOverride)
 	}
 }
+
+// TestSetPlanPhase_RejectsNonLoopbackRequest guards the security finding a
+// review pass caught: this is registry-ui's first state-mutating route (every
+// other route is GET), can force any plan to look "shipped", and the server
+// otherwise binds all interfaces with zero auth. A request whose RemoteAddr
+// isn't loopback must be refused outright. httptest.Server always dials from
+// 127.0.0.1, so this calls the handler directly with a forged RemoteAddr
+// rather than going through newTestServer.
+func TestSetPlanPhase_RejectsNonLoopbackRequest(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":     "TICKET-1",
+		"summary":    "Test plan",
+		"plan_steps": []map[string]any{{"step": 1, "status": "pending"}},
+	})
+
+	form := url.Values{"phase": {"blocked"}}
+	req := httptest.NewRequest(http.MethodPost, "/projects/existing/plans/TICKET-1/phase", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetPathValue("name", "existing")
+	req.SetPathValue("ticket", "TICKET-1")
+	req.RemoteAddr = "203.0.113.7:54321" // TEST-NET-3, definitely not loopback
+
+	rec := httptest.NewRecorder()
+	handleSetPlanPhase(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("want 403 for non-loopback request, got %d", rec.Code)
+	}
+
+	plan, err := ReadPlan("existing", "TICKET-1")
+	if err != nil {
+		t.Fatalf("ReadPlan: %v", err)
+	}
+	if plan.PhaseOverride != "" {
+		t.Errorf("non-loopback request must not persist a phase_override, got %q", plan.PhaseOverride)
+	}
+}

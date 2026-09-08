@@ -512,17 +512,13 @@ func registrySetPlanPhase(args map[string]any) ToolResult {
 	if err != nil {
 		return toolErr(err.Error())
 	}
+	// SetPlanPhase writes the phase_override mutation and its
+	// plan_phase_override_set event in one transaction, so a failure to
+	// record the event fails the whole request rather than leaving a
+	// shipped-status change with no trace.
 	if err := s.SetPlanPhase(name, ticket, phase); err != nil {
 		return toolErr(err.Error())
 	}
-	// Best-effort: a phase_override silently overrides planIsShipped's
-	// steps+audit derivation with no other trace of who/why, so record it in
-	// the event log. A failed event write must never fail the phase set —
-	// the mutation already committed.
-	_, _ = s.WriteEvent(name, "plan_phase_override_set", map[string]any{
-		"ticket": ticket,
-		"phase":  phase,
-	}, []string{"phase-override"})
 	return toolOK(map[string]any{"ok": true, "ticket": ticket, "phase_override": phase})
 }
 
