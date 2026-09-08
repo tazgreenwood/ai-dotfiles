@@ -109,6 +109,7 @@ func TestDerivePlanStatus_Precedence(t *testing.T) {
 		name          string
 		steps         []PlanStep
 		hasAuditEntry bool
+		phaseOverride string
 		want          string
 	}{
 		{
@@ -199,11 +200,38 @@ func TestDerivePlanStatus_Precedence(t *testing.T) {
 			hasAuditEntry: true,
 			want:          "in_progress",
 		},
+		{
+			name: "phase_override 'pr_ready' wins over all-done+audit (would otherwise be done)",
+			steps: []PlanStep{
+				{Status: "done"},
+				{Status: "done"},
+			},
+			hasAuditEntry: true,
+			phaseOverride: "pr_ready",
+			want:          "pr_ready",
+		},
+		{
+			name: "phase_override 'blocked' wins over all-pending (no step actually blocked)",
+			steps: []PlanStep{
+				{Status: "pending"},
+				{Status: "pending"},
+			},
+			hasAuditEntry: false,
+			phaseOverride: "blocked",
+			want:          "blocked",
+		},
+		{
+			name:          "phase_override 'pr_ready' wins even with no steps at all",
+			steps:         nil,
+			hasAuditEntry: false,
+			phaseOverride: "pr_ready",
+			want:          "pr_ready",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := derivePlanStatus(tt.steps, tt.hasAuditEntry)
+			got := derivePlanStatus(tt.steps, tt.hasAuditEntry, tt.phaseOverride)
 			if got != tt.want {
 				t.Errorf("derivePlanStatus() = %q, want %q", got, tt.want)
 			}
