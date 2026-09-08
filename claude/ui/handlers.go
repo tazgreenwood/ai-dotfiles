@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -277,6 +278,7 @@ type planSummary struct {
 
 type planData struct {
 	Breadcrumbs     []breadcrumb
+	Project         string
 	Plan            Plan
 	Columns         []planColumn
 	EffectiveStatus string
@@ -541,6 +543,7 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 			{Label: name, URL: "/projects/" + name},
 			{Label: ticket},
 		},
+		Project:         name,
 		Plan:            plan,
 		Columns:         columns,
 		EffectiveStatus: effectiveStatus,
@@ -578,6 +581,38 @@ func isLoopbackRequest(r *http.Request) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// isSameOriginRequest guards against the exact gap isLoopbackRequest alone
+// leaves open: a page loaded from any remote site in a browser running on
+// this machine can auto-submit a form to a loopback-bound port, and the TCP
+// connection genuinely originates from 127.0.0.1 (the browser is the
+// loopback client), so a loopback check alone does not distinguish that from
+// the operator's own dashboard. Browsers attach Origin (or, failing that,
+// Referer) to cross-origin POSTs; a request whose Origin/Referer host
+// doesn't match r.Host is rejected. Neither header present at all (a plain
+// curl/script call, e.g. from the CLAUDE.md-documented direct-API scripts)
+// is allowed through — only a browser-attached cross-origin marker is
+// treated as the attack signal, since the loopback check already covers
+// non-browser callers.
+func isSameOriginRequest(r *http.Request) bool {
+	check := func(raw string) (present, ok bool) {
+		if raw == "" {
+			return false, false
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return true, false
+		}
+		return true, u.Host == r.Host
+	}
+	if present, ok := check(r.Header.Get("Origin")); present {
+		return ok
+	}
+	if present, ok := check(r.Header.Get("Referer")); present {
+		return ok
+	}
+	return true
+}
+
 // handleSetPlanPhase sets or clears a plan's phase_override via a single
 // atomic json_set/json_remove UPDATE (never a read-modify-write — that would
 // reintroduce the exact lost-update race SetPlanPhase's server-side
@@ -594,6 +629,10 @@ func isLoopbackRequest(r *http.Request) bool {
 func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 	if !isLoopbackRequest(r) {
 		http.Error(w, "forbidden: this route only accepts local requests", http.StatusForbidden)
+		return
+	}
+	if !isSameOriginRequest(r) {
+		http.Error(w, "forbidden: cross-origin request rejected", http.StatusForbidden)
 		return
 	}
 	name := r.PathValue("name")

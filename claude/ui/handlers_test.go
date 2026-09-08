@@ -910,3 +910,85 @@ func TestSetPlanPhase_RejectsNonLoopbackRequest(t *testing.T) {
 		t.Errorf("non-loopback request must not persist a phase_override, got %q", plan.PhaseOverride)
 	}
 }
+
+// TestSetPlanPhase_RejectsCrossOriginRequest guards the security finding a
+// review pass caught: RemoteAddr alone can't distinguish the operator's own
+// dashboard from a malicious page loaded in a browser running on the same
+// machine, since the browser IS the loopback client either way — the
+// isLoopbackRequest check on its own does not stop that. A same-machine
+// request whose Origin (or Referer) header names a different host must be
+// rejected even though it satisfies the loopback check.
+func TestSetPlanPhase_RejectsCrossOriginRequest(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":     "TICKET-1",
+		"summary":    "Test plan",
+		"plan_steps": []map[string]any{{"step": 1, "status": "pending"}},
+	})
+
+	form := url.Values{"phase": {"blocked"}}
+	req := httptest.NewRequest(http.MethodPost, "/projects/existing/plans/TICKET-1/phase", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://evil.example.com")
+	req.SetPathValue("name", "existing")
+	req.SetPathValue("ticket", "TICKET-1")
+	req.RemoteAddr = "127.0.0.1:54321" // genuinely loopback -- the browser is the local client
+	req.Host = "localhost:7432"
+
+	rec := httptest.NewRecorder()
+	handleSetPlanPhase(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("want 403 for cross-origin request, got %d", rec.Code)
+	}
+
+	plan, err := ReadPlan("existing", "TICKET-1")
+	if err != nil {
+		t.Fatalf("ReadPlan: %v", err)
+	}
+	if plan.PhaseOverride != "" {
+		t.Errorf("cross-origin request must not persist a phase_override, got %q", plan.PhaseOverride)
+	}
+}
+
+// TestSetPlanPhase_AllowsSameOriginRequest confirms the same-origin check
+// doesn't false-positive on the legitimate case: a real form submission from
+// the plan page itself, where Origin matches r.Host.
+func TestSetPlanPhase_AllowsSameOriginRequest(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":     "TICKET-1",
+		"summary":    "Test plan",
+		"plan_steps": []map[string]any{{"step": 1, "status": "pending"}},
+	})
+
+	form := url.Values{"phase": {"blocked"}}
+	req := httptest.NewRequest(http.MethodPost, "/projects/existing/plans/TICKET-1/phase", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://localhost:7432")
+	req.SetPathValue("name", "existing")
+	req.SetPathValue("ticket", "TICKET-1")
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = "localhost:7432"
+
+	rec := httptest.NewRecorder()
+	handleSetPlanPhase(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303 for same-origin request, got %d", rec.Code)
+	}
+
+	plan, err := ReadPlan("existing", "TICKET-1")
+	if err != nil {
+		t.Fatalf("ReadPlan: %v", err)
+	}
+	if plan.PhaseOverride != "blocked" {
+		t.Errorf("want phase_override 'blocked' for same-origin request, got %q", plan.PhaseOverride)
+	}
+}

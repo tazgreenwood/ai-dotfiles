@@ -146,8 +146,13 @@ func dbPath() string {
 	return filepath.Join(dataDir(), "registry.db")
 }
 
+// openDB sets the same busy_timeout the MCP server (claude/mcp/server/store.go)
+// uses: this file is shared with that server, and without a wait budget a
+// write here (or a read, for that matter) landing while the MCP server holds
+// a write lock — plausible any time /build is running while this dashboard is
+// open — fails immediately with SQLITE_BUSY instead of waiting briefly.
 func openDB() (*sql.DB, error) {
-	return sql.Open("sqlite", dbPath())
+	return sql.Open("sqlite", dbPath()+"?_pragma=busy_timeout(5000)")
 }
 
 func ReadProjects() ([]Project, error) {
