@@ -43,6 +43,10 @@ func newStore(dbPath string) (*store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.backfillPlanStatuses(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("backfill plan statuses: %w", err)
+	}
 	return s, nil
 }
 
@@ -1211,6 +1215,76 @@ func ComputePlanStatus(data map[string]any, hasAudit bool) string {
 	default:
 		return "pending"
 	}
+}
+
+// backfillPlanStatuses is an idempotent migration pass, run once on every
+// store startup (see newStore), that populates the persisted "$.status"
+// field on any plan row written before that field existed. Without it, a
+// pre-migration row would read back with an empty status forever — the
+// on-read derivation fallback this replaces is gone, so this backfill is the
+// only thing left that can ever populate those rows.
+//
+// Skips any row that already carries a non-empty "status" (the common case
+// on every startup after the first), so re-running this on an
+// already-backfilled DB is a cheap no-op rather than clobbering statuses
+// that mutation points (UpdateStep/WriteAudit/SetPlanPhase) already computed
+// more precisely than a stale snapshot here could.
+func (s *store) backfillPlanStatuses() error {
+	auditTickets, err := s.auditTicketsByProject()
+	if err != nil {
+		return fmt.Errorf("audit tickets: %w", err)
+	}
+
+	rows, err := s.db.Query(`SELECT id, project, ticket, data FROM plans`)
+	if err != nil {
+		return err
+	}
+
+	type update struct {
+		id     int64
+		status string
+	}
+	var updates []update
+	for rows.Next() {
+		var id int64
+		var project, ticket, raw string
+		if err := rows.Scan(&id, &project, &ticket, &raw); err != nil {
+			rows.Close()
+			return err
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			rows.Close()
+			return fmt.Errorf("plan id %d data: %w", id, err)
+		}
+		if status, _ := data["status"].(string); status != "" {
+			continue // already backfilled, or written after this field existed
+		}
+		if t, _ := data["ticket"].(string); t != "" {
+			ticket = t
+		}
+		updates = append(updates, update{
+			id:     id,
+			status: ComputePlanStatus(data, auditTickets[project][ticket]),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, u := range updates {
+		if _, err := s.db.Exec(
+			`UPDATE plans SET data = json_set(data, '$.status', ?) WHERE id = ?`,
+			u.status, u.id,
+		); err != nil {
+			return fmt.Errorf("plan id %d: %w", u.id, err)
+		}
+	}
+	return nil
 }
 
 func planIsShipped(hasAudit bool, data map[string]any) bool {

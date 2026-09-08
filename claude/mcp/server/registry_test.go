@@ -234,6 +234,157 @@ func TestRegistryUpdateStep_AcceptsInReview(t *testing.T) {
 // shipped once /ship has written a matching audit entry. Otherwise a plan
 // vanishes from the index (and from routing) the instant build finishes,
 // before /ship has even run.
+// TestRegistryListPlans_ExposesPersistedStatus pins DOTFILES-48 step 2:
+// registry_list_plans must return the real 6-value persisted status field
+// (not the old derived "active"/"shipped" bool) plus is_shipped for existing
+// routing consumers.
+func TestRegistryListPlans_ExposesPersistedStatus(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	registryInitProject(map[string]any{"name": "myproject"})
+	plan := map[string]any{
+		"ticket":  "TEST-10",
+		"summary": "in progress work",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "pending"},
+			map[string]any{"title": "step two", "status": "pending"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-10", "data": plan})
+	// Drive step 0 to in_progress so UpdateStep persists the plan-level status.
+	registryUpdateStep(map[string]any{
+		"name":       "myproject",
+		"ticket":     "TEST-10",
+		"step_index": 0,
+		"status":     "in_progress",
+	})
+
+	result := registryListPlans(map[string]any{"name": "myproject"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp struct {
+		Plans []map[string]any `json:"plans"`
+	}
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+
+	var found map[string]any
+	for _, p := range resp.Plans {
+		if p["ticket"] == "TEST-10" {
+			found = p
+		}
+	}
+	if found == nil {
+		t.Fatalf("TEST-10 not present in plans")
+	}
+	if found["status"] != "in_progress" {
+		t.Errorf("want status=in_progress, got %v", found["status"])
+	}
+	if found["is_shipped"] != false {
+		t.Errorf("want is_shipped=false, got %v", found["is_shipped"])
+	}
+}
+
+// TestRegistryListPlans_DoneStatusIsShipped confirms is_shipped tracks the
+// persisted status == "done" rather than any separate recomputation.
+func TestRegistryListPlans_DoneStatusIsShipped(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	registryInitProject(map[string]any{"name": "myproject"})
+	plan := map[string]any{
+		"ticket":  "TEST-11",
+		"summary": "finished and shipped",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "done"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-11", "data": plan})
+	registryWriteAudit(map[string]any{
+		"name": "myproject",
+		"entry": map[string]any{
+			"ticket":  "TEST-11",
+			"type":    "feature",
+			"summary": "shipped it",
+		},
+	})
+
+	result := registryListPlans(map[string]any{"name": "myproject"})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp struct {
+		Plans []map[string]any `json:"plans"`
+	}
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+
+	var found map[string]any
+	for _, p := range resp.Plans {
+		if p["ticket"] == "TEST-11" {
+			found = p
+		}
+	}
+	if found == nil {
+		t.Fatalf("TEST-11 not present in plans")
+	}
+	if found["status"] != "done" {
+		t.Errorf("want status=done, got %v", found["status"])
+	}
+	if found["is_shipped"] != true {
+		t.Errorf("want is_shipped=true, got %v", found["is_shipped"])
+	}
+}
+
+// TestRegistryIndex_ActivePlanExposesPersistedStatus pins that registry_index's
+// active_plan carries the real 6-value status + is_shipped, not just a
+// presence/absence signal.
+func TestRegistryIndex_ActivePlanExposesPersistedStatus(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	registryInitProject(map[string]any{"name": "myproject"})
+	plan := map[string]any{
+		"ticket":  "TEST-12",
+		"summary": "blocked work",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "blocked"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-12", "data": plan})
+	registryUpdateStep(map[string]any{
+		"name":       "myproject",
+		"ticket":     "TEST-12",
+		"step_index": 0,
+		"status":     "blocked",
+	})
+
+	result := registryIndex(map[string]any{})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	var resp struct {
+		Projects []projectIndexEntry `json:"projects"`
+	}
+	json.Unmarshal([]byte(result.Content[0].Text), &resp)
+
+	var found *projectIndexEntry
+	for i := range resp.Projects {
+		if resp.Projects[i].Name == "myproject" {
+			found = &resp.Projects[i]
+		}
+	}
+	if found == nil || found.ActivePlan == nil {
+		t.Fatalf("want active_plan present for myproject, got %+v", found)
+	}
+	if found.ActivePlan.Status != "blocked" {
+		t.Errorf("want active_plan.status=blocked, got %q", found.ActivePlan.Status)
+	}
+	if found.ActivePlan.IsShipped {
+		t.Errorf("want active_plan.is_shipped=false, got true")
+	}
+}
+
 func TestRegistryIndex_AllStepsDoneButNoAuditEntry_StillActive(t *testing.T) {
 	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
@@ -2991,4 +3142,180 @@ func TestSetPlanPhase(t *testing.T) {
 			t.Errorf("raw data column must not gain a 'created_at' field, got: %v", data)
 		}
 	})
+}
+
+// TestBackfillPlanStatuses pins DOTFILES-48 step 3: every plan row written
+// before the persisted status field existed has no "status" key in its data
+// blob, and with the derivation logic gone there's nothing left to fall back
+// on at read time — it would silently read as empty/pending forever. The
+// backfill pass must call ComputePlanStatus over every such row (idempotent:
+// skip rows that already carry a status) and persist the result.
+func TestBackfillPlanStatuses(t *testing.T) {
+	s := openTestStore(t)
+
+	// Seed a done-and-shipped plan and a mid-flight plan the pre-migration
+	// way: write plan data with no "status" key at all (WritePlan doesn't add
+	// one unless the caller's map already has it), simulating a row written
+	// before this field existed.
+	doneShippedPlan := map[string]any{
+		"ticket":  "TEST-BF-1",
+		"summary": "finished and shipped",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "done"},
+		},
+	}
+	if err := s.WritePlan("myproject", "TEST-BF-1", doneShippedPlan); err != nil {
+		t.Fatalf("WritePlan (done+shipped): %v", err)
+	}
+	if _, err := s.WriteAudit("myproject", map[string]any{
+		"ticket":  "TEST-BF-1",
+		"type":    "feature",
+		"summary": "shipped it",
+	}); err != nil {
+		t.Fatalf("WriteAudit: %v", err)
+	}
+	// WriteAudit's own transactional recompute (DOTFILES-48) already
+	// populates status here — strip it back out to simulate a genuinely
+	// pre-migration row (audit entry present, plan data never touched by
+	// any status-writing mutation point).
+	if _, err := s.db.Exec(
+		`UPDATE plans SET data = json_remove(data, '$.status') WHERE project = ? AND ticket = ?`,
+		"myproject", "TEST-BF-1",
+	); err != nil {
+		t.Fatalf("strip status to simulate pre-migration row: %v", err)
+	}
+
+	midFlightPlan := map[string]any{
+		"ticket":  "TEST-BF-2",
+		"summary": "still in flight",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "done"},
+			map[string]any{"title": "step two", "status": "in_progress"},
+		},
+	}
+	if err := s.WritePlan("myproject", "TEST-BF-2", midFlightPlan); err != nil {
+		t.Fatalf("WritePlan (mid-flight): %v", err)
+	}
+
+	// WriteAudit's transactional status recompute (DOTFILES-48) only touches
+	// the ticket it names, so TEST-BF-2's row is untouched — confirm both
+	// rows genuinely have no "status" key before backfilling, i.e. this test
+	// is actually exercising the pre-migration-shaped case it claims to.
+	assertNoStatusKey := func(t *testing.T, ticket string) {
+		t.Helper()
+		var raw string
+		if err := s.db.QueryRow(
+			`SELECT data FROM plans WHERE project = ? AND ticket = ?`, "myproject", ticket,
+		).Scan(&raw); err != nil {
+			t.Fatalf("query raw data for %s: %v", ticket, err)
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			t.Fatalf("unmarshal raw data for %s: %v", ticket, err)
+		}
+		if status, present := data["status"]; present && status != "" {
+			t.Fatalf("precondition failed: %s already has status %v before backfill", ticket, status)
+		}
+	}
+	assertNoStatusKey(t, "TEST-BF-1")
+	assertNoStatusKey(t, "TEST-BF-2")
+
+	if err := s.backfillPlanStatuses(); err != nil {
+		t.Fatalf("backfillPlanStatuses: %v", err)
+	}
+
+	assertStatus := func(t *testing.T, ticket, want string) {
+		t.Helper()
+		var raw string
+		if err := s.db.QueryRow(
+			`SELECT data FROM plans WHERE project = ? AND ticket = ?`, "myproject", ticket,
+		).Scan(&raw); err != nil {
+			t.Fatalf("query raw data for %s: %v", ticket, err)
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			t.Fatalf("unmarshal raw data for %s: %v", ticket, err)
+		}
+		if data["status"] != want {
+			t.Errorf("%s status = %v, want %s", ticket, data["status"], want)
+		}
+	}
+	assertStatus(t, "TEST-BF-1", "done")
+	assertStatus(t, "TEST-BF-2", "in_progress")
+
+	// Idempotent: a row that already carries a status must be left alone by
+	// a second pass, not recomputed and overwritten.
+	if _, err := s.db.Exec(
+		`UPDATE plans SET data = json_set(data, '$.status', 'blocked') WHERE project = ? AND ticket = ?`,
+		"myproject", "TEST-BF-1",
+	); err != nil {
+		t.Fatalf("force-set status for idempotency check: %v", err)
+	}
+	if err := s.backfillPlanStatuses(); err != nil {
+		t.Fatalf("backfillPlanStatuses (second pass): %v", err)
+	}
+	assertStatus(t, "TEST-BF-1", "blocked")
+}
+
+// TestNewStore_BackfillsPlanStatusesOnOpen confirms the backfill runs
+// automatically on store startup (newStore), not only when called directly
+// — a plan row from before this field existed must come back populated the
+// very first time the registry server (re)starts against an existing DB,
+// with no separate migration step to remember to run.
+func TestNewStore_BackfillsPlanStatusesOnOpen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "registry.db")
+
+	s1, err := newStore(dbPath)
+	if err != nil {
+		t.Fatalf("newStore (first open): %v", err)
+	}
+	plan := map[string]any{
+		"ticket":  "TEST-BF-3",
+		"summary": "pre-migration row",
+		"plan_steps": []any{
+			map[string]any{"title": "step one", "status": "done"},
+		},
+	}
+	if err := s1.WritePlan("myproject", "TEST-BF-3", plan); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	if _, err := s1.WriteAudit("myproject", map[string]any{
+		"ticket":  "TEST-BF-3",
+		"type":    "feature",
+		"summary": "shipped it",
+	}); err != nil {
+		t.Fatalf("WriteAudit: %v", err)
+	}
+	// Simulate this row predating the persisted status field: strip it back
+	// out after WriteAudit's own transactional write populated it, so
+	// reopening the store is the only thing left that can repopulate it.
+	if _, err := s1.db.Exec(
+		`UPDATE plans SET data = json_remove(data, '$.status') WHERE project = ? AND ticket = ?`,
+		"myproject", "TEST-BF-3",
+	); err != nil {
+		t.Fatalf("strip status to simulate pre-migration row: %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	s2, err := newStore(dbPath)
+	if err != nil {
+		t.Fatalf("newStore (reopen): %v", err)
+	}
+	defer s2.Close()
+
+	var raw string
+	if err := s2.db.QueryRow(
+		`SELECT data FROM plans WHERE project = ? AND ticket = ?`, "myproject", "TEST-BF-3",
+	).Scan(&raw); err != nil {
+		t.Fatalf("query raw data: %v", err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		t.Fatalf("unmarshal raw data: %v", err)
+	}
+	if data["status"] != "done" {
+		t.Errorf("status = %v, want done (backfilled on reopen)", data["status"])
+	}
 }
