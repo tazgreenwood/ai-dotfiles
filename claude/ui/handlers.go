@@ -534,8 +534,13 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	auditTickets, _ := AuditTicketSet(name)
-	effectiveStatus := derivePlanStatus(plan.PlanSteps, auditTickets[ticket], plan.PhaseOverride)
+	// Status is persisted on the plan row by the registry MCP server's
+	// ComputePlanStatus at each mutation point (UpdateStep, WriteAudit,
+	// SetPlanPhase) — read directly rather than re-derived here (DOTFILES-48).
+	effectiveStatus := plan.Status
+	if effectiveStatus == "" {
+		effectiveStatus = "pending"
+	}
 
 	data := planData{
 		Breadcrumbs: []breadcrumb{
@@ -670,14 +675,24 @@ func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	if phase == "" {
+		// Clearing an override can't recompute the correct persisted status
+		// here without ComputePlanStatus (claude/mcp/server/store.go, a
+		// separate go.mod module) — left as the documented follow-up
+		// (DOTFILES-48). The plan's status field is left as-is; the next
+		// real mutation through the MCP tool (UpdateStep/WriteAudit/
+		// SetPlanPhase) recomputes and persists the correct value.
 		_, err = tx.Exec(
 			`UPDATE plans SET data = json_remove(data, '$.phase_override') WHERE project = ? AND ticket = ?`,
 			name, ticket,
 		)
 	} else {
+		// Setting a non-empty override is always safe to mirror onto the
+		// persisted status field directly: phase_override wins outright over
+		// every other precedence rule in ComputePlanStatus, so status == the
+		// override value by construction — no steps/audit lookup needed.
 		_, err = tx.Exec(
-			`UPDATE plans SET data = json_set(data, '$.phase_override', ?) WHERE project = ? AND ticket = ?`,
-			phase, name, ticket,
+			`UPDATE plans SET data = json_set(json_set(data, '$.phase_override', ?), '$.status', ?) WHERE project = ? AND ticket = ?`,
+			phase, phase, name, ticket,
 		)
 	}
 	if err != nil {
