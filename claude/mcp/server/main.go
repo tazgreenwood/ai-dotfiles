@@ -146,6 +146,8 @@ func dispatch(name string, args map[string]any) ToolResult {
 		return registryGetPlan(args)
 	case "registry_write_plan":
 		return registryWritePlan(args)
+	case "registry_set_plan_phase":
+		return registrySetPlanPhase(args)
 	case "registry_update_step":
 		return registryUpdateStep(args)
 	case "registry_write_audit":
