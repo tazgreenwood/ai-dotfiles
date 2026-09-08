@@ -722,6 +722,43 @@ func TestGetPlan_RendersPhaseOverrideControl_DefaultsToComputedStatus(t *testing
 	}
 }
 
+// TestGetPlan_MissingStatus_RecomputesNotHardcodedPending guards the round-2
+// REJECTED finding: a plan with no persisted "status" field (the registry
+// MCP server's backfillPlanStatuses hasn't run against this DB yet — a
+// separate process from this dashboard) must have its status recomputed
+// from steps+audit, not silently mislabeled "pending" regardless of its
+// real state.
+func TestGetPlan_MissingStatus_RecomputesNotHardcodedPending(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	// No "status" key at all — the pre-backfill shape.
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":  "TICKET-1",
+		"summary": "predates the status field",
+		"plan_steps": []map[string]any{
+			{"step": 1, "status": "done"},
+			{"step": 2, "status": "blocked"},
+		},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing/plans/TICKET-1")
+	if err != nil {
+		t.Fatalf("GET plan: %v", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	body := string(b)
+
+	if !strings.Contains(body, `value="blocked" selected`) {
+		t.Errorf("want recomputed status=blocked (one step is blocked) reflected as the selected option, got:\n%s", body)
+	}
+}
+
 func TestSetPlanPhase_SetsOverride_RedirectsAndPersists(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()

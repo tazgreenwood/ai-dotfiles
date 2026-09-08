@@ -537,11 +537,12 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 
 	// Status is persisted on the plan row by the registry MCP server's
 	// ComputePlanStatus at each mutation point (UpdateStep, WriteAudit,
-	// SetPlanPhase) — read directly rather than re-derived here (DOTFILES-48).
-	effectiveStatus := plan.Status
-	if effectiveStatus == "" {
-		effectiveStatus = "pending"
-	}
+	// SetPlanPhase) — read directly rather than re-derived here (DOTFILES-48),
+	// except for the fallback recompute in planStatusOrRecompute: a plan
+	// that predates this migration (or otherwise has no persisted status)
+	// gets its status computed from steps+audit rather than mislabeled
+	// "pending" regardless of its real state.
+	effectiveStatus := planStatusOrRecompute(name, plan)
 
 	data := planData{
 		Breadcrumbs: []breadcrumb{
@@ -694,12 +695,23 @@ func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		steps, _ := planData["plan_steps"].([]any)
+		stepStatuses := make([]string, len(steps))
+		for i, raw := range steps {
+			// A malformed entry (not a JSON object) still needs to count
+			// against allDone the same way computeStatusFromStepStatuses
+			// treats any non-"done" status — append "" (never equals
+			// "done") rather than skip it, so a malformed step can't
+			// accidentally make an otherwise-incomplete plan look all-done.
+			if step, ok := raw.(map[string]any); ok {
+				stepStatuses[i], _ = step["status"].(string)
+			}
+		}
 		hasAudit, err := hasAuditEntryInTx(tx, name, ticket)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		newStatus := computeStatusFromSteps(steps, hasAudit)
+		newStatus := computeStatusFromStepStatuses(stepStatuses, hasAudit)
 		_, err = tx.Exec(
 			`UPDATE plans SET data = json_set(json_remove(data, '$.phase_override'), '$.status', ?) WHERE project = ? AND ticket = ?`,
 			newStatus, name, ticket,
@@ -769,22 +781,21 @@ func hasAuditEntryInTx(tx *sql.Tx, project, ticket string) (bool, error) {
 	return false, rows.Err()
 }
 
-// computeStatusFromSteps mirrors claude/mcp/server/store.go's
+// computeStatusFromStepStatuses mirrors claude/mcp/server/store.go's
 // ComputePlanStatus precedence (blocked > in_review > in_progress/partial >
-// pr_ready/done > pending), for the one write path — clearing a phase
-// override — that must recompute status without going through the MCP
-// server. Used only here; every other read path in this package reads the
-// persisted status field directly rather than re-deriving it (DOTFILES-48).
-func computeStatusFromSteps(steps []any, hasAudit bool) string {
+// pr_ready/done > pending), for the two places in this package that must
+// recompute status without going through the MCP server: clearing a phase
+// override (handleSetPlanPhase, which has a []any-decoded step list from a
+// raw JSON blob read inside a transaction), and the read-path fallback for a
+// plan whose $.status field is empty because the registry MCP server's
+// backfill hasn't run against this DB yet (planStatusOrRecompute, below —
+// used by AggregatePlanKanban and handlePlan). Takes plain step-status
+// strings rather than the two callers' different step representations so
+// this logic has exactly one copy regardless of which caller's shape.
+func computeStatusFromStepStatuses(stepStatuses []string, hasAudit bool) string {
 	anyBlocked, anyInReview, anyInProgress, anyDone := false, false, false, false
-	allDone := len(steps) > 0
-	for _, raw := range steps {
-		step, ok := raw.(map[string]any)
-		if !ok {
-			allDone = false
-			continue
-		}
-		status, _ := step["status"].(string)
+	allDone := len(stepStatuses) > 0
+	for _, status := range stepStatuses {
 		switch status {
 		case "blocked":
 			anyBlocked = true
@@ -814,6 +825,50 @@ func computeStatusFromSteps(steps []any, hasAudit bool) string {
 	default:
 		return "pending"
 	}
+}
+
+// planStatusOrRecompute returns plan.Status if it's already persisted, or
+// recomputes it from steps+audit for a plan predating the DOTFILES-48
+// migration (or one otherwise missing the field) whose $.status the registry
+// MCP server's backfillPlanStatuses hasn't populated yet — that backfill
+// runs in a separate process (the MCP server, spawned per Claude session),
+// so a plan can reach this dashboard before it ever has. Hardcoding "pending"
+// in that gap (the original DOTFILES-48 UI port did this) would silently
+// mislabel a blocked/in-progress/done plan as not-yet-started; this instead
+// gives the same answer registryListPlans falls back to on the backend.
+func planStatusOrRecompute(project string, plan Plan) string {
+	if plan.Status != "" {
+		return plan.Status
+	}
+	stepStatuses := make([]string, len(plan.PlanSteps))
+	for i, s := range plan.PlanSteps {
+		stepStatuses[i] = s.Status
+	}
+	hasAudit, err := hasAuditEntry(project, plan.Ticket)
+	if err != nil {
+		// Audit lookup failing shouldn't crash a dashboard render — worst
+		// case this treats an actually-shipped plan as pr_ready instead of
+		// done, a display-only discrepancy, not silent data loss.
+		hasAudit = false
+	}
+	return computeStatusFromStepStatuses(stepStatuses, hasAudit)
+}
+
+// hasAuditEntry reports whether project has at least one audit entry whose
+// "ticket" field matches ticket. Non-transactional counterpart to
+// hasAuditEntryInTx, for the read-path fallback in planStatusOrRecompute —
+// there is no in-flight write here to keep consistent with.
+func hasAuditEntry(project, ticket string) (bool, error) {
+	entries, err := ReadAudit(project, "", "")
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.Ticket == ticket {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {

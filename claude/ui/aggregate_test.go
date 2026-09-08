@@ -204,6 +204,43 @@ func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
 	}
 }
 
+// TestAggregatePlanKanban_MissingStatus_RecomputesNotHardcodedPending guards
+// the round-2 REJECTED finding: a plan with no persisted "status" field (the
+// registry MCP server's backfillPlanStatuses hasn't run against this DB yet —
+// a separate process from this dashboard, so the ordering isn't guaranteed)
+// must have its status recomputed from steps+audit, not silently mislabeled
+// "pending" regardless of its real state.
+func TestAggregatePlanKanban_MissingStatus_RecomputesNotHardcodedPending(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
+	// No "status" key at all — the pre-backfill shape.
+	seedPlan(t, dir, "alpha", "DOTFILES-NOSTATUS", map[string]any{
+		"ticket":  "DOTFILES-NOSTATUS",
+		"summary": "predates the status field",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "done"},
+			{"step": 2, "title": "b", "status": "blocked"},
+		},
+	})
+
+	cards, _ := AggregatePlanKanban(time.Now().AddDate(0, 0, -14))
+
+	var found *PlanCard
+	for i := range cards {
+		if cards[i].Ticket == "DOTFILES-NOSTATUS" {
+			found = &cards[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("missing card for DOTFILES-NOSTATUS")
+	}
+	if found.Status != "blocked" {
+		t.Errorf("want recomputed status=blocked (one step is blocked), got %q — a missing $.status must not default to pending", found.Status)
+	}
+}
+
 func TestAggregatePlanKanban_DoneCutoff_ExcludesFullyDonePlan(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()

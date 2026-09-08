@@ -113,13 +113,14 @@ func AggregatePlanKanban(doneCutoff time.Time) (cards []PlanCard, hiddenOlder in
 			// Status is persisted on the plan row by the registry MCP
 			// server's ComputePlanStatus at each mutation point (UpdateStep,
 			// WriteAudit, SetPlanPhase) — read directly rather than
-			// re-derived here (DOTFILES-48). A plan written before that
-			// migration and not yet backfilled falls back to "pending"
-			// rather than rendering with an empty Kanban column.
-			status := plan.Status
-			if status == "" {
-				status = "pending"
-			}
+			// re-derived here (DOTFILES-48), except for the fallback
+			// recompute in planStatusOrRecompute: a plan written before this
+			// migration (or otherwise missing the field, e.g. the MCP
+			// server's backfill hasn't run against this DB yet — a separate
+			// process from this dashboard) gets its status computed from
+			// steps+audit rather than mislabeled "pending" regardless of its
+			// real state.
+			status := planStatusOrRecompute(p.Name, plan)
 			doneSteps := 0
 			var latestDoneAt string
 			var latestDoneAtParsed time.Time
