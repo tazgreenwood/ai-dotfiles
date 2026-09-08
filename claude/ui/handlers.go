@@ -542,7 +542,11 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 	// that predates this migration (or otherwise has no persisted status)
 	// gets its status computed from steps+audit rather than mislabeled
 	// "pending" regardless of its real state.
-	effectiveStatus := planStatusOrRecompute(name, plan)
+	auditTickets, err := AuditTicketSet(name)
+	if err != nil {
+		auditTickets = map[string]bool{}
+	}
+	effectiveStatus := planStatusOrRecompute(plan, auditTickets)
 
 	data := planData{
 		Breadcrumbs: []breadcrumb{
@@ -828,47 +832,36 @@ func computeStatusFromStepStatuses(stepStatuses []string, hasAudit bool) string 
 }
 
 // planStatusOrRecompute returns plan.Status if it's already persisted, or
-// recomputes it from steps+audit for a plan predating the DOTFILES-48
-// migration (or one otherwise missing the field) whose $.status the registry
-// MCP server's backfillPlanStatuses hasn't populated yet — that backfill
-// runs in a separate process (the MCP server, spawned per Claude session),
-// so a plan can reach this dashboard before it ever has. Hardcoding "pending"
-// in that gap (the original DOTFILES-48 UI port did this) would silently
-// mislabel a blocked/in-progress/done plan as not-yet-started; this instead
-// gives the same answer registryListPlans falls back to on the backend.
-func planStatusOrRecompute(project string, plan Plan) string {
+// recomputes it from steps+audit+override for a plan predating the
+// DOTFILES-48 migration (or one otherwise missing the field) whose $.status
+// the registry MCP server's backfillPlanStatuses hasn't populated yet — that
+// backfill runs in a separate process (the MCP server, spawned per Claude
+// session), so a plan can reach this dashboard before it ever has.
+// Hardcoding "pending" in that gap (the original DOTFILES-48 UI port did
+// this) would silently mislabel a blocked/in-progress/done plan as
+// not-yet-started; this instead gives the same answer registryListPlans
+// falls back to on the backend.
+//
+// auditTickets is the project's whole audit-ticket set (AuditTicketSet),
+// fetched ONCE by the caller — not looked up per plan here. A per-plan audit
+// query inside AggregatePlanKanban's per-project loop over N plans would
+// reopen a SQLite connection N times per project during the backfill-lag
+// window this function exists for, exactly the per-plan-read anti-pattern
+// AuditTicketSet's own doc comment says it was written to avoid.
+func planStatusOrRecompute(plan Plan, auditTickets map[string]bool) string {
 	if plan.Status != "" {
 		return plan.Status
+	}
+	// Mirrors ComputePlanStatus's precedence (claude/mcp/server/store.go):
+	// phase_override wins outright over anything derived from steps/audit.
+	if plan.PhaseOverride != "" {
+		return plan.PhaseOverride
 	}
 	stepStatuses := make([]string, len(plan.PlanSteps))
 	for i, s := range plan.PlanSteps {
 		stepStatuses[i] = s.Status
 	}
-	hasAudit, err := hasAuditEntry(project, plan.Ticket)
-	if err != nil {
-		// Audit lookup failing shouldn't crash a dashboard render — worst
-		// case this treats an actually-shipped plan as pr_ready instead of
-		// done, a display-only discrepancy, not silent data loss.
-		hasAudit = false
-	}
-	return computeStatusFromStepStatuses(stepStatuses, hasAudit)
-}
-
-// hasAuditEntry reports whether project has at least one audit entry whose
-// "ticket" field matches ticket. Non-transactional counterpart to
-// hasAuditEntryInTx, for the read-path fallback in planStatusOrRecompute —
-// there is no in-flight write here to keep consistent with.
-func hasAuditEntry(project, ticket string) (bool, error) {
-	entries, err := ReadAudit(project, "", "")
-	if err != nil {
-		return false, err
-	}
-	for _, e := range entries {
-		if e.Ticket == ticket {
-			return true, nil
-		}
-	}
-	return false, nil
+	return computeStatusFromStepStatuses(stepStatuses, auditTickets[plan.Ticket])
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {

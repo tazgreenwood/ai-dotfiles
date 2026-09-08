@@ -209,7 +209,12 @@ func TestAggregatePlanKanban_StatusDerivation(t *testing.T) {
 // registry MCP server's backfillPlanStatuses hasn't run against this DB yet —
 // a separate process from this dashboard, so the ordering isn't guaranteed)
 // must have its status recomputed from steps+audit, not silently mislabeled
-// "pending" regardless of its real state.
+// "pending" regardless of its real state. Also guards round-3's finding: the
+// audit lookup this recompute needs must come from one batched per-project
+// AuditTicketSet call, not a query per plan — this seeds TWO un-backfilled
+// plans in the same project, one with an audit entry and one without, to
+// prove the batched set still resolves each plan's own audit status
+// correctly rather than all plans sharing one (wrong) answer.
 func TestAggregatePlanKanban_MissingStatus_RecomputesNotHardcodedPending(t *testing.T) {
 	dir, cleanup := setupFixtureDir(t)
 	defer cleanup()
@@ -224,20 +229,68 @@ func TestAggregatePlanKanban_MissingStatus_RecomputesNotHardcodedPending(t *test
 			{"step": 2, "title": "b", "status": "blocked"},
 		},
 	})
+	seedPlan(t, dir, "alpha", "DOTFILES-NOSTATUS-SHIPPED", map[string]any{
+		"ticket":  "DOTFILES-NOSTATUS-SHIPPED",
+		"summary": "predates the status field, but already has an audit entry",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "done"},
+		},
+	})
+	seedAudit(t, dir, "alpha", []map[string]any{
+		{"ticket": "DOTFILES-NOSTATUS-SHIPPED", "date": "2026-08-01"},
+	})
+
+	cards, _ := AggregatePlanKanban(time.Now().AddDate(0, 0, -14))
+
+	byTicket := map[string]PlanCard{}
+	for _, c := range cards {
+		byTicket[c.Ticket] = c
+	}
+	if c, ok := byTicket["DOTFILES-NOSTATUS"]; !ok {
+		t.Fatalf("missing card for DOTFILES-NOSTATUS")
+	} else if c.Status != "blocked" {
+		t.Errorf("want recomputed status=blocked (one step is blocked), got %q — a missing $.status must not default to pending", c.Status)
+	}
+	if c, ok := byTicket["DOTFILES-NOSTATUS-SHIPPED"]; !ok {
+		t.Fatalf("missing card for DOTFILES-NOSTATUS-SHIPPED")
+	} else if c.Status != "done" {
+		t.Errorf("want recomputed status=done (all steps done, audit entry exists), got %q — batched audit lookup must resolve per-ticket, not share one answer across plans", c.Status)
+	}
+}
+
+// TestAggregatePlanKanban_MissingStatus_PhaseOverrideStillWins guards a
+// narrow but real gap: a legacy plan whose $.status is empty but whose
+// $.phase_override is already set (e.g. a hand-written row, or one from
+// before DOTFILES-48 wired ComputePlanStatus into SetPlanPhase) must still
+// have the override win, matching ComputePlanStatus's precedence — the
+// steps+audit recompute must not override the override.
+func TestAggregatePlanKanban_MissingStatus_PhaseOverrideStillWins(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "alpha", map[string]any{"name": "alpha"})
+	seedPlan(t, dir, "alpha", "DOTFILES-LEGACY-OVERRIDE", map[string]any{
+		"ticket":         "DOTFILES-LEGACY-OVERRIDE",
+		"summary":        "legacy override, no persisted status",
+		"phase_override": "blocked",
+		"plan_steps": []map[string]any{
+			{"step": 1, "title": "a", "status": "pending"},
+		},
+	})
 
 	cards, _ := AggregatePlanKanban(time.Now().AddDate(0, 0, -14))
 
 	var found *PlanCard
 	for i := range cards {
-		if cards[i].Ticket == "DOTFILES-NOSTATUS" {
+		if cards[i].Ticket == "DOTFILES-LEGACY-OVERRIDE" {
 			found = &cards[i]
 		}
 	}
 	if found == nil {
-		t.Fatalf("missing card for DOTFILES-NOSTATUS")
+		t.Fatalf("missing card for DOTFILES-LEGACY-OVERRIDE")
 	}
 	if found.Status != "blocked" {
-		t.Errorf("want recomputed status=blocked (one step is blocked), got %q — a missing $.status must not default to pending", found.Status)
+		t.Errorf("want phase_override to win (blocked), got %q — recompute must not ignore a legacy override", found.Status)
 	}
 }
 

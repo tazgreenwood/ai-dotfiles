@@ -105,6 +105,15 @@ func AggregatePlanKanban(doneCutoff time.Time) (cards []PlanCard, hiddenOlder in
 		if err != nil {
 			continue
 		}
+		// Fetched once per project, not once per plan: planStatusOrRecompute
+		// only needs this for a plan whose $.status is still empty (pre-
+		// migration or pre-backfill), but a per-plan audit query inside this
+		// loop would reopen a SQLite connection per plan during that window
+		// — the exact anti-pattern AuditTicketSet exists to avoid.
+		auditTickets, err := AuditTicketSet(p.Name)
+		if err != nil {
+			auditTickets = map[string]bool{}
+		}
 		for _, m := range metas {
 			plan, err := ReadPlan(p.Name, m.Ticket)
 			if err != nil {
@@ -120,7 +129,7 @@ func AggregatePlanKanban(doneCutoff time.Time) (cards []PlanCard, hiddenOlder in
 			// process from this dashboard) gets its status computed from
 			// steps+audit rather than mislabeled "pending" regardless of its
 			// real state.
-			status := planStatusOrRecompute(p.Name, plan)
+			status := planStatusOrRecompute(plan, auditTickets)
 			doneSteps := 0
 			var latestDoneAt string
 			var latestDoneAtParsed time.Time
