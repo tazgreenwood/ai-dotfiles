@@ -321,6 +321,175 @@ func TestRegistryIndex_AllStepsDoneWithMatchingAuditEntry_Shipped(t *testing.T) 
 	}
 }
 
+// TestComputePlanStatus_Outcomes pins the precedence contract for the single
+// authoritative status function that DOTFILES-48 introduces to replace the
+// duplicated derivation logic (backend planIsShipped bool + UI
+// derivePlanStatus 6-value switch). Precedence, highest first: phase_override
+// (if set, wins outright) > blocked (any step blocked) > in_review (any step
+// in_review) > in_progress (any step in_progress, or partially done) >
+// pr_ready/done (every step done — done once a matching audit entry exists,
+// pr_ready until then) > pending (default).
+func TestComputePlanStatus_Outcomes(t *testing.T) {
+	tests := []struct {
+		name     string
+		steps    []any
+		hasAudit bool
+		override string
+		want     string
+	}{
+		{
+			name: "pending: no step started",
+			steps: []any{
+				map[string]any{"status": "pending"},
+				map[string]any{"status": "pending"},
+			},
+			want: "pending",
+		},
+		{
+			name: "in_progress: a step is in_progress",
+			steps: []any{
+				map[string]any{"status": "in_progress"},
+				map[string]any{"status": "pending"},
+			},
+			want: "in_progress",
+		},
+		{
+			name: "in_progress: partially done beats pending",
+			steps: []any{
+				map[string]any{"status": "done"},
+				map[string]any{"status": "pending"},
+			},
+			want: "in_progress",
+		},
+		{
+			name: "in_review: a step is in_review",
+			steps: []any{
+				map[string]any{"status": "done"},
+				map[string]any{"status": "in_review"},
+			},
+			want: "in_review",
+		},
+		{
+			name: "blocked: any blocked step beats in_review",
+			steps: []any{
+				map[string]any{"status": "blocked"},
+				map[string]any{"status": "in_review"},
+			},
+			want: "blocked",
+		},
+		{
+			name: "pr_ready: all steps done, no audit entry yet",
+			steps: []any{
+				map[string]any{"status": "done"},
+				map[string]any{"status": "done"},
+			},
+			hasAudit: false,
+			want:     "pr_ready",
+		},
+		{
+			name: "done: all steps done, matching audit entry exists",
+			steps: []any{
+				map[string]any{"status": "done"},
+				map[string]any{"status": "done"},
+			},
+			hasAudit: true,
+			want:     "done",
+		},
+		{
+			name: "override wins outright over step-derived status",
+			steps: []any{
+				map[string]any{"status": "pending"},
+			},
+			hasAudit: false,
+			override: "blocked",
+			want:     "blocked",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := map[string]any{"plan_steps": tt.steps}
+			if tt.override != "" {
+				data["phase_override"] = tt.override
+			}
+			got := ComputePlanStatus(data, tt.hasAudit)
+			if got != tt.want {
+				t.Errorf("ComputePlanStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPlanStatus_PersistedAfterMutations pins the persistence half of
+// DOTFILES-48: the plan's status field must be recomputed and written into
+// the plan's stored JSON at each of the 3 mutation points (UpdateStep,
+// WriteAudit, SetPlanPhase) rather than re-derived on every read. Today none
+// of the three writes a "status" field into the plan blob, so each assertion
+// below fails against current behavior.
+func TestPlanStatus_PersistedAfterMutations(t *testing.T) {
+	_, cleanup := setupTestDataDir(t)
+	defer cleanup()
+
+	registryInitProject(map[string]any{"name": "myproject"})
+	plan := map[string]any{
+		"ticket":  "TEST-STATUS-1",
+		"summary": "pins persisted status field",
+		"plan_steps": []any{
+			map[string]any{"title": "only step", "status": "pending"},
+		},
+	}
+	registryWritePlan(map[string]any{"name": "myproject", "ticket": "TEST-STATUS-1", "data": plan})
+
+	s, err := getStore()
+	if err != nil {
+		t.Fatalf("getStore: %v", err)
+	}
+
+	// 1. UpdateStep marks the only step done -> all steps done, no audit yet
+	// -> persisted status should become pr_ready.
+	if err := s.UpdateStep("myproject", "TEST-STATUS-1", 0, "done"); err != nil {
+		t.Fatalf("UpdateStep: %v", err)
+	}
+	data, err := s.GetPlan("myproject", "TEST-STATUS-1")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got, _ := data["status"].(string); got != "pr_ready" {
+		t.Errorf("after UpdateStep(done): want persisted status=pr_ready, got %q", got)
+	}
+
+	// 2. WriteAudit records a matching audit entry -> persisted status should
+	// flip from pr_ready to done.
+	registryWriteAudit(map[string]any{
+		"name": "myproject",
+		"entry": map[string]any{
+			"ticket":  "TEST-STATUS-1",
+			"type":    "feature",
+			"summary": "shipped it",
+		},
+	})
+	data, err = s.GetPlan("myproject", "TEST-STATUS-1")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got, _ := data["status"].(string); got != "done" {
+		t.Errorf("after WriteAudit: want persisted status=done, got %q", got)
+	}
+
+	// 3. SetPlanPhase overrides the plan to blocked -> persisted status must
+	// reflect the override, not the step/audit-derived done.
+	if err := s.SetPlanPhase("myproject", "TEST-STATUS-1", "blocked"); err != nil {
+		t.Fatalf("SetPlanPhase: %v", err)
+	}
+	data, err = s.GetPlan("myproject", "TEST-STATUS-1")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if got, _ := data["status"].(string); got != "blocked" {
+		t.Errorf("after SetPlanPhase(blocked): want persisted status=blocked, got %q", got)
+	}
+}
+
 func TestRegistryWritePlan_InvalidAsyncGrouping_RejectedAndNotPersisted(t *testing.T) {
 	_, cleanup := setupTestDataDir(t)
 	defer cleanup()
