@@ -616,12 +616,8 @@ func TestListIndex_PayloadCarriesNoHeavySubtrees(t *testing.T) {
 	}
 }
 
-// ── session-sourced proposals (DOTFILES-38 step 5) ───────────────────────────
+// ── agent_runs (DOTFILES-38) ─────────────────────────────────────────────────
 
-// An in-session proposal has no originating Slack message, so it has no
-// permalink. The NOT-EMPTY check must relax for source='session' ONLY —
-// widening it to slack would reintroduce queue rows with no way back to the
-// conversation, which is the reason the check exists.
 func TestCreateProposal_SessionSourceAllowsEmptyPermalink(t *testing.T) {
 	s := newTestStore(t)
 
@@ -683,17 +679,8 @@ func TestCreateProposal_SessionSourceStillDedups(t *testing.T) {
 	}
 }
 
-// ── UpdateStep concurrency (DOTFILES-35 step 2) ──────────────────────────────
+// ── atomic build claim (DOTFILES-35 step 1) ──────────────────────────────────
 
-// build-workflow.js runs async steps concurrently and each spawned subagent
-// calls registry_update_step independently. UpdateStep SELECTs the whole plan
-// blob, mutates it in Go, and UPDATEs it back — so without serialization the
-// last writer wins on the ENTIRE blob and other steps' statuses vanish.
-//
-// Demonstrated failing against the pre-fix code on 2026-09-01: 9 of 12 statuses
-// lost and 7 of 12 calls errored outright (no busy_timeout, so blocked writers
-// error instead of waiting). A test that passes against the broken code proves
-// nothing, so this one was verified to reproduce before the fix landed.
 func TestUpdateStep_ConcurrentUpdatesAllPersist(t *testing.T) {
 	s := newTestStore(t)
 
@@ -749,8 +736,6 @@ func TestUpdateStep_ConcurrentUpdatesAllPersist(t *testing.T) {
 // The step's status was being written into the PLAN's status column: marking
 // step 3 in_progress set the whole plan's status. Invisible only because
 // nothing reads that column (plan status is derived from step statuses).
-// ── agent_calls (DOTFILES-35 step 3) ─────────────────────────────────────────
-
 func sampleCall(project string, cost float64) *agentCall {
 	rid := int64(1)
 	return &agentCall{
@@ -845,12 +830,12 @@ func TestSumCostSince_IsGlobalAndZeroWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestPlanIsShipped_PhaseOverridePrecedence codifies planIsShipped's new
-// precedence rule (DOTFILES-47): when phase_override is set, it must
-// short-circuit the steps/hasAudit derivation entirely — 'done' always
-// means shipped, any other non-empty value always means not shipped,
-// regardless of what the steps or audit log say. An absent or empty
-// override must leave today's steps+audit behavior untouched.
+// TestClaimProposalForBuild_RefusesNonPlanKind pins the kind guard. Adding the
+// "registration" kind made approved non-plan proposals routine, and /lead build
+// with no id takes the newest approved proposal — which right after a
+// registration approval is the registration row, whose payload is not a plan.
+// Refusing in the store keeps the guard where the other claim guards live,
+// rather than in prompt prose that can drift.
 func TestPlanIsShipped_PhaseOverridePrecedence(t *testing.T) {
 	doneStep := map[string]any{"status": "done"}
 	pendingStep := map[string]any{"status": "pending"}
