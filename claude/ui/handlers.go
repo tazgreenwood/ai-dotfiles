@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"encoding/json"
 	"html/template"
 	"net/http"
 	"slices"
@@ -274,9 +275,43 @@ type planSummary struct {
 }
 
 type planData struct {
-	Breadcrumbs []breadcrumb
-	Plan        Plan
-	Columns     []planColumn
+	Breadcrumbs     []breadcrumb
+	Plan            Plan
+	Columns         []planColumn
+	EffectiveStatus string
+	PhaseOptions    []phaseOption
+}
+
+// phaseOption is one entry in the plan-detail phase_override <select>.
+type phaseOption struct {
+	Value    string
+	Label    string
+	Selected bool
+}
+
+// planPhases are the 6 valid phase_override values, in the order they're
+// offered in the plan-detail override <select> — must match validPlanPhases
+// in claude/mcp/server/registry.go.
+var planPhases = []struct{ Value, Label string }{
+	{"pending", "Pending"},
+	{"in_progress", "In Progress"},
+	{"in_review", "In Review/QA"},
+	{"pr_ready", "PR Ready"},
+	{"done", "Done"},
+	{"blocked", "Blocked"},
+}
+
+// buildPhaseOptions returns the "No override — automatic" option plus the 6
+// phase options, with whichever matches selected (the plan's current
+// effective status — its override if set, else the computed status) marked
+// Selected.
+func buildPhaseOptions(selected string) []phaseOption {
+	opts := make([]phaseOption, 0, len(planPhases)+1)
+	opts = append(opts, phaseOption{Value: "", Label: "No override — automatic", Selected: selected == ""})
+	for _, p := range planPhases {
+		opts = append(opts, phaseOption{Value: p.Value, Label: p.Label, Selected: selected == p.Value})
+	}
+	return opts
 }
 
 type planColumn struct {
@@ -496,16 +531,79 @@ func handlePlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	auditTickets, _ := AuditTicketSet(name)
+	effectiveStatus := derivePlanStatus(plan.PlanSteps, auditTickets[ticket], plan.PhaseOverride)
+
 	data := planData{
 		Breadcrumbs: []breadcrumb{
 			{Label: "Registry", URL: "/"},
 			{Label: name, URL: "/projects/" + name},
 			{Label: ticket},
 		},
-		Plan:    plan,
-		Columns: columns,
+		Plan:            plan,
+		Columns:         columns,
+		EffectiveStatus: effectiveStatus,
+		PhaseOptions:    buildPhaseOptions(effectiveStatus),
 	}
 	render(w, r, "plan.html", data)
+}
+
+// handleSetPlanPhase sets or clears a plan's phase_override via a
+// read-merge-write against the plans row's JSON data column — the UI daemon
+// shares registry.db with the MCP server, so it can do this directly rather
+// than round-tripping through registry_set_plan_phase. An empty "phase" form
+// value clears the override; any other value is stored verbatim (the
+// <select> only ever offers the 6 valid phases, so no separate validation
+// here mirrors the MCP tool's — a stray direct POST with a bogus value just
+// stores a phase_override the Kanban/derive logic won't recognize as
+// special-cased, which is a no-op for now and can be tightened later).
+func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	ticket := r.PathValue("ticket")
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	phase := r.FormValue("phase")
+
+	db, err := openDB()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
+	var raw string
+	if err := db.QueryRow(
+		`SELECT data FROM plans WHERE project = ? AND ticket = ?`, name, ticket,
+	).Scan(&raw); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if phase == "" {
+		delete(data, "phase_override")
+	} else {
+		data["phase_override"] = phase
+	}
+	updated, err := json.Marshal(data)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if _, err := db.Exec(
+		`UPDATE plans SET data = ? WHERE project = ? AND ticket = ?`, string(updated), name, ticket,
+	); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/projects/"+name+"/plans/"+ticket, http.StatusSeeOther)
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {

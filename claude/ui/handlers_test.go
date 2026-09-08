@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -670,5 +671,160 @@ func TestGetAudit_WithQueryParams_FiltersResults(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("want 200, got %d", resp.StatusCode)
+	}
+}
+
+// ── POST /projects/{name}/plans/{ticket}/phase (DOTFILES-47) ────────────────
+
+func TestGetPlan_RendersPhaseOverrideControl_DefaultsToComputedStatus(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":     "TICKET-1",
+		"summary":    "Test plan",
+		"plan_steps": []map[string]any{{"step": 1, "status": "done"}},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/projects/existing/plans/TICKET-1")
+	if err != nil {
+		t.Fatalf("GET plan: %v", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	body := string(b)
+
+	if !strings.Contains(body, `action="/projects/existing/plans/TICKET-1/phase"`) {
+		t.Fatalf("expected phase override form action, got:\n%s", body)
+	}
+	if !strings.Contains(body, `<label for="phase-override"`) {
+		t.Errorf("expected labeled phase-override control, got:\n%s", body)
+	}
+	if !strings.Contains(body, `id="phase-override"`) || !strings.Contains(body, `name="phase"`) {
+		t.Errorf("expected select#phase-override[name=phase], got:\n%s", body)
+	}
+	// No override set — plan has all steps done and no audit entry, so the
+	// computed effective status is pr_ready, and the state text must say so
+	// rather than "Automatic" alone leaving the value ambiguous.
+	if !strings.Contains(body, "Automatic") {
+		t.Errorf("expected 'Automatic' state text when no override is set, got:\n%s", body)
+	}
+	if !strings.Contains(body, `value="pr_ready" selected`) {
+		t.Errorf("expected pr_ready option selected as the computed default, got:\n%s", body)
+	}
+}
+
+func TestSetPlanPhase_SetsOverride_RedirectsAndPersists(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":     "TICKET-1",
+		"summary":    "Test plan",
+		"plan_steps": []map[string]any{{"step": 1, "status": "done"}},
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.PostForm(ts.URL+"/projects/existing/plans/TICKET-1/phase", url.Values{
+		"phase": {"blocked"},
+	})
+	if err != nil {
+		t.Fatalf("POST phase: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("want 303, got %d", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/projects/existing/plans/TICKET-1" {
+		t.Errorf("want redirect to plan detail page, got %q", loc)
+	}
+
+	plan, err := ReadPlan("existing", "TICKET-1")
+	if err != nil {
+		t.Fatalf("ReadPlan: %v", err)
+	}
+	if plan.PhaseOverride != "blocked" {
+		t.Errorf("want phase_override 'blocked', got %q", plan.PhaseOverride)
+	}
+
+	// The plan page itself reflects the override applied, not the computed
+	// status, and shows it as text rather than only a color.
+	page, err := http.Get(ts.URL + "/projects/existing/plans/TICKET-1")
+	if err != nil {
+		t.Fatalf("GET plan after set: %v", err)
+	}
+	defer page.Body.Close()
+	b, _ := io.ReadAll(page.Body)
+	body := string(b)
+	if !strings.Contains(body, "Override: blocked") {
+		t.Errorf("expected 'Override: blocked' state text, got:\n%s", body)
+	}
+	if !strings.Contains(body, `value="blocked" selected`) {
+		t.Errorf("expected blocked option selected, got:\n%s", body)
+	}
+}
+
+func TestSetPlanPhase_EmptyValueClearsOverride(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":         "TICKET-1",
+		"summary":        "Test plan",
+		"plan_steps":     []map[string]any{{"step": 1, "status": "pending"}},
+		"phase_override": "blocked",
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.PostForm(ts.URL+"/projects/existing/plans/TICKET-1/phase", url.Values{
+		"phase": {""},
+	})
+	if err != nil {
+		t.Fatalf("POST phase clear: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("want 303, got %d", resp.StatusCode)
+	}
+
+	plan, err := ReadPlan("existing", "TICKET-1")
+	if err != nil {
+		t.Fatalf("ReadPlan: %v", err)
+	}
+	if plan.PhaseOverride != "" {
+		t.Errorf("want phase_override cleared, got %q", plan.PhaseOverride)
+	}
+	// Steps are all pending, so the computed status reverts to "pending".
+	page, err := http.Get(ts.URL + "/projects/existing/plans/TICKET-1")
+	if err != nil {
+		t.Fatalf("GET plan after clear: %v", err)
+	}
+	defer page.Body.Close()
+	b, _ := io.ReadAll(page.Body)
+	body := string(b)
+	if !strings.Contains(body, "Automatic") {
+		t.Errorf("expected 'Automatic' state text after clearing, got:\n%s", body)
 	}
 }

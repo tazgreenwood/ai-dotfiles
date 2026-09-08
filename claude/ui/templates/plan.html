@@ -3,6 +3,8 @@
   <h1 class="text-2xl font-bold text-zinc-900 dark:text-zinc-50">{{.Plan.Ticket}} &mdash; {{.Plan.Summary}}</h1>
 </div>
 
+{{$breadcrumbProject := (index .Breadcrumbs 1).Label}}
+
 <div class="flex flex-wrap gap-6 text-sm text-zinc-500 dark:text-zinc-400 mb-10">
   {{if .Plan.Branch}}
   <div>
@@ -178,4 +180,23 @@
 })();
 </script>
 {{end}}
+
+<section class="mt-10 pt-6 border-t border-zinc-200/70 dark:border-zinc-800/70">
+  <div class="flex flex-wrap items-end gap-4">
+    <form method="post" action="/projects/{{$breadcrumbProject}}/plans/{{.Plan.Ticket}}/phase" class="flex items-end gap-2">
+      <div>
+        <label for="phase-override" class="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">Kanban phase</label>
+        <select id="phase-override" name="phase" class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-sm text-zinc-900 dark:text-zinc-100 px-2 py-1.5">
+          {{range .PhaseOptions}}
+          <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+          {{end}}
+        </select>
+      </div>
+      <button type="submit" class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-3 py-1.5 text-sm font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700">Apply</button>
+    </form>
+    <p class="text-sm text-zinc-500 dark:text-zinc-400">
+      {{if .Plan.PhaseOverride}}Override: {{.Plan.PhaseOverride}}{{else}}Automatic ({{.EffectiveStatus}}){{end}}
+    </p>
+  </div>
+</section>
 {{end}}
