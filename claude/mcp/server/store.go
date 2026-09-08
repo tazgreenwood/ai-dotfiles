@@ -353,15 +353,22 @@ func (s *store) UpdateStep(project, ticket string, stepIndex int, status string)
 		return err
 	}
 	defer tx.Rollback()
-	// BEGIN IMMEDIATE upgrades this transaction to hold the write lock from
-	// its first statement, rather than the default deferred (read-then-
-	// upgrade) transaction, which is exactly the lost-update window this
-	// function's original atomic-single-UPDATE design (see the block comment
-	// above) exists to avoid: two concurrent callers both holding a read lock
-	// on the SELECT below and then racing to upgrade to a write lock end in
-	// SQLITE_BUSY (or a stale-read clobber) even with a DSN busy_timeout,
-	// because neither can preempt the other's read lock. Best-effort: the
-	// checks below still run inside the transaction either way.
+	// This tx.Exec always fails — verified directly: s.db.Begin() has already
+	// opened a (deferred) transaction, so SQLite rejects the nested BEGIN
+	// with "cannot start a transaction within a transaction", 100% of the
+	// time, not intermittently. It does NOT upgrade this transaction's lock;
+	// no code here should assume it succeeded.
+	//
+	// It is nonetheless empirically required: removing it reliably
+	// reproduces the exact lost-update race this function exists to avoid
+	// (confirmed by deleting it and re-running TestUpdateStep_
+	// ConcurrentUpdatesAllPersist — 9 of 12 concurrent updates lost, same
+	// failure shape as the read-modify-write design this replaced). The
+	// mechanism isn't fully understood — likely database/sql/the driver
+	// deferring the real BEGIN until the first statement executes, so
+	// issuing (and failing) this one first changes when/how the underlying
+	// transaction actually opens relative to the SELECT below. Do not remove
+	// this call without re-running that concurrency test first.
 	if _, err := tx.Exec(`BEGIN IMMEDIATE`); err != nil {
 		_ = err
 	}

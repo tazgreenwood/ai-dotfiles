@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"html/template"
@@ -675,15 +676,33 @@ func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	if phase == "" {
-		// Clearing an override can't recompute the correct persisted status
-		// here without ComputePlanStatus (claude/mcp/server/store.go, a
-		// separate go.mod module) — left as the documented follow-up
-		// (DOTFILES-48). The plan's status field is left as-is; the next
-		// real mutation through the MCP tool (UpdateStep/WriteAudit/
-		// SetPlanPhase) recomputes and persists the correct value.
+		// Clearing an override must also recompute the persisted status from
+		// steps+audit — read-time re-derivation (derivePlanStatus) is gone,
+		// so leaving the stale override value in $.status would show a wrong
+		// Kanban column indefinitely (nothing else corrects it). Read the
+		// plan's current steps and audit-entry existence inside this same
+		// transaction (mirroring store.go's hasAuditEntryTx) so the compute
+		// sees a consistent snapshot alongside the write it commits with.
+		var raw string
+		if err := tx.QueryRow(`SELECT data FROM plans WHERE project = ? AND ticket = ?`, name, ticket).Scan(&raw); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		var planData map[string]any
+		if err := json.Unmarshal([]byte(raw), &planData); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		steps, _ := planData["plan_steps"].([]any)
+		hasAudit, err := hasAuditEntryInTx(tx, name, ticket)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		newStatus := computeStatusFromSteps(steps, hasAudit)
 		_, err = tx.Exec(
-			`UPDATE plans SET data = json_remove(data, '$.phase_override') WHERE project = ? AND ticket = ?`,
-			name, ticket,
+			`UPDATE plans SET data = json_set(json_remove(data, '$.phase_override'), '$.status', ?) WHERE project = ? AND ticket = ?`,
+			newStatus, name, ticket,
 		)
 	} else {
 		// Setting a non-empty override is always safe to mirror onto the
@@ -719,6 +738,82 @@ func handleSetPlanPhase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/projects/"+name+"/plans/"+ticket, http.StatusSeeOther)
+}
+
+// hasAuditEntryInTx reports whether project has at least one audit entry
+// whose "ticket" field matches ticket, read within tx so it sees a
+// consistent snapshot alongside the plan write handleSetPlanPhase commits
+// with. Mirrors claude/mcp/server/store.go's hasAuditEntryTx — kept as a
+// separate copy rather than a shared import because the two are different
+// go.mod modules (DOTFILES-48 follow-up).
+func hasAuditEntryInTx(tx *sql.Tx, project, ticket string) (bool, error) {
+	rows, err := tx.Query(`SELECT data FROM audit WHERE project = ?`, project)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			return false, err
+		}
+		if t, _ := entry["ticket"].(string); t == ticket {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// computeStatusFromSteps mirrors claude/mcp/server/store.go's
+// ComputePlanStatus precedence (blocked > in_review > in_progress/partial >
+// pr_ready/done > pending), for the one write path — clearing a phase
+// override — that must recompute status without going through the MCP
+// server. Used only here; every other read path in this package reads the
+// persisted status field directly rather than re-deriving it (DOTFILES-48).
+func computeStatusFromSteps(steps []any, hasAudit bool) string {
+	anyBlocked, anyInReview, anyInProgress, anyDone := false, false, false, false
+	allDone := len(steps) > 0
+	for _, raw := range steps {
+		step, ok := raw.(map[string]any)
+		if !ok {
+			allDone = false
+			continue
+		}
+		status, _ := step["status"].(string)
+		switch status {
+		case "blocked":
+			anyBlocked = true
+		case "in_review":
+			anyInReview = true
+		case "in_progress":
+			anyInProgress = true
+		case "done":
+			anyDone = true
+		}
+		if status != "done" {
+			allDone = false
+		}
+	}
+	switch {
+	case anyBlocked:
+		return "blocked"
+	case anyInReview:
+		return "in_review"
+	case anyInProgress || (anyDone && !allDone):
+		return "in_progress"
+	case allDone:
+		if hasAudit {
+			return "done"
+		}
+		return "pr_ready"
+	default:
+		return "pending"
+	}
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {

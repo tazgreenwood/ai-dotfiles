@@ -833,6 +833,59 @@ func TestSetPlanPhase_EmptyValueClearsOverride(t *testing.T) {
 	}
 }
 
+// TestSetPlanPhase_ClearingOverride_RecomputesPersistedStatus guards the
+// REJECTED-review MAJOR finding: TestSetPlanPhase_EmptyValueClearsOverride's
+// fixture never sets "status" at all, so it can't catch a clear leaving the
+// stale override value sitting in $.status forever (read-time re-derivation
+// is gone — DOTFILES-48 — so nothing else self-corrects it). This fixture
+// mirrors what a real override-set row actually looks like: status mirrors
+// the override, same as handleSetPlanPhase's set-branch persists it.
+func TestSetPlanPhase_ClearingOverride_RecomputesPersistedStatus(t *testing.T) {
+	dir, cleanup := setupFixtureDir(t)
+	defer cleanup()
+
+	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
+	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
+		"ticket":         "TICKET-1",
+		"summary":        "Test plan",
+		"plan_steps":     []map[string]any{{"step": 1, "status": "pending"}},
+		"phase_override": "blocked",
+		"status":         "blocked",
+	})
+
+	ts := newTestServer(t, dir)
+	defer ts.Close()
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.PostForm(ts.URL+"/projects/existing/plans/TICKET-1/phase", url.Values{
+		"phase": {""},
+	})
+	if err != nil {
+		t.Fatalf("POST phase clear: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("want 303, got %d", resp.StatusCode)
+	}
+
+	plan, err := ReadPlan("existing", "TICKET-1")
+	if err != nil {
+		t.Fatalf("ReadPlan: %v", err)
+	}
+	if plan.PhaseOverride != "" {
+		t.Errorf("want phase_override cleared, got %q", plan.PhaseOverride)
+	}
+	// All steps are still pending with no audit entry — the recomputed
+	// status must revert to "pending", not stay "blocked" from the override.
+	if plan.Status != "pending" {
+		t.Errorf("want persisted status recomputed to 'pending' after clearing override, got %q — stale override value left behind", plan.Status)
+	}
+}
+
 // TestSetPlanPhase_InvalidPhase_RejectedNotSilentlyStored guards the
 // BLOCKER a code review caught: a phase_override value outside the 6 valid
 // phases isn't recognized by any Kanban column and makes the plan's card
