@@ -682,8 +682,13 @@ func TestGetPlan_RendersPhaseOverrideControl_DefaultsToComputedStatus(t *testing
 
 	seedProject(t, dir, "existing", map[string]any{"name": "existing"})
 	seedPlan(t, dir, "existing", "TICKET-1", map[string]any{
-		"ticket":     "TICKET-1",
-		"summary":    "Test plan",
+		"ticket":  "TICKET-1",
+		"summary": "Test plan",
+		// "status" mirrors what ComputePlanStatus (claude/mcp/server/store.go)
+		// would have persisted at write time for an all-done plan with no
+		// audit entry yet — the plan page now reads this field directly
+		// rather than deriving it from plan_steps on every read (DOTFILES-48).
+		"status":     "pr_ready",
 		"plan_steps": []map[string]any{{"step": 1, "status": "done"}},
 	})
 
@@ -707,9 +712,8 @@ func TestGetPlan_RendersPhaseOverrideControl_DefaultsToComputedStatus(t *testing
 	if !strings.Contains(body, `id="phase-override"`) || !strings.Contains(body, `name="phase"`) {
 		t.Errorf("expected select#phase-override[name=phase], got:\n%s", body)
 	}
-	// No override set — plan has all steps done and no audit entry, so the
-	// computed effective status is pr_ready, and the state text must say so
-	// rather than "Automatic" alone leaving the value ambiguous.
+	// No override set — the persisted status is pr_ready, and the state text
+	// must say so rather than "Automatic" alone leaving the value ambiguous.
 	if !strings.Contains(body, "Automatic") {
 		t.Errorf("expected 'Automatic' state text when no override is set, got:\n%s", body)
 	}
