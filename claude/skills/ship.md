@@ -85,7 +85,11 @@ Pass:
 - Reviewer output (for PR body)
 - Documenter status
 
-After @handover completes, update mission state with `pr_id` and `pr_url`.
+After @handover completes, update mission state with `pr_id` and `pr_url`. **`registry_write_plan` replaces the entire plan document — never build a fresh object.** Take the exact plan object loaded in STEP 1, set `pr_id` and `pr_url` on that same object (leaving `plan_steps`, `acceptance_criteria`, `expected_pr`, etc. untouched), and pass the whole modified object back:
+```
+registry_write_plan(project_name, ticket_key, { ...mission_state, pr_id: pr_id, pr_url: pr_url })
+```
+A write that drops `plan_steps` silently breaks `planIsShipped` (store.go) and the dashboard Kanban's `pr_ready`/`done` derivation for that plan going forward — this has happened before (ONE-24095-FE, ONE-25533, recovered 2026-09-08 from session transcripts since no other copy existed).
 
 Write the PR URL to registry so future sessions can reference it without querying Bitbucket:
 ```
