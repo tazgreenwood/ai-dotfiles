@@ -57,14 +57,15 @@ Run `investigate.md`'s flow start to finish (it already asks Taz at the end whet
 
 Run `plan.md` → `build.md` → `ship.md` in sequence, in this same checkout (no isolation step of your own — if Taz wanted a separate worktree he'd have opened one before handing you the task). `plan.md` allocates the ticket key itself (real JIRA or auto-generated fake), so there's nothing to ask about ticketing here.
 
-**`plan.md` has its own built-in checkpoints — don't paper over them, and don't duplicate them either:** it may ask clarifying questions (its STEP 4) and it always requires Taz to explicitly approve the plan before it writes mission state (its STEP 7 — "go", "looks good", etc.). That's a real checkpoint, not optional, and it happens before `build.md` ever starts. Ping Slack for it too, always — same rule as every other checkpoint below.
+**`plan.md` has its own built-in checkpoints — don't paper over them, and don't duplicate them either:** it may ask clarifying questions (its STEP 4), and it always requires Taz to explicitly approve the plan before it writes mission state (its STEP 7 — "go", "looks good", etc.). That's a real checkpoint, not optional, and it happens before `build.md` ever starts.
 
-Beyond that, stop, ask Taz, and ping Slack only at:
-- a genuine build-time ambiguity `build.md`'s developer/QA loop can't resolve on its own
-- `ship.md`'s security or reviewer gate coming back BLOCKED/REJECTED — surface the findings, ask fix-or-ship-anyway, same as those skills already require
-- the final PR/merge being ready
+Stop, ask Taz, and ping Slack at each of these — STEP 7 plan-ready is the first one, not an afterthought to the other three:
+1. **`plan.md` STEP 7 — plan drafted, awaiting Taz's approval before it writes mission state.** Ping the moment the plan is shown, before waiting on Taz's reply.
+2. a genuine build-time ambiguity `build.md`'s developer/QA loop can't resolve on its own
+3. `ship.md`'s security or reviewer gate coming back BLOCKED/REJECTED — surface the findings, ask fix-or-ship-anyway, same as those skills already require
+4. the final PR/merge being ready
 
-Once the plan is approved, run `build.md` → `ship.md` without checking in beyond those three.
+Once the plan is approved, run `build.md` → `ship.md` without checking in beyond items 2-4.
 
 ### Planning / design only — Taz wants a plan or approach, not committed build work
 
